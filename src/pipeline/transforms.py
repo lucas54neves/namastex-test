@@ -1,0 +1,416 @@
+from __future__ import annotations
+
+import json
+import re
+import unicodedata
+from collections.abc import Iterable
+
+import pandas as pd
+
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+PHONE_PATTERN = re.compile(r"(?:\+55\s?)?(?:\(?\d{2}\)?\s?)?(?:9?\d{4})-?\d{4}")
+CPF_PATTERN = re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
+CEP_PATTERN = re.compile(r"\b\d{5}-?\d{3}\b")
+PLATE_PATTERN = re.compile(r"\b[A-Z]{3}[0-9][A-Z0-9][0-9]{2}\b", re.IGNORECASE)
+YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
+PRICE_PATTERN = re.compile(r"r\$\s?(\d[\d.]*(?:,\d{2})?)", re.IGNORECASE)
+COMPETITOR_PATTERNS = {
+    "porto_seguro": re.compile(r"\bporto seguro\b", re.IGNORECASE),
+    "azul_seguros": re.compile(r"\bazul(?: seguros)?\b", re.IGNORECASE),
+    "bradesco_seguros": re.compile(r"\bbradesco seguros\b", re.IGNORECASE),
+    "sulamerica": re.compile(r"\bsul\s?america\b", re.IGNORECASE),
+    "liberty_seguros": re.compile(r"\bliberty(?: seguros)?\b", re.IGNORECASE),
+    "allianz": re.compile(r"\ballianz\b", re.IGNORECASE),
+    "hdi_seguros": re.compile(r"\bhdi(?: seguros)?\b", re.IGNORECASE),
+}
+SINISTRO_PATTERNS = {
+    "enchente": re.compile(r"\benchente|alagamento\b", re.IGNORECASE),
+    "colisao": re.compile(r"\bbati\b|\bbatida\b|\bcolis[aã]o\b", re.IGNORECASE),
+    "roubo_furto": re.compile(r"\broubaram\b|\bfurto\b|\broubo\b", re.IGNORECASE),
+    "perda_total": re.compile(r"\bperda total\b", re.IGNORECASE),
+    "sinistro_generico": re.compile(r"\bsinistro\b", re.IGNORECASE),
+}
+VEHICLE_MAKES = (
+    "chevrolet",
+    "volkswagen",
+    "fiat",
+    "ford",
+    "toyota",
+    "honda",
+    "hyundai",
+    "jeep",
+    "renault",
+    "nissan",
+    "peugeot",
+    "citroen",
+    "mitsubishi",
+    "kia",
+    "bmw",
+    "mercedes",
+    "audi",
+    "volvo",
+    "byd",
+    "gwm",
+)
+VEHICLE_MODELS = (
+    "onix",
+    "gol",
+    "civic",
+    "hb20",
+    "corolla",
+    "compass",
+    "hr-v",
+    "hrv",
+    "kwid",
+    "208",
+    "toro",
+    "argo",
+    "mobi",
+    "creta",
+    "t cross",
+    "t-cross",
+    "nivus",
+    "tracker",
+    "pulse",
+    "kicks",
+)
+STATUS_PRIORITY = {"failed": 0, "sent": 1, "delivered": 2, "read": 3}
+
+
+def _normalize_ascii(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    return normalized.encode("ascii", errors="ignore").decode("ascii")
+
+
+def _normalize_for_match(value: str) -> str:
+    normalized = _normalize_ascii(value).lower()
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _mask_digits(raw: str) -> str:
+    return "".join("X" if char.isdigit() else char for char in raw)
+
+
+def _mask_email(raw: str) -> str:
+    return re.sub(r"[A-Za-z0-9]", "x", raw)
+
+
+def _mask_alpha_numeric(raw: str) -> str:
+    masked = []
+    for char in raw:
+        if char.isalpha():
+            masked.append("X")
+        elif char.isdigit():
+            masked.append("9")
+        else:
+            masked.append(char)
+    return "".join(masked)
+
+
+def _mask_name_token(raw: str) -> str:
+    return "".join("X" if char.isalpha() else char for char in raw)
+
+
+def _safe_string(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return str(value)
+
+
+def load_bronze_frame(source_path: str) -> pd.DataFrame:
+    df = pd.read_parquet(source_path).copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    return df
+
+
+def parse_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    metadata = df["metadata"].map(json.loads)
+    metadata_df = pd.json_normalize(metadata)
+    metadata_df.columns = [f"metadata_{column}" for column in metadata_df.columns]
+    return pd.concat([df.drop(columns=["metadata"]), metadata_df], axis=1)
+
+
+def mask_sender_name(name: object) -> str:
+    raw_name = _safe_string(name)
+    return "".join("X" if char.isalpha() else char for char in raw_name)
+
+
+def _mask_known_names(text: str, names: Iterable[str]) -> str:
+    masked = text
+    for name in names:
+        normalized = _normalize_for_match(name)
+        if not normalized or len(normalized) < 3:
+            continue
+        tokens = [token for token in normalized.split(" ") if len(token) >= 2]
+        if not tokens:
+            continue
+        pattern = re.compile(r"\b" + r"\s+".join(map(re.escape, tokens)) + r"\b", re.IGNORECASE)
+        masked = pattern.sub(lambda match: _mask_name_token(match.group(0)), masked)
+    return masked
+
+
+def mask_message_body(row: pd.Series) -> str:
+    text = _safe_string(row["message_body"])
+    masked = text
+    masked = EMAIL_PATTERN.sub(lambda match: _mask_email(match.group(0)), masked)
+    masked = CPF_PATTERN.sub(lambda match: _mask_digits(match.group(0)), masked)
+    masked = CEP_PATTERN.sub(lambda match: _mask_digits(match.group(0)), masked)
+    masked = PHONE_PATTERN.sub(lambda match: _mask_digits(match.group(0)), masked)
+    masked = PLATE_PATTERN.sub(lambda match: _mask_alpha_numeric(match.group(0).upper()), masked)
+    known_names = {
+        row.get("sender_name", ""),
+        row.get("conversation_lead_name", ""),
+        row.get("conversation_agent_name", ""),
+    }
+    masked = _mask_known_names(masked, known_names)
+    return masked
+
+
+def _extract_first(pattern: re.Pattern[str], text: str) -> str | None:
+    match = pattern.search(text)
+    return match.group(0) if match else None
+
+
+def _extract_competitor(text: str) -> str | None:
+    for competitor, pattern in COMPETITOR_PATTERNS.items():
+        if pattern.search(text):
+            return competitor
+    return None
+
+
+def _extract_sinistro_type(text: str, direction: str) -> str | None:
+    normalized = text.lower()
+    if direction != "inbound":
+        return None
+    if "cobertura" in normalized and "tive" not in normalized and "bati" not in normalized:
+        return None
+    for label, pattern in SINISTRO_PATTERNS.items():
+        if pattern.search(normalized):
+            return label
+    return None
+
+
+def _extract_vehicle_make(text: str) -> str | None:
+    normalized = _normalize_for_match(text)
+    for make in VEHICLE_MAKES:
+        if re.search(rf"\b{re.escape(make)}\b", normalized):
+            return make
+    return None
+
+
+def _extract_vehicle_model(text: str) -> str | None:
+    normalized = _normalize_for_match(text).replace("t cross", "t-cross")
+    for model in VEHICLE_MODELS:
+        normalized_model = model.replace(" ", "-")
+        if normalized_model in normalized:
+            return model
+    return None
+
+
+def _extract_vehicle_year(text: str) -> str | None:
+    raw_text = _safe_string(text)
+    normalized = _normalize_for_match(raw_text)
+    contextual_patterns = [
+        re.compile(r"\bano\s+(19\d{2}|20\d{2})\b", re.IGNORECASE),
+        re.compile(r"\b(19\d{2}|20\d{2})/(19\d{2}|20\d{2})\b", re.IGNORECASE),
+    ]
+    for pattern in contextual_patterns:
+        match = pattern.search(normalized)
+        if match:
+            return match.group(1)
+    if (
+        _extract_vehicle_make(raw_text)
+        or _extract_vehicle_model(raw_text)
+        or PLATE_PATTERN.search(raw_text)
+    ):
+        match = YEAR_PATTERN.search(normalized)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_price(text: str) -> float | None:
+    match = PRICE_PATTERN.search(text)
+    if not match:
+        return None
+    raw_value = match.group(1).replace(".", "").replace(",", ".")
+    try:
+        return float(raw_value)
+    except ValueError:
+        return None
+
+
+def deduplicate_events(df: pd.DataFrame) -> pd.DataFrame:
+    dedupe_keys = [
+        "conversation_id",
+        "timestamp",
+        "direction",
+        "sender_phone",
+        "message_type",
+        "message_body",
+    ]
+    ranked = df.copy()
+    ranked["status_priority"] = ranked["status"].map(STATUS_PRIORITY).fillna(-1).astype(int)
+    ranked["duplicate_event_group_size"] = ranked.groupby(dedupe_keys, dropna=False)[
+        "message_id"
+    ].transform("size")
+    ranked["had_status_duplication"] = ranked["duplicate_event_group_size"].gt(1)
+    ranked = ranked.sort_values(
+        ["conversation_id", "timestamp", "status_priority", "message_id"],
+        ascending=[True, True, False, True],
+    )
+    deduped = ranked.drop_duplicates(subset=dedupe_keys, keep="first").copy()
+    deduped["dropped_duplicate_events"] = deduped["duplicate_event_group_size"] - 1
+    return deduped.drop(columns=["status_priority"]).reset_index(drop=True)
+
+
+def add_conversation_context(df: pd.DataFrame) -> pd.DataFrame:
+    enriched = df.copy()
+    lead_name = (
+        enriched["sender_name"]
+        .where(enriched["direction"].eq("inbound"))
+        .groupby(enriched["conversation_id"])
+        .transform("first")
+        .fillna("")
+    )
+    agent_name = (
+        enriched["sender_name"]
+        .where(enriched["direction"].eq("outbound"))
+        .groupby(enriched["conversation_id"])
+        .transform("first")
+        .fillna("")
+    )
+    enriched["conversation_lead_name"] = lead_name
+    enriched["conversation_agent_name"] = agent_name
+    return enriched
+
+
+def add_message_signals(df: pd.DataFrame) -> pd.DataFrame:
+    message_body = df["message_body"].fillna("")
+    normalized_name = df["sender_name"].fillna("").map(_normalize_for_match)
+
+    enriched = df.copy()
+    enriched["sender_name_normalized"] = normalized_name
+    enriched["sender_name_masked"] = enriched["sender_name"].map(mask_sender_name)
+    enriched["sender_phone_masked"] = enriched["sender_phone"].map(_mask_digits)
+    enriched["message_body_masked"] = enriched.apply(mask_message_body, axis=1)
+    enriched["message_length"] = message_body.str.len()
+    enriched["word_count"] = message_body.str.split().str.len()
+    enriched["is_empty_message"] = message_body.str.strip().eq("")
+    enriched["contains_email"] = message_body.str.contains(EMAIL_PATTERN, na=False)
+    enriched["contains_phone"] = message_body.str.contains(PHONE_PATTERN, na=False)
+    enriched["contains_cpf"] = message_body.str.contains(CPF_PATTERN, na=False)
+    enriched["contains_cep"] = message_body.str.contains(CEP_PATTERN, na=False)
+    enriched["contains_plate"] = message_body.str.contains(PLATE_PATTERN, na=False)
+    enriched["vehicle_year"] = message_body.map(_extract_vehicle_year)
+    enriched["vehicle_make"] = message_body.map(_extract_vehicle_make)
+    enriched["vehicle_model"] = message_body.map(_extract_vehicle_model)
+    enriched["competitor_mentioned"] = message_body.map(_extract_competitor)
+    enriched["quoted_price"] = message_body.map(_extract_price)
+    enriched["sinistro_type"] = [
+        _extract_sinistro_type(text, direction)
+        for text, direction in zip(message_body, enriched["direction"], strict=False)
+    ]
+    enriched["mentions_vehicle"] = (
+        enriched["vehicle_make"].notna()
+        | enriched["vehicle_model"].notna()
+        | enriched["vehicle_year"].notna()
+        | enriched["contains_plate"]
+    )
+    enriched["mentions_competitor"] = enriched["competitor_mentioned"].notna()
+    enriched["mentions_sinistro"] = enriched["sinistro_type"].notna()
+    return enriched
+
+
+def build_silver(df: pd.DataFrame) -> pd.DataFrame:
+    silver = parse_metadata(df)
+    silver = add_conversation_context(silver)
+    silver = deduplicate_events(silver)
+    silver = add_message_signals(silver)
+    silver["is_inbound"] = silver["direction"].eq("inbound")
+    silver["is_outbound"] = silver["direction"].eq("outbound")
+    return silver.sort_values(["conversation_id", "timestamp", "message_id"]).reset_index(drop=True)
+
+
+def build_gold(silver: pd.DataFrame) -> pd.DataFrame:
+    grouped = silver.groupby("conversation_id", dropna=False)
+    gold = grouped.agg(
+        started_at=("timestamp", "min"),
+        ended_at=("timestamp", "max"),
+        campaign_id=("campaign_id", "first"),
+        agent_id=("agent_id", "first"),
+        conversation_outcome=("conversation_outcome", "last"),
+        total_messages=("message_id", "count"),
+        inbound_messages=("is_inbound", "sum"),
+        outbound_messages=("is_outbound", "sum"),
+        non_text_messages=("message_type", lambda values: int((values != "text").sum())),
+        duplicate_events_removed=("dropped_duplicate_events", "sum"),
+        contains_email=("contains_email", "max"),
+        contains_phone=("contains_phone", "max"),
+        contains_cpf=("contains_cpf", "max"),
+        contains_cep=("contains_cep", "max"),
+        contains_plate=("contains_plate", "max"),
+        mentioned_vehicle=("mentions_vehicle", "max"),
+        mentioned_competitor=("mentions_competitor", "max"),
+        mentioned_sinistro=("mentions_sinistro", "max"),
+        primary_competitor=("competitor_mentioned", "first"),
+        avg_response_time_sec=("metadata_response_time_sec", "mean"),
+        avg_quoted_price=("quoted_price", "mean"),
+        city=("metadata_city", "first"),
+        state=("metadata_state", "first"),
+        lead_source=("metadata_lead_source", "first"),
+        lead_name_masked=(
+            "conversation_lead_name",
+            lambda values: mask_sender_name(values.iloc[0]),
+        ),
+    ).reset_index()
+
+    vehicle_context = (
+        silver.loc[
+            silver["mentions_vehicle"],
+            ["conversation_id", "vehicle_make", "vehicle_model", "vehicle_year"],
+        ]
+        .groupby("conversation_id", dropna=False)
+        .agg(
+            vehicle_make=("vehicle_make", "first"),
+            vehicle_model=("vehicle_model", "first"),
+            vehicle_year=("vehicle_year", "first"),
+        )
+        .reset_index()
+    )
+    sinistro_context = (
+        silver.loc[silver["mentions_sinistro"], ["conversation_id", "sinistro_type"]]
+        .groupby("conversation_id", dropna=False)
+        .agg(primary_sinistro_type=("sinistro_type", "first"))
+        .reset_index()
+    )
+
+    gold = gold.merge(vehicle_context, on="conversation_id", how="left")
+    gold = gold.merge(sinistro_context, on="conversation_id", how="left")
+    gold["conversation_duration_min"] = (
+        (gold["ended_at"] - gold["started_at"]).dt.total_seconds() / 60.0
+    ).fillna(0.0)
+    gold["engagement_bucket"] = pd.cut(
+        gold["total_messages"],
+        bins=[0, 4, 10, 20, float("inf")],
+        labels=["lead_frio", "curta", "media", "longa"],
+        right=True,
+    ).astype("string")
+    gold["data_shared_score"] = (
+        gold[
+            [
+                "contains_email",
+                "contains_phone",
+                "contains_cpf",
+                "contains_cep",
+                "contains_plate",
+            ]
+        ]
+        .astype(int)
+        .sum(axis=1)
+    )
+    return gold.sort_values("conversation_id").reset_index(drop=True)
