@@ -92,9 +92,12 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     result = run_pipeline(paths, force=True)
 
     report = json.loads(Path(result.validation_report_path).read_text(encoding="utf-8"))
+    alert_report = json.loads(Path(result.alert_report_path).read_text(encoding="utf-8"))
     assert result.status == "success"
     assert report["status"] == "passed"
     assert report["row_counts"] == {"bronze": 2, "silver": 2, "gold": 1}
+    assert alert_report["event"]["severity"] == "info"
+    assert alert_report["event"]["should_alert"] is False
 
 
 def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, monkeypatch) -> None:
@@ -116,8 +119,10 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
     second = run_pipeline(paths, force=True)
 
     agent_report = json.loads(Path(second.agent_report_path).read_text(encoding="utf-8"))
+    alert_report = json.loads(Path(second.alert_report_path).read_text(encoding="utf-8"))
     assert second.status == "fallback_to_last_successful"
     assert agent_report["fallback"]["applied"] is True
+    assert alert_report["event"]["should_alert"] is True
 
 
 def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
@@ -152,6 +157,8 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
     result = run_pipeline(paths, force=True)
 
     agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
+    alert_report = json.loads(Path(result.alert_report_path).read_text(encoding="utf-8"))
     assert result.status == "success_after_auto_remediation"
     assert agent_report["status"] == "auto_remediated"
     assert agent_report["auto_remediation"]["applied"] is True
+    assert alert_report["event"]["should_alert"] is False

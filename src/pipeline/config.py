@@ -14,6 +14,7 @@ class PipelinePaths:
     gold: Path
     reports: Path
     monitoring: Path
+    alerts: Path
     state: Path
     raw_bronze_source: Path
 
@@ -30,6 +31,7 @@ def build_paths(root: Path | None = None) -> PipelinePaths:
         gold=data / "gold",
         reports=base / "reports",
         monitoring=base / "reports" / "monitoring",
+        alerts=base / "reports" / "alerts",
         state=base / "state",
         raw_bronze_source=base / "docs" / "conversations_bronze.parquet",
     )
@@ -43,6 +45,7 @@ def ensure_directories(paths: PipelinePaths) -> None:
         paths.gold,
         paths.reports,
         paths.monitoring,
+        paths.alerts,
         paths.state,
     ):
         directory.mkdir(parents=True, exist_ok=True)

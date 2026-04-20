@@ -34,6 +34,7 @@ Este repositório contém a base inicial do teste técnico de Data & AI Engineer
 - Snapshot de monitoramento do último run
 - Camada agêntica para classificar falhas, sugerir correção e aplicar remediação segura quando possível
 - Fallback operacional para o último estado bem-sucedido em caso de erro inesperado
+- Alertas ativos com geração de incidente local e entrega opcional por webhook
 - Testes automatizados para mascaramento, deduplicação, qualidade e runner incremental
 
 ## Estrutura atual
@@ -41,6 +42,7 @@ Este repositório contém a base inicial do teste técnico de Data & AI Engineer
 ```text
 src/pipeline/
   agent.py
+  alerts.py
   config.py
   io.py
   jobs.py
@@ -59,6 +61,7 @@ data/
   gold/
 
 reports/
+  alerts/
   bronze_profile.json
   monitoring/
 
@@ -67,6 +70,7 @@ state/
 
 tests/
   test_agent.py
+  test_alerts.py
   test_jobs.py
   test_quality.py
   test_transforms.py
@@ -82,6 +86,12 @@ venv/bin/python scripts/run_pipeline.py
 venv/bin/python scripts/run_pipeline.py --force
 venv/bin/python scripts/monitor_pipeline.py
 venv/bin/pytest -q
+```
+
+Para habilitar entrega externa por webhook:
+
+```bash
+export PIPELINE_ALERT_WEBHOOK_URL="https://seu-endpoint-de-alerta"
 ```
 
 Para instalar os hooks locais:
@@ -101,6 +111,9 @@ Os hooks de `mypy` e `pytest` usam ambientes Python isolados gerenciados pelo pr
 - Profiling: `reports/bronze_profile.json`
 - Monitoramento: `reports/monitoring/latest_run_report.json`
 - Relatório agêntico: `reports/monitoring/latest_agent_report.json`
+- Relatório de alerta: `reports/monitoring/latest_alert_report.json`
+- Incidentes persistidos: `reports/alerts/*.json`
+- Histórico de alertas: `reports/alerts/alert_history.json`
 - Estado: `state/pipeline_state.json`
 
 ## Estado atual das camadas
@@ -210,6 +223,27 @@ Status operacionais possíveis no relatório agêntico:
 - `manual_intervention_required`
 - `idle_no_source_change`
 
+## Alertas ativos
+
+O pipeline agora transforma o resultado agêntico em um evento de alerta a cada execução.
+
+- Sempre persiste um incidente local em `reports/alerts/`
+- Mantém histórico append-only em `reports/alerts/alert_history.json`
+- Calcula severidade por status agêntico:
+  - `info` para `healthy` e `idle_no_source_change`
+  - `warning` para `auto_remediated`
+  - `high` para `degraded_validation_failed` e `fallback_applied`
+  - `critical` para `manual_intervention_required`
+- Só tenta entrega externa quando o status agêntico exige atenção operacional
+- A entrega externa é opcional e usa `PIPELINE_ALERT_WEBHOOK_URL`
+
+Estado validado no último run real:
+
+- severidade do alerta: `info`
+- `should_alert`: `false`
+- entrega externa: não tentada, porque o status agêntico foi `healthy`
+- incidentes persistidos até agora: `1`
+
 ## Testes automatizados
 
 A suíte atual cobre:
@@ -224,6 +258,8 @@ A suíte atual cobre:
 - diagnóstico agêntico de falhas conhecidas
 - auto-remediação da Gold após validação inválida
 - fallback para último estado bem-sucedido após erro em runtime
+- geração de alertas com severidade correta
+- persistência de incidente e histórico de alertas
 
 ## Observações técnicas
 
@@ -236,6 +272,7 @@ A suíte atual cobre:
 - O fingerprint incremental usa metadados do arquivo-fonte. Para produção, o ideal é evoluir para controle por partição, watermark ou checksum por lote.
 - As validações atuais priorizam confiabilidade estrutural e riscos óbvios; ainda há espaço para checks de distribuição, drift e anomalias de negócio.
 - A camada agêntica ainda usa um conjunto fechado de diagnósticos e remediações seguras. Ela não reescreve código nem altera regras do pipeline de forma autônoma.
+- A entrega externa por webhook é best-effort. Em caso de falha de rede ou endpoint, o incidente continua preservado localmente.
 
 ## Próximos passos
 
@@ -244,5 +281,7 @@ A suíte atual cobre:
 - adicionar alertas ativos a partir do resultado de monitoramento
 - evoluir de incremental por arquivo para incremental por lote ou watermark
 - ampliar a taxonomia de falhas e as remediações seguras por camada
+- adicionar deduplicação/supressão para evitar alert storm em falhas repetidas
+- integrar com canal externo real, como Slack webhook ou sistema de incidentes
 - registrar métricas históricas de saúde para detectar regressão e drift
 - ampliar a suíte de testes com cenários de regressão e dados sintéticos mais variados
