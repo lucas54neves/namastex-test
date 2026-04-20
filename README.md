@@ -92,6 +92,7 @@ Para habilitar entrega externa por webhook:
 
 ```bash
 export PIPELINE_ALERT_WEBHOOK_URL="https://seu-endpoint-de-alerta"
+export PIPELINE_ALERT_SUPPRESSION_MINUTES="30"
 ```
 
 Para instalar os hooks locais:
@@ -229,6 +230,8 @@ O pipeline agora transforma o resultado agêntico em um evento de alerta a cada 
 
 - Sempre persiste um incidente local em `reports/alerts/`
 - Mantém histórico append-only em `reports/alerts/alert_history.json`
+- Aplica supressão de alertas repetidos com chave estável por status agêntico, severidade e tipos de diagnóstico
+- Mantém o incidente e o histórico mesmo quando a entrega externa é suprimida
 - Calcula severidade por status agêntico:
   - `info` para `healthy` e `idle_no_source_change`
   - `warning` para `auto_remediated`
@@ -236,6 +239,7 @@ O pipeline agora transforma o resultado agêntico em um evento de alerta a cada 
   - `critical` para `manual_intervention_required`
 - Só tenta entrega externa quando o status agêntico exige atenção operacional
 - A entrega externa é opcional e usa `PIPELINE_ALERT_WEBHOOK_URL`
+- A janela de supressão é configurável com `PIPELINE_ALERT_SUPPRESSION_MINUTES` e o padrão atual é `30`
 
 Estado validado no último run real:
 
@@ -260,6 +264,7 @@ A suíte atual cobre:
 - fallback para último estado bem-sucedido após erro em runtime
 - geração de alertas com severidade correta
 - persistência de incidente e histórico de alertas
+- supressão de alertas repetidos dentro da janela configurada
 
 ## Observações técnicas
 
@@ -273,6 +278,7 @@ A suíte atual cobre:
 - As validações atuais priorizam confiabilidade estrutural e riscos óbvios; ainda há espaço para checks de distribuição, drift e anomalias de negócio.
 - A camada agêntica ainda usa um conjunto fechado de diagnósticos e remediações seguras. Ela não reescreve código nem altera regras do pipeline de forma autônoma.
 - A entrega externa por webhook é best-effort. Em caso de falha de rede ou endpoint, o incidente continua preservado localmente.
+- A supressão atual é baseada em janela de tempo e assinatura do alerta. Para produção, ainda vale evoluir com contadores, agrupamento e políticas por severidade.
 
 ## Próximos passos
 
@@ -281,7 +287,6 @@ A suíte atual cobre:
 - adicionar alertas ativos a partir do resultado de monitoramento
 - evoluir de incremental por arquivo para incremental por lote ou watermark
 - ampliar a taxonomia de falhas e as remediações seguras por camada
-- adicionar deduplicação/supressão para evitar alert storm em falhas repetidas
 - integrar com canal externo real, como Slack webhook ou sistema de incidentes
 - registrar métricas históricas de saúde para detectar regressão e drift
 - ampliar a suíte de testes com cenários de regressão e dados sintéticos mais variados
