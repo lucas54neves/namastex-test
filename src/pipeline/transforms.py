@@ -336,6 +336,81 @@ def build_silver(df: pd.DataFrame) -> pd.DataFrame:
     return silver.sort_values(["conversation_id", "timestamp", "message_id"]).reset_index(drop=True)
 
 
+def add_gold_segments(gold: pd.DataFrame) -> pd.DataFrame:
+    segmented = gold.copy()
+    segmented["lead_temperature"] = "morno"
+    segmented.loc[
+        segmented["engagement_bucket"].eq("lead_frio") & segmented["data_shared_score"].eq(0),
+        "lead_temperature",
+    ] = "frio"
+    segmented.loc[
+        segmented["engagement_bucket"].isin(["media", "longa"])
+        | segmented["data_shared_score"].ge(2),
+        "lead_temperature",
+    ] = "quente"
+
+    segmented["price_sensitivity"] = "baixa"
+    segmented.loc[
+        segmented["mentioned_competitor"] | segmented["avg_quoted_price"].notna(),
+        "price_sensitivity",
+    ] = "alta"
+
+    segmented["contact_readiness"] = "baixa"
+    segmented.loc[segmented["data_shared_score"].eq(1), "contact_readiness"] = "media"
+    segmented.loc[segmented["data_shared_score"].ge(2), "contact_readiness"] = "alta"
+
+    segmented["intent_stage"] = "descoberta_inicial"
+    segmented.loc[segmented["mentioned_sinistro"], "intent_stage"] = "pos_sinistro"
+    segmented.loc[
+        segmented["mentioned_competitor"] & ~segmented["mentioned_sinistro"],
+        "intent_stage",
+    ] = "pesquisa_mercado"
+    segmented.loc[
+        segmented["avg_quoted_price"].notna() & ~segmented["mentioned_sinistro"],
+        "intent_stage",
+    ] = "cotacao_ativa"
+
+    segmented["risk_signal"] = "baixo"
+    segmented.loc[
+        segmented["mentioned_sinistro"] | segmented["duplicate_events_removed"].gt(0),
+        "risk_signal",
+    ] = "medio"
+    segmented.loc[
+        segmented["mentioned_sinistro"] & segmented["contains_cpf"],
+        "risk_signal",
+    ] = "alto"
+
+    segmented["persona_profile"] = "lead_frio"
+    segmented.loc[
+        segmented["mentioned_sinistro"],
+        "persona_profile",
+    ] = "cliente_pos_sinistro"
+    segmented.loc[
+        segmented["mentioned_competitor"] & segmented["avg_quoted_price"].notna(),
+        "persona_profile",
+    ] = "cotador_comparador"
+    segmented.loc[
+        segmented["lead_temperature"].eq("quente") & segmented["contact_readiness"].eq("alta"),
+        "persona_profile",
+    ] = "lead_engajado_com_dados"
+
+    segmented["audience_segment"] = "nutricao_basica"
+    segmented.loc[
+        segmented["persona_profile"].eq("cliente_pos_sinistro"),
+        "audience_segment",
+    ] = "retencao_pos_sinistro"
+    segmented.loc[
+        segmented["persona_profile"].eq("cotador_comparador"),
+        "audience_segment",
+    ] = "oferta_competitiva"
+    segmented.loc[
+        segmented["persona_profile"].eq("lead_engajado_com_dados"),
+        "audience_segment",
+    ] = "close_comercial"
+
+    return segmented
+
+
 def build_gold(silver: pd.DataFrame) -> pd.DataFrame:
     grouped = silver.groupby("conversation_id", dropna=False)
     gold = grouped.agg(
@@ -413,4 +488,5 @@ def build_gold(silver: pd.DataFrame) -> pd.DataFrame:
         .astype(int)
         .sum(axis=1)
     )
+    gold = add_gold_segments(gold)
     return gold.sort_values("conversation_id").reset_index(drop=True)

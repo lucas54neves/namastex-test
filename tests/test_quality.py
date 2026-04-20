@@ -71,6 +71,13 @@ def test_validate_gold_accepts_valid_bucket_set() -> None:
                 "duplicate_events_removed": 0,
                 "engagement_bucket": "lead_frio",
                 "data_shared_score": 1,
+                "persona_profile": "lead_frio",
+                "audience_segment": "nutricao_basica",
+                "lead_temperature": "morno",
+                "price_sensitivity": "baixa",
+                "intent_stage": "descoberta_inicial",
+                "contact_readiness": "media",
+                "risk_signal": "baixo",
             }
         ]
     )
@@ -78,3 +85,29 @@ def test_validate_gold_accepts_valid_bucket_set() -> None:
     summary = summarize_validation_results(validate_gold(df))
 
     assert summary["status"] == "passed"
+
+
+def test_validate_gold_rejects_invalid_persona_profile() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "total_messages": 3,
+                "duplicate_events_removed": 0,
+                "engagement_bucket": "lead_frio",
+                "data_shared_score": 1,
+                "persona_profile": "desconhecida",
+                "audience_segment": "nutricao_basica",
+                "lead_temperature": "morno",
+                "price_sensitivity": "baixa",
+                "intent_stage": "descoberta_inicial",
+                "contact_readiness": "media",
+                "risk_signal": "baixo",
+            }
+        ]
+    )
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(item["check"] == "persona_profile_valid" for item in summary["failed_checks"])

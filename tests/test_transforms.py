@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-from pipeline.transforms import add_conversation_context, deduplicate_events, mask_message_body
+from pipeline.transforms import (
+    add_conversation_context,
+    add_gold_segments,
+    deduplicate_events,
+    mask_message_body,
+)
 
 
 def test_mask_message_body_preserves_shape_for_structured_pii() -> None:
@@ -77,3 +82,51 @@ def test_conversation_context_uses_first_inbound_and_outbound_names() -> None:
 
     assert enriched["conversation_agent_name"].tolist() == ["Diego", "Diego", "Diego"]
     assert enriched["conversation_lead_name"].tolist() == ["Ana Paula", "Ana Paula", "Ana Paula"]
+
+
+def test_add_gold_segments_assigns_persona_and_audience() -> None:
+    gold = pd.DataFrame(
+        [
+            {
+                "engagement_bucket": "media",
+                "data_shared_score": 3,
+                "mentioned_competitor": False,
+                "avg_quoted_price": None,
+                "mentioned_sinistro": False,
+                "duplicate_events_removed": 0,
+                "contains_cpf": False,
+            },
+            {
+                "engagement_bucket": "curta",
+                "data_shared_score": 1,
+                "mentioned_competitor": True,
+                "avg_quoted_price": 2500.0,
+                "mentioned_sinistro": False,
+                "duplicate_events_removed": 0,
+                "contains_cpf": False,
+            },
+            {
+                "engagement_bucket": "lead_frio",
+                "data_shared_score": 0,
+                "mentioned_competitor": False,
+                "avg_quoted_price": None,
+                "mentioned_sinistro": True,
+                "duplicate_events_removed": 1,
+                "contains_cpf": True,
+            },
+        ]
+    )
+
+    segmented = add_gold_segments(gold)
+
+    assert segmented["persona_profile"].tolist() == [
+        "lead_engajado_com_dados",
+        "cotador_comparador",
+        "cliente_pos_sinistro",
+    ]
+    assert segmented["audience_segment"].tolist() == [
+        "close_comercial",
+        "oferta_competitiva",
+        "retencao_pos_sinistro",
+    ]
+    assert segmented["lead_temperature"].tolist() == ["quente", "morno", "frio"]

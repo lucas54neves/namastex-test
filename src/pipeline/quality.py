@@ -161,6 +161,19 @@ def validate_silver(df: pd.DataFrame) -> list[ValidationResult]:
 
 def validate_gold(df: pd.DataFrame) -> list[ValidationResult]:
     valid_buckets = {"lead_frio", "curta", "media", "longa"}
+    valid_personas = {
+        "lead_frio",
+        "cliente_pos_sinistro",
+        "cotador_comparador",
+        "lead_engajado_com_dados",
+    }
+    valid_audiences = {
+        "nutricao_basica",
+        "retencao_pos_sinistro",
+        "oferta_competitiva",
+        "close_comercial",
+    }
+    valid_temperatures = {"frio", "morno", "quente"}
     results = [
         _column_set_check(
             df,
@@ -170,6 +183,13 @@ def validate_gold(df: pd.DataFrame) -> list[ValidationResult]:
                 "duplicate_events_removed",
                 "engagement_bucket",
                 "data_shared_score",
+                "persona_profile",
+                "audience_segment",
+                "lead_temperature",
+                "price_sensitivity",
+                "intent_stage",
+                "contact_readiness",
+                "risk_signal",
             ],
             "gold",
         ),
@@ -197,6 +217,34 @@ def validate_gold(df: pd.DataFrame) -> list[ValidationResult]:
             "duplicate_events_removed_non_negative",
             bool((df["duplicate_events_removed"] >= 0).all()),
             max_removed=int(df["duplicate_events_removed"].max()),
+        ),
+        _result(
+            "gold",
+            "persona_profile_valid",
+            set(df["persona_profile"].dropna().astype(str).unique()).issubset(valid_personas),
+            distinct_personas=sorted(df["persona_profile"].dropna().astype(str).unique().tolist()),
+        ),
+        _result(
+            "gold",
+            "audience_segment_valid",
+            set(df["audience_segment"].dropna().astype(str).unique()).issubset(valid_audiences),
+            distinct_audiences=sorted(
+                df["audience_segment"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "lead_temperature_valid",
+            set(df["lead_temperature"].dropna().astype(str).unique()).issubset(valid_temperatures),
+            distinct_temperatures=sorted(
+                df["lead_temperature"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "persona_profile_not_null",
+            df["persona_profile"].notna().all(),
+            null_rows=int(df["persona_profile"].isna().sum()),
         ),
     ]
     return results
