@@ -32,12 +32,15 @@ Este repositório contém a base inicial do teste técnico de Data & AI Engineer
 - Execução incremental por fingerprint da fonte
 - Estado persistido do pipeline com histórico de execuções
 - Snapshot de monitoramento do último run
+- Camada agêntica para classificar falhas, sugerir correção e aplicar remediação segura quando possível
+- Fallback operacional para o último estado bem-sucedido em caso de erro inesperado
 - Testes automatizados para mascaramento, deduplicação, qualidade e runner incremental
 
 ## Estrutura atual
 
 ```text
 src/pipeline/
+  agent.py
   config.py
   io.py
   jobs.py
@@ -63,6 +66,7 @@ state/
   pipeline_state.json
 
 tests/
+  test_agent.py
   test_jobs.py
   test_quality.py
   test_transforms.py
@@ -96,6 +100,7 @@ Os hooks de `mypy` e `pytest` usam ambientes Python isolados gerenciados pelo pr
 - Gold: `data/gold/conversations_gold.parquet`
 - Profiling: `reports/bronze_profile.json`
 - Monitoramento: `reports/monitoring/latest_run_report.json`
+- Relatório agêntico: `reports/monitoring/latest_agent_report.json`
 - Estado: `state/pipeline_state.json`
 
 ## Estado atual das camadas
@@ -152,6 +157,7 @@ O runner principal agora funciona de forma incremental.
 - Cada execução calcula um fingerprint da fonte com caminho, tamanho e `mtime`
 - Se a Bronze não mudou, o pipeline pula o reprocessamento e registra o evento como `skipped_no_source_change`
 - Se a Bronze mudou, o pipeline reprocessa Bronze, Silver e Gold e escreve um relatório de validação
+- Em paralelo, a camada agêntica registra um relatório operacional separado com diagnóstico, remediação e fallback
 
 As validações atuais cobrem:
 
@@ -178,6 +184,32 @@ Estado validado no último run completo:
 - contagens: Bronze `153228`, Silver `145928`, Gold `15000`
 - segundo run sem mudança na fonte: `skipped_no_source_change`
 
+## Camada agêntica
+
+O pipeline agora possui uma camada operacional em cima do monitoramento:
+
+- classifica falhas por tipo, como:
+  - `source_schema_drift`
+  - `silver_deduplication_failure`
+  - `pii_masking_leak`
+  - `gold_bucket_invalid`
+  - `unexpected_runtime_error`
+- sugere correção objetiva para cada classe de falha
+- tenta auto-remediação apenas em casos conservadores, como:
+  - reconstrução da Silver a partir da Bronze
+  - reconstrução da Gold a partir da Silver
+  - reaplicação de transformações quando uma validação estrutural ou derivada falha
+- aplica fallback para o último estado bem-sucedido quando ocorre erro inesperado e não há reparo seguro no mesmo ciclo
+
+Status operacionais possíveis no relatório agêntico:
+
+- `healthy`
+- `auto_remediated`
+- `degraded_validation_failed`
+- `fallback_applied`
+- `manual_intervention_required`
+- `idle_no_source_change`
+
 ## Testes automatizados
 
 A suíte atual cobre:
@@ -189,6 +221,9 @@ A suíte atual cobre:
 - validação básica da Gold
 - execução incremental do runner
 - geração do relatório de validação
+- diagnóstico agêntico de falhas conhecidas
+- auto-remediação da Gold após validação inválida
+- fallback para último estado bem-sucedido após erro em runtime
 
 ## Observações técnicas
 
@@ -200,12 +235,14 @@ A suíte atual cobre:
 - A classificação de sinistro está intencionalmente conservadora para evitar confundir histórico do lead com texto de cobertura comercial.
 - O fingerprint incremental usa metadados do arquivo-fonte. Para produção, o ideal é evoluir para controle por partição, watermark ou checksum por lote.
 - As validações atuais priorizam confiabilidade estrutural e riscos óbvios; ainda há espaço para checks de distribuição, drift e anomalias de negócio.
+- A camada agêntica ainda usa um conjunto fechado de diagnósticos e remediações seguras. Ela não reescreve código nem altera regras do pipeline de forma autônoma.
 
 ## Próximos passos
 
 - enriquecer a extração de veículo com maior cobertura de marcas e modelos
 - melhorar a identificação de histórico de sinistro versus menção a cobertura
-- implementar a camada agêntica de monitoramento, diagnóstico e sugestão de correção
 - adicionar alertas ativos a partir do resultado de monitoramento
 - evoluir de incremental por arquivo para incremental por lote ou watermark
+- ampliar a taxonomia de falhas e as remediações seguras por camada
+- registrar métricas históricas de saúde para detectar regressão e drift
 - ampliar a suíte de testes com cenários de regressão e dados sintéticos mais variados

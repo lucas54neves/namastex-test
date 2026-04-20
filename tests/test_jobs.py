@@ -7,6 +7,7 @@ import pandas as pd
 
 from pipeline.config import build_paths
 from pipeline.jobs import run_pipeline
+from pipeline.quality import ValidationResult
 
 
 def _sample_frame() -> pd.DataFrame:
@@ -94,3 +95,63 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     assert result.status == "success"
     assert report["status"] == "passed"
     assert report["row_counts"] == {"bronze": 2, "silver": 2, "gold": 1}
+
+
+def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = build_paths(root)
+    first = run_pipeline(paths, force=True)
+    assert first.status == "success"
+
+    import pipeline.jobs as jobs_module
+
+    def explode(_silver: pd.DataFrame) -> pd.DataFrame:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(jobs_module, "build_gold", explode)
+    second = run_pipeline(paths, force=True)
+
+    agent_report = json.loads(Path(second.agent_report_path).read_text(encoding="utf-8"))
+    assert second.status == "fallback_to_last_successful"
+    assert agent_report["fallback"]["applied"] is True
+
+
+def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = build_paths(root)
+
+    import pipeline.jobs as jobs_module
+
+    original_validate_gold = jobs_module.validate_gold
+    calls = {"count": 0}
+
+    def flaky_validate_gold(df: pd.DataFrame) -> list[ValidationResult]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return [
+                ValidationResult(
+                    layer="gold",
+                    check="engagement_bucket_valid",
+                    status="failed",
+                    detail={"distinct_buckets": ["bad_bucket"]},
+                )
+            ]
+        return original_validate_gold(df)
+
+    monkeypatch.setattr(jobs_module, "validate_gold", flaky_validate_gold)
+    result = run_pipeline(paths, force=True)
+
+    agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
+    assert result.status == "success_after_auto_remediation"
+    assert agent_report["status"] == "auto_remediated"
+    assert agent_report["auto_remediation"]["applied"] is True
