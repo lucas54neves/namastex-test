@@ -4,6 +4,8 @@ Este repositório implementa uma entrega do teste técnico de Data & AI Engineer
 
 O projeto não usa LLM. O termo `agente` aqui significa um supervisor operacional baseado em regras explícitas, responsável por classificar falhas, sugerir ação corretiva, tentar reconstruções seguras de Silver e Gold e preservar o último estado íntegro quando ocorre erro inesperado.
 
+Em termos de aderência ao teste, o projeto implementa um agente operacional determinístico que gerencia a execução do pipeline, diagnostica falhas, aplica auto-remediações seguras e preserva o último estado íntegro, mas não cria ou reconfigura o pipeline autonomamente.
+
 ## Fontes
 
 - Enunciado: `docs/Teste Técnico de Data & AI Engineering.docx`
