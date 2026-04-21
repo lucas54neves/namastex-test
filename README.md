@@ -111,9 +111,16 @@ Ela funciona como a entrada principal para revisar, em poucos testes, as evidenc
 Execucao recomendada:
 
 ```bash
+PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline.py --force
 venv/bin/python -m pytest -q
 venv/bin/python -m pytest tests/test_requirements_adherence.py -q
 ```
+
+Baseline validado localmente:
+
+- o caminho minimo suportado para validacao do repositorio desabilita o enrichment LLM com `PIPELINE_ENABLE_LLM_ENRICHMENT=0`
+- esse modo nao depende de rede nem de credenciais externas e e o mesmo caminho coberto pelos testes de paridade de runtime
+- a execucao com providers habilitados continua opcional e deve ser tratada como modo de integracao, nao como requisito do baseline local
 
 ## Camadas do pipeline
 
@@ -417,6 +424,7 @@ Com o ambiente virtual criado e as dependencias instaladas:
 ```bash
 venv/bin/python scripts/profile_bronze.py
 venv/bin/python scripts/plan_pipeline.py
+PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline.py --force
 venv/bin/python scripts/run_pipeline.py
 venv/bin/python scripts/run_pipeline.py --force
 venv/bin/python scripts/monitor_pipeline.py
@@ -432,6 +440,8 @@ cp .env.example .env
 ```
 
 O runtime carrega automaticamente o arquivo `.env` na raiz do repositorio. Variaveis ja exportadas no shell continuam tendo precedencia.
+
+Para validar o repositorio de forma deterministica, prefira sobrescrever `PIPELINE_ENABLE_LLM_ENRICHMENT=0` no comando, mesmo se o `.env` local habilitar providers opcionais por padrao.
 
 Variaveis de ambiente operacionais e de LLM:
 

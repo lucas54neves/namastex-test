@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from pipeline.config import build_paths
+from pipeline.config import PipelinePaths, build_paths
 from pipeline.jobs import run_pipeline
 from pipeline.quality import ValidationResult
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sample_frame() -> pd.DataFrame:
@@ -238,3 +240,40 @@ def test_build_monitor_snapshot_separates_operational_and_structural_fields(tmp_
     assert snapshot["planner_report_path"].endswith("latest_plan_report.json")
     assert isinstance(snapshot["planner_proposals"], list)
     assert isinstance(snapshot["auto_remediation_actions"], list)
+
+
+def test_repository_entrypoint_runs_with_versioned_spec_and_deterministic_llm_mode(
+    tmp_path: Path,
+) -> None:
+    root = ROOT
+    temp_root = tmp_path
+    (temp_root / "docs").mkdir(parents=True)
+    frame = _sample_frame()
+    frame.to_parquet(temp_root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = PipelinePaths(
+        root=temp_root,
+        config=temp_root / "config",
+        docs=temp_root / "docs",
+        data=temp_root / "data",
+        bronze=temp_root / "data" / "bronze",
+        silver=temp_root / "data" / "silver",
+        gold=temp_root / "data" / "gold",
+        quarantine=temp_root / "data" / "quarantine",
+        reports=temp_root / "reports",
+        monitoring=temp_root / "reports" / "monitoring",
+        alerts=temp_root / "reports" / "alerts",
+        agent_decisions=temp_root / "reports" / "agent_decisions",
+        state=temp_root / "state",
+        raw_bronze_source=temp_root / "docs" / "conversations_bronze.parquet",
+        pipeline_spec=root / "config" / "pipeline_spec.json",
+        approval_state=temp_root / "state" / "approval_state.json",
+        spec_history=temp_root / "state" / "pipeline_spec_history.json",
+    )
+    result = run_pipeline(paths, force=True)
+    report = json.loads((paths.monitoring / "latest_run_report.json").read_text(encoding="utf-8"))
+
+    assert result.executed is True
+    assert result.status == "success"
+    assert report["status"] == "passed"
+    assert report["pipeline_spec_path"] == str(root / "config" / "pipeline_spec.json")

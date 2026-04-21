@@ -72,6 +72,21 @@
       "response_time_sec",
       "is_business_hours",
       "lead_source"
+    ],
+    "derived_fields": [
+      "mentions_vehicle",
+      "mentions_competitor",
+      "mentions_sinistro",
+      "contains_email",
+      "contains_phone",
+      "contains_cpf",
+      "contains_cep",
+      "contains_plate",
+      "vehicle_make",
+      "vehicle_model",
+      "vehicle_year",
+      "quoted_price",
+      "sinistro_type"
     ]
   },
   "gold": {
@@ -98,6 +113,7 @@
       "observed_lead_sources",
       "observed_campaign_ids",
       "observed_outcomes",
+      "dominant_email_provider",
       "engagement_bucket",
       "data_shared_score",
       "persona_profile",
@@ -106,7 +122,17 @@
       "price_sensitivity",
       "intent_stage",
       "contact_readiness",
-      "risk_signal"
+      "risk_signal",
+      "response_latency_band",
+      "closure_outcome_group",
+      "has_closed_outcome",
+      "price_objection_intensity",
+      "commercial_urgency_signal",
+      "competitor_pressure_level",
+      "conversation_sentiment_label",
+      "conversation_sentiment_support",
+      "positive_tone_hits",
+      "negative_tone_hits"
     ],
     "valid_buckets": [
       "lead_frio",
@@ -150,6 +176,54 @@
       "baixo",
       "medio",
       "alto"
+    ],
+    "valid_email_providers": [
+      "gmail",
+      "outlook",
+      "yahoo",
+      "icloud",
+      "uol",
+      "bol",
+      "terra",
+      "other"
+    ],
+    "valid_response_latency_bands": [
+      "sem_evidencia",
+      "rapida",
+      "moderada",
+      "lenta"
+    ],
+    "valid_closure_outcome_groups": [
+      "aberto",
+      "fechado",
+      "perdido"
+    ],
+    "valid_price_objection_intensities": [
+      "nenhuma",
+      "leve",
+      "forte"
+    ],
+    "valid_commercial_urgency_signals": [
+      "nenhuma",
+      "moderada",
+      "alta"
+    ],
+    "valid_competitor_pressure_levels": [
+      "nenhuma",
+      "leve",
+      "alta"
+    ],
+    "valid_conversation_sentiment_labels": [
+      "positivo",
+      "neutro",
+      "negativo",
+      "sem_evidencia"
+    ],
+    "valid_conversation_sentiment_supports": [
+      "fraco",
+      "moderado",
+      "forte",
+      "sem_evidencia"
     ],
     "segmentation": {
       "lead_temperature": {
@@ -245,6 +319,14 @@
       "intent_stage_valid",
       "contact_readiness_valid",
       "risk_signal_valid",
+      "dominant_email_provider_valid",
+      "response_latency_band_valid",
+      "closure_outcome_group_valid",
+      "price_objection_intensity_valid",
+      "commercial_urgency_signal_valid",
+      "competitor_pressure_level_valid",
+      "conversation_sentiment_label_valid",
+      "conversation_sentiment_support_valid",
       "persona_profile_not_null",
       "gold_lead_keys_in_silver",
       "gold_timestamps_match_published_history",
@@ -254,8 +336,32 @@
       "engagement_bucket_coherent",
       "lead_temperature_coherent",
       "contact_readiness_coherent",
-      "risk_signal_coherent"
-    ]
+      "risk_signal_coherent",
+      "dominant_email_provider_coherent",
+      "response_latency_band_coherent",
+      "closure_outcome_coherent",
+      "price_objection_intensity_coherent",
+      "commercial_urgency_signal_coherent",
+      "competitor_pressure_level_coherent",
+      "conversation_sentiment_sem_evidencia_coherent",
+      "conversation_sentiment_support_coherent",
+      "conversation_sentiment_support_strength_coherent"
+    ],
+    "validation_rules": {
+      "bronze": [
+        "required_columns",
+        "metadata_json_valid"
+      ],
+      "silver": [
+        "masked_text_fields_not_leaking",
+        "derived_vehicle_consistency"
+      ],
+      "gold": [
+        "engagement_bucket_valid",
+        "persona_profile_valid",
+        "audience_segment_valid"
+      ]
+    }
   },
   "agent": {
     "safe_auto_apply_playbooks": [
