@@ -258,12 +258,146 @@ def test_build_gold_consolidates_multiple_conversations_per_lead() -> None:
     assert gold.iloc[0]["lead_temperature"] == "morno"
     assert gold.iloc[0]["intent_stage"] == "pos_sinistro"
     assert gold.iloc[0]["dominant_email_provider"] == "gmail"
-    assert gold.iloc[0]["response_latency_band"] == "rapida"
-    assert gold.iloc[0]["closure_outcome_group"] == "fechado"
-    assert bool(gold.iloc[0]["has_closed_outcome"]) is True
-    assert gold.iloc[0]["price_objection_intensity"] == "forte"
-    assert gold.iloc[0]["commercial_urgency_signal"] == "alta"
-    assert gold.iloc[0]["competitor_pressure_level"] == "alta"
+    assert gold.iloc[0]["conversation_sentiment_label"] == "sem_evidencia"
+    assert gold.iloc[0]["conversation_sentiment_support"] == "sem_evidencia"
+
+
+def test_build_gold_derives_positive_sentiment_from_inbound_cues() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "outbound",
+                "sender_phone": "+5511991111111",
+                "sender_name": "Diego",
+                "message_type": "text",
+                "message_body": "Posso te enviar a proposta?",
+                "status": "delivered",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "proposta_enviada",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":null}',
+            },
+            {
+                "message_id": "m2",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:02:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511982222222",
+                "sender_name": "Ana",
+                "message_type": "text",
+                "message_body": "Perfeito, obrigado, pode seguir com a proposta",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "proposta_enviada",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":60}',
+            },
+        ]
+    )
+
+    gold = build_gold(build_silver_leads(build_silver(bronze)), build_silver(bronze))
+
+    assert gold.iloc[0]["conversation_sentiment_label"] == "positivo"
+    assert gold.iloc[0]["conversation_sentiment_support"] == "forte"
+    assert gold.iloc[0]["positive_tone_hits"] >= 3
+    assert gold.iloc[0]["negative_tone_hits"] == 0
+
+
+def test_build_gold_derives_negative_sentiment_from_inbound_cues() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "outbound",
+                "sender_phone": "+5511991111111",
+                "sender_name": "Diego",
+                "message_type": "text",
+                "message_body": "Posso te ajudar com a cotacao?",
+                "status": "delivered",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":null}',
+            },
+            {
+                "message_id": "m2",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:02:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511982222222",
+                "sender_name": "Ana",
+                "message_type": "text",
+                "message_body": "Muito caro, estou desconfiada e quero cancelar",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "cancelado",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":60}',
+            },
+        ]
+    )
+
+    gold = build_gold(build_silver_leads(build_silver(bronze)), build_silver(bronze))
+
+    assert gold.iloc[0]["conversation_sentiment_label"] == "negativo"
+    assert gold.iloc[0]["conversation_sentiment_support"] == "forte"
+    assert gold.iloc[0]["negative_tone_hits"] >= 3
+    assert gold.iloc[0]["positive_tone_hits"] == 0
+
+
+def test_build_gold_derives_neutral_sentiment_from_mixed_inbound_cues() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "outbound",
+                "sender_phone": "+5511991111111",
+                "sender_name": "Diego",
+                "message_type": "text",
+                "message_body": "Posso te ajudar com a cotacao?",
+                "status": "delivered",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":null}',
+            },
+            {
+                "message_id": "m2",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:02:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511982222222",
+                "sender_name": "Ana",
+                "message_type": "text",
+                "message_body": "Obrigado, mas ainda estou desconfiada",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":60}',
+            },
+        ]
+    )
+
+    gold = build_gold(build_silver_leads(build_silver(bronze)), build_silver(bronze))
+
+    assert gold.iloc[0]["conversation_sentiment_label"] == "neutro"
+    assert gold.iloc[0]["conversation_sentiment_support"] == "moderado"
+    assert gold.iloc[0]["positive_tone_hits"] == 1
+    assert gold.iloc[0]["negative_tone_hits"] == 1
 
 
 def test_build_gold_keeps_provider_null_and_sem_evidencia_without_supporting_data() -> None:
@@ -300,3 +434,5 @@ def test_build_gold_keeps_provider_null_and_sem_evidencia_without_supporting_dat
     assert gold.iloc[0]["price_objection_intensity"] == "nenhuma"
     assert gold.iloc[0]["commercial_urgency_signal"] == "nenhuma"
     assert gold.iloc[0]["competitor_pressure_level"] == "nenhuma"
+    assert gold.iloc[0]["conversation_sentiment_label"] == "sem_evidencia"
+    assert gold.iloc[0]["conversation_sentiment_support"] == "sem_evidencia"

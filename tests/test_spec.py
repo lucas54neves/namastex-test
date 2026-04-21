@@ -8,4 +8,6 @@ def test_default_pipeline_spec_is_valid() -> None:
     validate_pipeline_spec(spec)
     assert spec["gold"]["segmentation"]["personas"]["default"] == "lead_frio"
     assert "quoted_price" in spec["silver"]["derived_fields"]
+    assert "conversation_sentiment_label" in spec["gold"]["required_columns"]
+    assert "sem_evidencia" in spec["gold"]["valid_conversation_sentiment_labels"]
     assert spec["agent"]["planner"]["proposal_defaults"]["default_status"] == "proposed"

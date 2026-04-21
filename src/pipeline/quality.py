@@ -12,7 +12,11 @@ from pipeline.publication import (
     missing_required_safe_columns,
     resolve_publish_safe_keys,
 )
-from pipeline.transforms import detect_unmasked_sensitive_classes
+from pipeline.transforms import (
+    derive_conversation_sentiment_label,
+    derive_conversation_sentiment_support,
+    detect_unmasked_sensitive_classes,
+)
 
 SILVER_TEXT_COLUMNS = ("canonical_lead_name_masked", "lead_contact_ref")
 SILVER_MESSAGES_TEXT_COLUMNS = ("message_body_masked", "sender_name_masked", "sender_phone_masked")
@@ -453,6 +457,10 @@ def validate_gold_consistency(
         "price_objection_intensity",
         "commercial_urgency_signal",
         "competitor_pressure_level",
+        "conversation_sentiment_label",
+        "conversation_sentiment_support",
+        "positive_tone_hits",
+        "negative_tone_hits",
         "avg_response_time_sec",
         "avg_quoted_price",
         "primary_competitor",
@@ -758,6 +766,73 @@ def validate_gold_consistency(
             sample_lead_keys=_bounded_sample(violating_competitor),
         )
     )
+
+    expected_sentiment_label = [
+        derive_conversation_sentiment_label(positive_hits, negative_hits)
+        for positive_hits, negative_hits in zip(
+            gold_common["positive_tone_hits"],
+            gold_common["negative_tone_hits"],
+            strict=False,
+        )
+    ]
+    sentiment_label_mask = (
+        gold_common["conversation_sentiment_label"]
+        .astype("string")
+        .eq(pd.Series(expected_sentiment_label, index=gold_common.index, dtype="string"))
+    )
+    violating_sentiment_label = gold_common.index[~sentiment_label_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "conversation_sentiment_sem_evidencia_coherent",
+            len(violating_sentiment_label) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_sentiment_label),
+            sample_lead_keys=_bounded_sample(violating_sentiment_label),
+        )
+    )
+
+    expected_sentiment_support = [
+        derive_conversation_sentiment_support(positive_hits, negative_hits)
+        for positive_hits, negative_hits in zip(
+            gold_common["positive_tone_hits"],
+            gold_common["negative_tone_hits"],
+            strict=False,
+        )
+    ]
+    sentiment_support_mask = (
+        gold_common["conversation_sentiment_support"]
+        .astype("string")
+        .eq(pd.Series(expected_sentiment_support, index=gold_common.index, dtype="string"))
+    )
+    violating_sentiment_support = gold_common.index[~sentiment_support_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "conversation_sentiment_support_coherent",
+            len(violating_sentiment_support) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_sentiment_support),
+            sample_lead_keys=_bounded_sample(violating_sentiment_support),
+        )
+    )
+
+    sentiment_support_strength_mask = ~gold_common["conversation_sentiment_support"].eq("forte") | (
+        gold_common["positive_tone_hits"].ge(2) | gold_common["negative_tone_hits"].ge(2)
+    )
+    violating_sentiment_support_strength = gold_common.index[
+        ~sentiment_support_strength_mask
+    ].tolist()
+    results.append(
+        _result(
+            "gold",
+            "conversation_sentiment_support_strength_coherent",
+            len(violating_sentiment_support_strength) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_sentiment_support_strength),
+            sample_lead_keys=_bounded_sample(violating_sentiment_support_strength),
+        )
+    )
     return results
 
 
@@ -929,8 +1004,44 @@ def validate_gold(
     )
     valid_commercial_urgency_signals = cast(set[str], plan["gold_valid_commercial_urgency_signals"])
     valid_competitor_pressure_levels = cast(set[str], plan["gold_valid_competitor_pressure_levels"])
+    valid_conversation_sentiment_labels = cast(
+        set[str], plan["gold_valid_conversation_sentiment_labels"]
+    )
+    valid_conversation_sentiment_supports = cast(
+        set[str], plan["gold_valid_conversation_sentiment_supports"]
+    )
     gold_required_columns = cast(list[str], plan["gold_required_columns"])
     forbidden_columns = forbidden_columns_present(df, "gold")
+    expected_sentiment_label = pd.Series(
+        [
+            derive_conversation_sentiment_label(positive_hits, negative_hits)
+            for positive_hits, negative_hits in zip(
+                df["positive_tone_hits"],
+                df["negative_tone_hits"],
+                strict=False,
+            )
+        ],
+        index=df.index,
+        dtype="string",
+    )
+    expected_sentiment_support = pd.Series(
+        [
+            derive_conversation_sentiment_support(positive_hits, negative_hits)
+            for positive_hits, negative_hits in zip(
+                df["positive_tone_hits"],
+                df["negative_tone_hits"],
+                strict=False,
+            )
+        ],
+        index=df.index,
+        dtype="string",
+    )
+    sentiment_label_mask = (
+        df["conversation_sentiment_label"].astype("string").eq(expected_sentiment_label)
+    )
+    sentiment_support_mask = (
+        df["conversation_sentiment_support"].astype("string").eq(expected_sentiment_support)
+    )
     results = [
         _column_set_check(df, gold_required_columns, "gold"),
         _result(
@@ -1089,6 +1200,26 @@ def validate_gold(
         ),
         _result(
             "gold",
+            "conversation_sentiment_label_valid",
+            set(df["conversation_sentiment_label"].dropna().astype(str).unique()).issubset(
+                valid_conversation_sentiment_labels
+            ),
+            distinct_conversation_sentiment_labels=sorted(
+                df["conversation_sentiment_label"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "conversation_sentiment_support_valid",
+            set(df["conversation_sentiment_support"].dropna().astype(str).unique()).issubset(
+                valid_conversation_sentiment_supports
+            ),
+            distinct_conversation_sentiment_supports=sorted(
+                df["conversation_sentiment_support"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
             "persona_profile_not_null",
             df["persona_profile"].notna().all(),
             null_rows=int(df["persona_profile"].isna().sum()),
@@ -1113,6 +1244,34 @@ def validate_gold(
             df["dominant_email_provider"].notna().eq(df["contains_email"].astype(bool)).all(),
             violating_rows=int(
                 (df["dominant_email_provider"].notna() != df["contains_email"].astype(bool)).sum()
+            ),
+        ),
+        _result(
+            "gold",
+            "conversation_sentiment_sem_evidencia_coherent",
+            sentiment_label_mask.all(),
+            violating_rows=int((~sentiment_label_mask).sum()),
+        ),
+        _result(
+            "gold",
+            "conversation_sentiment_support_coherent",
+            sentiment_support_mask.all(),
+            violating_rows=int((~sentiment_support_mask).sum()),
+        ),
+        _result(
+            "gold",
+            "conversation_sentiment_support_strength_coherent",
+            (
+                ~df["conversation_sentiment_support"].eq("forte")
+                | df["positive_tone_hits"].ge(2)
+                | df["negative_tone_hits"].ge(2)
+            ).all(),
+            violating_rows=int(
+                (
+                    df["conversation_sentiment_support"].eq("forte")
+                    & df["positive_tone_hits"].lt(2)
+                    & df["negative_tone_hits"].lt(2)
+                ).sum()
             ),
         ),
     ]

@@ -96,6 +96,10 @@ def _base_gold_row() -> dict[str, object]:
         "price_objection_intensity": "nenhuma",
         "commercial_urgency_signal": "nenhuma",
         "competitor_pressure_level": "nenhuma",
+        "conversation_sentiment_label": "sem_evidencia",
+        "conversation_sentiment_support": "sem_evidencia",
+        "positive_tone_hits": 0,
+        "negative_tone_hits": 0,
     }
 
 
@@ -235,6 +239,49 @@ def test_validate_gold_rejects_email_provider_without_email_signal() -> None:
     assert summary["status"] == "failed"
     assert any(
         item["check"] == "dominant_email_provider_nullability_coherent"
+        for item in summary["failed_checks"]
+    )
+
+
+def test_validate_gold_rejects_invalid_conversation_sentiment_label() -> None:
+    row = _base_gold_row()
+    row["conversation_sentiment_label"] = "otimista"
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(
+        item["check"] == "conversation_sentiment_label_valid" for item in summary["failed_checks"]
+    )
+
+
+def test_validate_gold_rejects_non_sem_evidencia_support_without_evidence() -> None:
+    row = _base_gold_row()
+    row["conversation_sentiment_support"] = "fraco"
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(
+        item["check"] == "conversation_sentiment_support_coherent"
+        for item in summary["failed_checks"]
+    )
+
+
+def test_validate_gold_rejects_forte_support_without_repeated_evidence() -> None:
+    row = _base_gold_row()
+    row["conversation_sentiment_label"] = "positivo"
+    row["conversation_sentiment_support"] = "forte"
+    row["positive_tone_hits"] = 1
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(
+        item["check"] == "conversation_sentiment_support_strength_coherent"
         for item in summary["failed_checks"]
     )
 

@@ -136,6 +136,10 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "price_objection_intensity",
             "commercial_urgency_signal",
             "competitor_pressure_level",
+            "conversation_sentiment_label",
+            "conversation_sentiment_support",
+            "positive_tone_hits",
+            "negative_tone_hits",
         ],
         "valid_buckets": ["lead_frio", "curta", "media", "longa"],
         "valid_personas": [
@@ -175,6 +179,18 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
         "valid_price_objection_intensities": ["nenhuma", "leve", "forte"],
         "valid_commercial_urgency_signals": ["nenhuma", "moderada", "alta"],
         "valid_competitor_pressure_levels": ["nenhuma", "leve", "alta"],
+        "valid_conversation_sentiment_labels": [
+            "positivo",
+            "neutro",
+            "negativo",
+            "sem_evidencia",
+        ],
+        "valid_conversation_sentiment_supports": [
+            "fraco",
+            "moderado",
+            "forte",
+            "sem_evidencia",
+        ],
         "segmentation": {
             "lead_temperature": {
                 "default": "morno",
@@ -272,6 +288,8 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "price_objection_intensity_valid",
             "commercial_urgency_signal_valid",
             "competitor_pressure_level_valid",
+            "conversation_sentiment_label_valid",
+            "conversation_sentiment_support_valid",
             "persona_profile_not_null",
             "gold_lead_keys_in_silver",
             "gold_timestamps_match_published_history",
@@ -288,6 +306,9 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "price_objection_intensity_coherent",
             "commercial_urgency_signal_coherent",
             "competitor_pressure_level_coherent",
+            "conversation_sentiment_sem_evidencia_coherent",
+            "conversation_sentiment_support_coherent",
+            "conversation_sentiment_support_strength_coherent",
         ],
         "validation_rules": {
             "bronze": ["required_columns", "metadata_json_valid"],
@@ -355,6 +376,8 @@ def validate_pipeline_spec(spec: dict[str, Any]) -> None:
         ("gold", "valid_price_objection_intensities"),
         ("gold", "valid_commercial_urgency_signals"),
         ("gold", "valid_competitor_pressure_levels"),
+        ("gold", "valid_conversation_sentiment_labels"),
+        ("gold", "valid_conversation_sentiment_supports"),
     ]
     for section, key in list_paths:
         value = spec.get(section, {}).get(key)

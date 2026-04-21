@@ -107,6 +107,26 @@ SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
     "cep": CEP_PATTERN,
     "plate": PLATE_PATTERN,
 }
+POSITIVE_TONE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bobrigad[oa]s?\b"),
+    re.compile(r"\b(valeu|agradeco|agradeco demais)\b"),
+    re.compile(r"\b(perfeito|excelente|otim[oa]|maravilha|top)\b"),
+    re.compile(r"\b(gostei|bom demais|muito bom)\b"),
+    re.compile(r"\b(pode seguir|pode prosseguir|vamos seguir|quero seguir)\b"),
+    re.compile(r"\b(vamos fechar|quero fechar|pode fechar|fechado|combinado)\b"),
+    re.compile(r"\b(aprovado|aprovada|de acordo|ok pode)\b"),
+)
+NEGATIVE_TONE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(nao tenho interesse|sem interesse|nao quero|nao vou fechar)\b"),
+    re.compile(r"\b(cancelar|cancelamento|desist\w*)\b"),
+    re.compile(r"\b(reclam\w*|insatisfeit\w*|ruim|pessim\w*|horrivel)\b"),
+    re.compile(r"\b(absurdo|um absurdo|surreal)\b"),
+    re.compile(r"\b(desconfiad\w*|nao confio|falta de confianca)\b"),
+    re.compile(r"\b(enrola\w*|enrolacao|demora demais|muito demorado)\b"),
+    re.compile(r"\b(caro demais|muito caro)\b"),
+)
+CONVERSATION_SENTIMENT_LABELS = frozenset({"positivo", "neutro", "negativo", "sem_evidencia"})
+CONVERSATION_SENTIMENT_SUPPORT_LEVELS = frozenset({"fraco", "moderado", "forte", "sem_evidencia"})
 
 
 def _normalize_ascii(value: str) -> str:
@@ -411,6 +431,47 @@ def _extract_urgency_strength(text: str) -> int:
 
 def _extract_competitor_comparison_signal(text: str) -> bool:
     return bool(COMPETITOR_COMPARISON_PATTERN.search(text))
+
+
+def _count_tone_hits(text: object, patterns: tuple[re.Pattern[str], ...]) -> int:
+    normalized = _normalize_for_match(_safe_string(text))
+    if not normalized:
+        return 0
+    return sum(1 for pattern in patterns if pattern.search(normalized))
+
+
+def derive_conversation_sentiment_label(
+    positive_tone_hits: object, negative_tone_hits: object
+) -> str:
+    positive_hits = _safe_int(positive_tone_hits)
+    negative_hits = _safe_int(negative_tone_hits)
+    total_hits = positive_hits + negative_hits
+    balance = positive_hits - negative_hits
+
+    if total_hits == 0:
+        return "sem_evidencia"
+    if balance >= 2 or (positive_hits >= 2 and negative_hits == 0):
+        return "positivo"
+    if balance <= -2 or (negative_hits >= 2 and positive_hits == 0):
+        return "negativo"
+    return "neutro"
+
+
+def derive_conversation_sentiment_support(
+    positive_tone_hits: object, negative_tone_hits: object
+) -> str:
+    positive_hits = _safe_int(positive_tone_hits)
+    negative_hits = _safe_int(negative_tone_hits)
+    total_hits = positive_hits + negative_hits
+    balance_magnitude = abs(positive_hits - negative_hits)
+
+    if total_hits == 0:
+        return "sem_evidencia"
+    if max(positive_hits, negative_hits) >= 2 or balance_magnitude >= 3:
+        return "forte"
+    if total_hits >= 2 or balance_magnitude >= 1:
+        return "moderado"
+    return "fraco"
 
 
 def _parse_json_list(raw: object) -> list[str]:
@@ -812,6 +873,17 @@ def build_gold(
     ordered_messages = silver_messages.sort_values(
         ["lead_key", "timestamp", "conversation_id", "message_id"]
     ).reset_index(drop=True)
+    inbound_message_body = ordered_messages["message_body"].where(
+        ordered_messages["is_inbound"], ""
+    )
+    ordered_messages = ordered_messages.assign(
+        positive_tone_hits_message=inbound_message_body.map(
+            lambda value: _count_tone_hits(value, POSITIVE_TONE_PATTERNS)
+        ),
+        negative_tone_hits_message=inbound_message_body.map(
+            lambda value: _count_tone_hits(value, NEGATIVE_TONE_PATTERNS)
+        ),
+    )
     grouped = ordered_messages.groupby("lead_key", dropna=False)
 
     message_aggregates = grouped.agg(
@@ -836,6 +908,8 @@ def build_gold(
         urgency_strength_max=("urgency_strength", "max"),
         competitor_mentions_count=("mentions_competitor", "sum"),
         competitor_comparison_hits=("competitor_comparison_signal", "sum"),
+        positive_tone_hits=("positive_tone_hits_message", "sum"),
+        negative_tone_hits=("negative_tone_hits_message", "sum"),
     ).reset_index()
 
     vehicle_context = (
@@ -913,6 +987,22 @@ def build_gold(
             gold["primary_competitor"],
             gold["competitor_mentions_count"],
             gold["competitor_comparison_hits"],
+            strict=False,
+        )
+    ]
+    gold["conversation_sentiment_label"] = [
+        derive_conversation_sentiment_label(positive_hits, negative_hits)
+        for positive_hits, negative_hits in zip(
+            gold["positive_tone_hits"],
+            gold["negative_tone_hits"],
+            strict=False,
+        )
+    ]
+    gold["conversation_sentiment_support"] = [
+        derive_conversation_sentiment_support(positive_hits, negative_hits)
+        for positive_hits, negative_hits in zip(
+            gold["positive_tone_hits"],
+            gold["negative_tone_hits"],
             strict=False,
         )
     ]

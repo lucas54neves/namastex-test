@@ -249,6 +249,10 @@ Principais colunas analiticas:
 - `price_objection_intensity`
 - `commercial_urgency_signal`
 - `competitor_pressure_level`
+- `conversation_sentiment_label`
+- `conversation_sentiment_support`
+- `positive_tone_hits`
+- `negative_tone_hits`
 
 Segmentacoes atuais:
 
@@ -264,6 +268,9 @@ Enriquecimentos analiticos adicionais:
 - `price_objection_intensity`: `nenhuma`, `leve` ou `forte`, derivada de sinais de cotacao, pressao de preco e contexto competitivo
 - `commercial_urgency_signal`: `nenhuma`, `moderada` ou `alta`, derivada de sinais linguísticos de urgencia e do ciclo observado do lead
 - `competitor_pressure_level`: `nenhuma`, `leve` ou `alta`, derivada de mencoes a concorrentes e sinais de comparacao comercial
+- `conversation_sentiment_label`: `positivo`, `neutro`, `negativo` ou `sem_evidencia`, derivado de heuristicas deterministicas sobre mensagens inbound do lead
+- `conversation_sentiment_support`: `fraco`, `moderado`, `forte` ou `sem_evidencia`, explicitando a forca observada das pistas heuristicas
+- `positive_tone_hits` e `negative_tone_hits`: contagens agregadas de familias de pistas lexicais positivas e negativas encontradas no historico inbound
 
 Exemplos de grouped analysis habilitados diretamente pela `Gold`:
 
@@ -271,6 +278,15 @@ Exemplos de grouped analysis habilitados diretamente pela `Gold`:
 - latencia media e distribuicao de `response_latency_band` por `audience_segment`, `city` ou `state`
 - intensidade de objecao de preco por canal de origem usando `price_objection_intensity`
 - pressao competitiva por perfil usando `competitor_pressure_level` e `primary_competitor`
+- leads com maior friccao comercial usando `conversation_sentiment_label = negativo` e `conversation_sentiment_support`
+- interacoes favoraveis para priorizacao comercial usando `conversation_sentiment_label = positivo` combinado com `contact_readiness`
+
+Limitacao importante sobre sentimento:
+
+- o repositorio nao implementa analise semantica de emocao nem inferencia por LLM
+- o campo de sentimento e um proxy deterministico e auditavel de tom conversacional comercial
+- a inferencia prioriza mensagens inbound do lead e pode retornar `sem_evidencia` quando nao ha pistas suficientes
+- sinais de preco, urgencia e concorrencia continuam existindo separadamente; o proxy de sentimento nao substitui esses campos especializados
 
 ## Politica de protecao de dados
 
