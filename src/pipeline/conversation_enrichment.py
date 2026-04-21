@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import pandas as pd
 
+from pipeline.env import env_flag
+from pipeline.llm_runtime import run_conversation_enrichment_graph, runtime_model_identity
 from pipeline.transforms import (
     NEGATIVE_TONE_PATTERNS,
     POSITIVE_TONE_PATTERNS,
@@ -76,20 +77,17 @@ def _stable_input_hash(payload: dict[str, Any]) -> str:
 
 
 def _llm_enabled(compiled_plan: dict[str, Any]) -> bool:
-    llm_cfg = cast(dict[str, Any], compiled_plan["llm"])
-    return bool(llm_cfg.get("enabled")) and os.getenv("PIPELINE_ENABLE_LLM_ENRICHMENT") == "1"
+    llm_cfg = cast(dict[str, Any], compiled_plan.get("llm") or {})
+    return env_flag("PIPELINE_ENABLE_LLM_ENRICHMENT", bool(llm_cfg.get("enabled")))
 
 
 def _prompt_version(compiled_plan: dict[str, Any]) -> str:
-    llm_cfg = cast(dict[str, Any], compiled_plan["llm"])
+    llm_cfg = cast(dict[str, Any], compiled_plan.get("llm") or {})
     return str(llm_cfg.get("prompt_version") or "v1")
 
 
 def _model_name(compiled_plan: dict[str, Any]) -> str:
-    llm_cfg = cast(dict[str, Any], compiled_plan["llm"])
-    provider = str(llm_cfg.get("provider") or "deterministic_fallback")
-    model = str(llm_cfg.get("model") or "").strip()
-    return model or provider
+    return runtime_model_identity(compiled_plan)
 
 
 def _max_by_severity(values: pd.Series) -> str:
@@ -305,9 +303,28 @@ def infer_conversation_semantics(
     payload: dict[str, Any],
     compiled_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    del payload
-    del compiled_plan
-    raise RuntimeError("No LLM provider configured for conversation enrichment")
+    return run_conversation_enrichment_graph(
+        payload,
+        compiled_plan,
+        validator=_validate_llm_response,
+    )
+
+
+def _summarize_provider_errors(provider_errors: list[dict[str, Any]]) -> str | None:
+    chunks = [
+        ":".join(
+            part
+            for part in (
+                _safe_string(error.get("provider")).strip(),
+                _safe_string(error.get("kind")).strip(),
+                _safe_string(error.get("detail")).strip(),
+            )
+            if part
+        )
+        for error in provider_errors
+    ]
+    normalized = [chunk for chunk in chunks if chunk]
+    return " | ".join(normalized) if normalized else None
 
 
 def _validate_llm_response(
@@ -358,6 +375,9 @@ def build_conversation_enrichment(
                 "llm_input_hash",
                 "prompt_version",
                 "llm_model",
+                "provider_name",
+                "provider_attempt_count",
+                "provider_error_summary",
                 "inference_status",
                 "processed_at_utc",
                 "sentiment_label",
@@ -410,6 +430,9 @@ def build_conversation_enrichment(
             "llm_input_hash": llm_input_hash,
             "prompt_version": prompt_version,
             "llm_model": model_name,
+            "provider_name": None,
+            "provider_attempt_count": 0,
+            "provider_error_summary": None,
             "processed_at_utc": _utc_now_iso(),
             "fallback_reason": None,
             "validation_error": None,
@@ -432,6 +455,9 @@ def build_conversation_enrichment(
                             "commercial_urgency_signal",
                             "recommended_next_action",
                             "explanation_short",
+                            "provider_name",
+                            "provider_attempt_count",
+                            "provider_error_summary",
                             "fallback_reason",
                             "validation_error",
                         )
@@ -465,12 +491,54 @@ def build_conversation_enrichment(
             )
             continue
 
-        validation_error = _validate_llm_response(llm_response, compiled_plan)
+        if "status" not in llm_response:
+            llm_response = {
+                "status": "success",
+                "provider_name": None,
+                "model_name": model_name,
+                "output": llm_response,
+                "validation_error": None,
+                "provider_errors": [],
+                "attempted_providers": [],
+            }
+
+        provider_errors = cast(list[dict[str, Any]], llm_response.get("provider_errors") or [])
+        attempted_providers = [
+            _safe_string(provider).strip()
+            for provider in cast(list[Any], llm_response.get("attempted_providers") or [])
+            if _safe_string(provider).strip()
+        ]
+        provider_error_summary = _summarize_provider_errors(provider_errors)
+        output_payload = cast(dict[str, Any] | None, llm_response.get("output"))
+        validation_error = _safe_string(llm_response.get("validation_error")).strip() or None
+        llm_status = _safe_string(llm_response.get("status")).strip() or "fallback"
+
+        if llm_status != "success" or output_payload is None:
+            rows.append(
+                {
+                    **base_row,
+                    **fallback,
+                    "provider_name": _safe_string(llm_response.get("provider_name")) or None,
+                    "provider_attempt_count": len(attempted_providers),
+                    "provider_error_summary": provider_error_summary,
+                    "inference_status": llm_status
+                    if llm_status in LLM_INFERENCE_STATUSES
+                    else "fallback",
+                    "fallback_reason": provider_error_summary or "provider_graph_fallback",
+                    "validation_error": validation_error,
+                }
+            )
+            continue
+
+        validation_error = _validate_llm_response(output_payload, compiled_plan)
         if validation_error is not None:
             rows.append(
                 {
                     **base_row,
                     **fallback,
+                    "provider_name": _safe_string(llm_response.get("provider_name")) or None,
+                    "provider_attempt_count": len(attempted_providers),
+                    "provider_error_summary": provider_error_summary,
                     "inference_status": "invalid_output",
                     "fallback_reason": "invalid_llm_response",
                     "validation_error": validation_error,
@@ -481,27 +549,30 @@ def build_conversation_enrichment(
         rows.append(
             {
                 **base_row,
+                "provider_name": _safe_string(llm_response.get("provider_name")) or None,
+                "provider_attempt_count": len(attempted_providers),
+                "provider_error_summary": provider_error_summary,
                 "inference_status": "success",
-                "sentiment_label": _safe_string(llm_response.get("sentiment_label")),
+                "sentiment_label": _safe_string(output_payload.get("sentiment_label")),
                 "sentiment_confidence_band": _safe_string(
-                    llm_response.get("sentiment_confidence_band")
+                    output_payload.get("sentiment_confidence_band")
                 ),
-                "intent_stage": _safe_string(llm_response.get("intent_stage")),
-                "persona_profile": _safe_string(llm_response.get("persona_profile")),
-                "audience_segment": _safe_string(llm_response.get("audience_segment")),
+                "intent_stage": _safe_string(output_payload.get("intent_stage")),
+                "persona_profile": _safe_string(output_payload.get("persona_profile")),
+                "audience_segment": _safe_string(output_payload.get("audience_segment")),
                 "price_objection_intensity": _safe_string(
-                    llm_response.get("price_objection_intensity")
+                    output_payload.get("price_objection_intensity")
                 ),
                 "competitor_pressure_level": _safe_string(
-                    llm_response.get("competitor_pressure_level")
+                    output_payload.get("competitor_pressure_level")
                 ),
                 "commercial_urgency_signal": _safe_string(
-                    llm_response.get("commercial_urgency_signal")
+                    output_payload.get("commercial_urgency_signal")
                 ),
                 "recommended_next_action": _safe_string(
-                    llm_response.get("recommended_next_action")
+                    output_payload.get("recommended_next_action")
                 ),
-                "explanation_short": _safe_string(llm_response.get("explanation_short")),
+                "explanation_short": _safe_string(output_payload.get("explanation_short")),
             }
         )
 
@@ -582,6 +653,9 @@ def validate_conversation_enrichment_frame(
         "llm_input_hash",
         "prompt_version",
         "llm_model",
+        "provider_name",
+        "provider_attempt_count",
+        "provider_error_summary",
         "inference_status",
         "processed_at_utc",
         "sentiment_label",

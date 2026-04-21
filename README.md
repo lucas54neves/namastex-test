@@ -207,6 +207,9 @@ O contrato de `silver_conversations_llm.parquet` inclui, entre outras:
 - `llm_input_hash`
 - `prompt_version`
 - `llm_model`
+- `provider_name`
+- `provider_attempt_count`
+- `provider_error_summary`
 - `inference_status`
 - `processed_at_utc`
 - `sentiment_label`
@@ -313,8 +316,10 @@ Exemplos de grouped analysis habilitados diretamente pela `Gold`:
 Observacoes sobre enrichment semantico:
 
 - o enrichment por conversa e opcional e fica fora do caminho de controle operacional do agente
-- quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1`, o pipeline tenta inferencia estruturada por conversa; sem provedor configurado ou com resposta invalida, aplica fallback deterministico
-- o cache evita recomputar conversas quando `llm_input_hash`, `prompt_version` e `llm_model` nao mudaram
+- quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1`, o pipeline monta um runtime dedicado em `src/pipeline/llm_runtime.py` para executar OpenAI como provider primario e Anthropic como fallback por conversa
+- o runtime registra `provider_name`, `provider_attempt_count` e `provider_error_summary` para auditoria sem expor payload cru nem credenciais
+- sem credenciais, com erro de provider ou com output invalido fora do vocabulario controlado, o pipeline persiste fallback deterministico e continua a publicacao
+- o cache evita recomputar conversas quando `llm_input_hash`, `prompt_version` e a identidade efetiva de modelos do runtime (`llm_model`) nao mudam
 - sinais de preco, urgencia e concorrencia continuam auditaveis e o `Gold` sempre permanece publicavel mesmo sem LLM
 
 ## Politica de protecao de dados
@@ -352,7 +357,8 @@ O pipeline e dirigido por spec:
 - `src/pipeline/operator.py` executa o ciclo operacional completo
 - `src/pipeline/agent.py` diagnostica falhas de validacao e escolhe playbooks seguros
 - `src/pipeline/llm_advisor.py` existe apenas como interface opcional do agente operacional; ele nao participa do caminho principal e pode estar desabilitado sem afetar a execucao
-- `src/pipeline/conversation_enrichment.py` monta payloads sanitizados por conversa, controla cache por hash, valida outputs estruturados e persiste fallback seguro
+- `src/pipeline/conversation_enrichment.py` monta payloads sanitizados por conversa, controla cache por hash, integra o runtime de providers, valida outputs estruturados e persiste fallback seguro
+- `src/pipeline/llm_runtime.py` concentra resolucao de configuracao, roteamento OpenAI -> Anthropic, metadata de tentativas e integracao opcional com LangChain/LangGraph
 
 Checks atuais de validacao:
 
@@ -419,13 +425,28 @@ venv/bin/python -m pytest -q
 venv/bin/python -m pytest tests/test_jobs.py -q
 ```
 
-Variaveis de ambiente operacionais:
+Configuracao por `.env`:
 
 ```bash
-export PIPELINE_POLL_INTERVAL_SECONDS="60"
-export PIPELINE_ALERT_WEBHOOK_URL="https://seu-endpoint-de-alerta"
-export PIPELINE_ALERT_SUPPRESSION_MINUTES="30"
-export PIPELINE_ENABLE_LLM_ENRICHMENT="0"
+cp .env.example .env
+```
+
+O runtime carrega automaticamente o arquivo `.env` na raiz do repositorio. Variaveis ja exportadas no shell continuam tendo precedencia.
+
+Variaveis de ambiente operacionais e de LLM:
+
+```bash
+PIPELINE_POLL_INTERVAL_SECONDS="60"
+PIPELINE_ALERT_WEBHOOK_URL="https://seu-endpoint-de-alerta"
+PIPELINE_ALERT_SUPPRESSION_MINUTES="30"
+PIPELINE_ENABLE_LLM_ENRICHMENT="0"
+PIPELINE_ENABLE_LLM_ADVISOR="0"
+OPENAI_API_KEY="sua-chave-openai"
+ANTHROPIC_API_KEY="sua-chave-anthropic"
+PIPELINE_LLM_OPENAI_MODEL="gpt-5-mini"
+PIPELINE_LLM_ANTHROPIC_MODEL="claude-sonnet"
+PIPELINE_LLM_TIMEOUT_SECONDS="20"
+PIPELINE_LLM_MAX_RETRIES="1"
 ```
 
 O modo continuo:

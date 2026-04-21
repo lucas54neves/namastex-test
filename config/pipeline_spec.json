@@ -273,6 +273,20 @@
   },
   "llm": {
     "enabled": false,
-    "provider": null
+    "prompt_version": "v1",
+    "timeout_seconds": 20,
+    "max_retries": 1,
+    "providers": {
+      "openai": {
+        "enabled": true,
+        "role": "primary",
+        "model": "gpt-5-mini"
+      },
+      "anthropic": {
+        "enabled": true,
+        "role": "fallback",
+        "model": "claude-sonnet"
+      }
+    }
   }
 }

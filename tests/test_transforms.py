@@ -306,6 +306,8 @@ def test_build_conversation_enrichment_uses_cache_and_marks_cache_hit() -> None:
 
     assert first.iloc[0]["inference_status"] == "disabled"
     assert second.iloc[0]["inference_status"] == "skipped_cache_hit"
+    assert "provider_name" in second.columns
+    assert second.iloc[0]["provider_attempt_count"] == 0
 
 
 def test_build_conversation_enrichment_accepts_mocked_llm_success(monkeypatch) -> None:
@@ -343,16 +345,24 @@ def test_build_conversation_enrichment_accepts_mocked_llm_success(monkeypatch) -
         del payload
         del compiled_plan
         return {
-            "sentiment_label": "neutro",
-            "sentiment_confidence_band": "moderado",
-            "intent_stage": "pesquisa_mercado",
-            "persona_profile": "cotador_comparador",
-            "audience_segment": "oferta_competitiva",
-            "price_objection_intensity": "forte",
-            "competitor_pressure_level": "alta",
-            "commercial_urgency_signal": "moderada",
-            "recommended_next_action": "reforcar_diferenciais_e_retirar_objecao_preco",
-            "explanation_short": "Lead compara proposta concorrente com interesse ativo.",
+            "status": "success",
+            "provider_name": "openai",
+            "model_name": "gpt-5-mini",
+            "output": {
+                "sentiment_label": "neutro",
+                "sentiment_confidence_band": "moderado",
+                "intent_stage": "pesquisa_mercado",
+                "persona_profile": "cotador_comparador",
+                "audience_segment": "oferta_competitiva",
+                "price_objection_intensity": "forte",
+                "competitor_pressure_level": "alta",
+                "commercial_urgency_signal": "moderada",
+                "recommended_next_action": "reforcar_diferenciais_e_retirar_objecao_preco",
+                "explanation_short": "Lead compara proposta concorrente com interesse ativo.",
+            },
+            "validation_error": None,
+            "provider_errors": [],
+            "attempted_providers": ["openai"],
         }
 
     monkeypatch.setattr(conversation_enrichment, "infer_conversation_semantics", fake_infer)
@@ -360,12 +370,107 @@ def test_build_conversation_enrichment_accepts_mocked_llm_success(monkeypatch) -
         silver_messages,
         {
             **get_default_compiled_plan(),
-            "llm": {"enabled": True, "provider": "mock", "model": "mock-model"},
+            "llm": {
+                "enabled": True,
+                "prompt_version": "v1",
+                "providers": {
+                    "openai": {"enabled": True, "model": "gpt-5-mini"},
+                    "anthropic": {"enabled": True, "model": "claude-sonnet"},
+                },
+            },
         },
     )
 
     assert enrichment.iloc[0]["inference_status"] == "success"
     assert enrichment.iloc[0]["persona_profile"] == "cotador_comparador"
+    assert enrichment.iloc[0]["provider_name"] == "openai"
+    assert enrichment.iloc[0]["provider_attempt_count"] == 1
+
+
+def test_build_conversation_enrichment_records_provider_fallback_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("PIPELINE_ENABLE_LLM_ENRICHMENT", "1")
+
+    silver_messages = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": "lead_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "message_id": "m1",
+                "direction": "inbound",
+                "message_type": "text",
+                "message_body_masked": "Porto fez mais barato, quero comparar",
+                "mentions_vehicle": False,
+                "mentions_competitor": True,
+                "mentions_sinistro": False,
+                "quoted_price": 2500.0,
+                "metadata_response_time_sec": 60.0,
+                "contains_email": False,
+                "contains_phone": False,
+                "contains_cpf": False,
+                "contains_cep": False,
+                "contains_plate": False,
+                "price_objection_signal": True,
+                "urgency_strength": 1,
+                "competitor_comparison_signal": True,
+                "competitor_mentioned": "porto_seguro",
+            }
+        ]
+    )
+
+    def fake_infer(payload, compiled_plan):
+        del payload
+        del compiled_plan
+        return {
+            "status": "success",
+            "provider_name": "anthropic",
+            "model_name": "claude-sonnet",
+            "output": {
+                "sentiment_label": "neutro",
+                "sentiment_confidence_band": "moderado",
+                "intent_stage": "pesquisa_mercado",
+                "persona_profile": "cotador_comparador",
+                "audience_segment": "oferta_competitiva",
+                "price_objection_intensity": "forte",
+                "competitor_pressure_level": "alta",
+                "commercial_urgency_signal": "moderada",
+                "recommended_next_action": "reforcar_diferenciais_e_retirar_objecao_preco",
+                "explanation_short": "Lead compara proposta concorrente com interesse ativo.",
+            },
+            "validation_error": None,
+            "provider_errors": [
+                {
+                    "provider": "openai",
+                    "kind": "invalid_output",
+                    "detail": "invalid_intent_stage:<empty>",
+                }
+            ],
+            "attempted_providers": ["openai", "anthropic"],
+        }
+
+    monkeypatch.setattr(conversation_enrichment, "infer_conversation_semantics", fake_infer)
+    enrichment = build_conversation_enrichment(
+        silver_messages,
+        {
+            **get_default_compiled_plan(),
+            "llm": {
+                "enabled": True,
+                "prompt_version": "v1",
+                "providers": {
+                    "openai": {"enabled": True, "model": "gpt-5-mini"},
+                    "anthropic": {"enabled": True, "model": "claude-sonnet"},
+                },
+            },
+        },
+    )
+
+    assert enrichment.iloc[0]["inference_status"] == "success"
+    assert enrichment.iloc[0]["provider_name"] == "anthropic"
+    assert enrichment.iloc[0]["provider_attempt_count"] == 2
+    assert (
+        "openai:invalid_output:invalid_intent_stage:<empty>"
+        in enrichment.iloc[0]["provider_error_summary"]
+    )
 
 
 def test_consolidate_gold_semantics_respects_dominance_and_recency() -> None:

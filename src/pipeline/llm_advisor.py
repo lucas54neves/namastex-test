@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import os
 from typing import Any
+
+from pipeline.env import env_flag
 
 
 def get_llm_advice(context: dict[str, Any], compiled_plan: dict[str, Any]) -> dict[str, Any]:
     llm_cfg = compiled_plan["llm"]
-    enabled = bool(llm_cfg.get("enabled")) and os.getenv("PIPELINE_ENABLE_LLM_ADVISOR") == "1"
+    enabled = env_flag("PIPELINE_ENABLE_LLM_ADVISOR", bool(llm_cfg.get("enabled")))
     if not enabled:
         return {
             "enabled": False,

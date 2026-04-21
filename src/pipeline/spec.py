@@ -339,7 +339,21 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
     },
     "llm": {
         "enabled": False,
-        "provider": None,
+        "prompt_version": "v1",
+        "timeout_seconds": 20,
+        "max_retries": 1,
+        "providers": {
+            "openai": {
+                "enabled": True,
+                "role": "primary",
+                "model": "gpt-5-mini",
+            },
+            "anthropic": {
+                "enabled": True,
+                "role": "fallback",
+                "model": "claude-sonnet",
+            },
+        },
     },
 }
 
