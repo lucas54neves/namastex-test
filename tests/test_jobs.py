@@ -102,6 +102,8 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     assert report["row_counts"] == {"bronze": 2, "silver": 1, "silver_messages": 2, "gold": 1}
     assert report["pipeline_spec_path"].endswith("pipeline_spec.json")
     assert "planner_report" in agent_report
+    assert agent_report["planner_report"]["report_path"].endswith("latest_plan_report.json")
+    assert agent_report["auto_remediation"]["classification"] == "not_applicable"
     assert alert_report["event"]["severity"] == "info"
     assert alert_report["event"]["should_alert"] is False
     assert "sender_name" not in silver_df.columns
@@ -186,6 +188,7 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
     assert result.status == "success_after_auto_remediation"
     assert agent_report["status"] == "auto_remediated"
     assert agent_report["auto_remediation"]["applied"] is True
+    assert agent_report["auto_remediation"]["classification"] == "auto_remediated"
     assert agent_report["decisions"]
     assert alert_report["event"]["should_alert"] is False
 
@@ -204,3 +207,21 @@ def test_run_pipeline_quarantines_invalid_rows(tmp_path: Path) -> None:
     quarantine_report = agent_report["quarantine_report"]
     assert quarantine_report["applied"] is True
     assert quarantine_report["quarantined_rows"] == 1
+
+
+def test_build_monitor_snapshot_separates_operational_and_structural_fields(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = build_paths(root)
+    run_pipeline(paths, force=True)
+
+    from pipeline.jobs import build_monitor_snapshot
+
+    snapshot = build_monitor_snapshot(paths)
+
+    assert snapshot["planner_report_path"].endswith("latest_plan_report.json")
+    assert isinstance(snapshot["planner_proposals"], list)
+    assert isinstance(snapshot["auto_remediation_actions"], list)

@@ -68,6 +68,27 @@ def alert_report_file(paths: PipelinePaths) -> Path:
     return paths.monitoring / "latest_alert_report.json"
 
 
+def plan_report_file(paths: PipelinePaths) -> Path:
+    return paths.monitoring / "latest_plan_report.json"
+
+
+def _planner_report_summary(paths: PipelinePaths, planner_report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "report_path": str(plan_report_file(paths)),
+        "proposal_id": planner_report.get("proposal_id"),
+        "proposal_count": len(planner_report.get("proposals", [])),
+        "requires_approval": planner_report.get("requires_approval", False),
+        "approved": planner_report.get("approved", False),
+        "applied": planner_report.get("applied", False),
+        "applied_proposal_ids": planner_report.get("applied_proposal_ids", []),
+        "applied_proposal_types": planner_report.get("applied_proposal_types", []),
+    }
+
+
+def _incident_id() -> str:
+    return f"incident_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
+
+
 def _run_record(
     source_fingerprint: dict[str, Any],
     executed: bool,
@@ -103,6 +124,7 @@ def _skip_artifacts(paths: PipelinePaths) -> PipelineArtifacts:
 
 
 def _build_agent_report(
+    incident_id: str,
     status: str,
     diagnoses: list[dict[str, Any]],
     auto_remediation: dict[str, Any] | None = None,
@@ -114,6 +136,7 @@ def _build_agent_report(
 ) -> dict[str, Any]:
     return {
         "generated_at_utc": _utc_now_iso(),
+        "incident_id": incident_id,
         "status": status,
         "diagnoses": diagnoses,
         "auto_remediation": auto_remediation or {},
@@ -182,6 +205,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
     spec = ensure_pipeline_spec(paths.pipeline_spec)
     compiled_plan = compile_pipeline_spec(spec)
     planner_report = plan_pipeline_spec(paths)
+    planner_summary = _planner_report_summary(paths, planner_report)
 
     state_path = state_file(paths)
     report_path = validation_report_file(paths)
@@ -194,10 +218,18 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
 
     if not force and not has_source_changed(current_fingerprint_obj, previous_fingerprint):
         agent_report = _build_agent_report(
+            incident_id=_incident_id(),
             status="idle_no_source_change",
             diagnoses=[],
+            auto_remediation={
+                "classification": "not_applicable",
+                "attempted": False,
+                "applied": False,
+                "actions": [],
+                "resolved": False,
+            },
             fallback={"applied": False},
-            planner_report=planner_report,
+            planner_report=planner_summary,
         )
         run_record = _run_record(
             source_fingerprint=current_fingerprint,
@@ -280,9 +312,18 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
 
         agent_status = "healthy"
         agent_report = _build_agent_report(
+            incident_id=_incident_id(),
             status=agent_status,
             diagnoses=[],
-            planner_report=planner_report,
+            auto_remediation={
+                "classification": "not_applicable",
+                "attempted": False,
+                "applied": False,
+                "actions": [],
+                "resolved": False,
+            },
+            fallback={"applied": False},
+            planner_report=planner_summary,
             quarantine_report=cast(dict[str, Any], quarantine["report"]),
         )
         run_status = "success"
@@ -327,23 +368,44 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 row_counts = cast(dict[str, Any], validation_summary["row_counts"])
                 agent_status = "auto_remediated"
                 run_status = "success_after_auto_remediation"
+                remediation_classification = "auto_remediated"
             else:
-                agent_status = "degraded_validation_failed"
+                any_auto_remediable = any(
+                    bool(diagnosis["auto_remediable"]) for diagnosis in diagnoses
+                )
+                agent_status = (
+                    "manual_intervention_required" if any_auto_remediable else "not_auto_remediable"
+                )
                 run_status = "validation_failed"
+                remediation_classification = (
+                    "unresolved_manual_action" if any_auto_remediable else "not_auto_remediable"
+                )
 
             agent_report = _build_agent_report(
+                incident_id=_incident_id(),
                 status=agent_status,
                 diagnoses=diagnoses,
                 auto_remediation={
+                    "classification": remediation_classification,
+                    "attempted": True,
                     "applied": bool(remediation["actions"]),
                     "actions": remediation["actions"],
                     "resolved": remediation["resolved"],
                 },
                 fallback={"applied": False},
                 decisions=cast(list[dict[str, Any]], remediation["decisions"]),
-                planner_report=planner_report,
+                planner_report=planner_summary
+                | {
+                    "related_incident_id": None,
+                    "related_root_causes": [
+                        diagnosis["kind"]
+                        for diagnosis in diagnoses
+                        if not diagnosis["auto_remediable"]
+                    ],
+                },
                 quarantine_report=cast(dict[str, Any], quarantine["report"]),
             )
+            agent_report["planner_report"]["related_incident_id"] = agent_report["incident_id"]
 
         run_record = _run_record(
             source_fingerprint=current_fingerprint,
@@ -357,10 +419,16 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             agent_summary={
                 "status": agent_report["status"],
                 "diagnosis_count": len(agent_report["diagnoses"]),
+                "incident_id": agent_report["incident_id"],
                 "auto_remediation_applied": agent_report["auto_remediation"].get(
                     "applied",
                     False,
                 ),
+                "auto_remediation_classification": agent_report["auto_remediation"].get(
+                    "classification"
+                ),
+                "planner_proposal_count": agent_report["planner_report"].get("proposal_count", 0),
+                "planner_applied": agent_report["planner_report"].get("applied", False),
             },
         )
         alert_report = _build_alert_report(paths, run_record, agent_report, validation_summary)
@@ -411,8 +479,18 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             "pipeline_spec_path": str(paths.pipeline_spec),
         }
         agent_report = _build_agent_report(
+            incident_id=_incident_id(),
             status="fallback_applied" if fallback_applied else "manual_intervention_required",
             diagnoses=[diagnosis],
+            auto_remediation={
+                "classification": "escalated_to_fallback"
+                if fallback_applied
+                else "not_auto_remediable",
+                "attempted": False,
+                "applied": False,
+                "actions": [],
+                "resolved": False,
+            },
             fallback={
                 "applied": fallback_applied,
                 "artifacts": last_successful_artifacts,
@@ -424,9 +502,14 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                     "reason": "Erro inesperado durante a execução do runtime.",
                 }
             ],
-            planner_report=planner_report,
+            planner_report=planner_summary
+            | {
+                "related_incident_id": None,
+                "related_root_causes": [diagnosis["kind"]],
+            },
             exception=f"{type(exc).__name__}: {exc}",
         )
+        agent_report["planner_report"]["related_incident_id"] = agent_report["incident_id"]
         run_record = _run_record(
             source_fingerprint=current_fingerprint,
             executed=True,
@@ -439,7 +522,13 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             agent_summary={
                 "status": agent_report["status"],
                 "diagnosis_count": 1,
+                "incident_id": agent_report["incident_id"],
                 "fallback_applied": fallback_applied,
+                "auto_remediation_classification": agent_report["auto_remediation"].get(
+                    "classification"
+                ),
+                "planner_proposal_count": agent_report["planner_report"].get("proposal_count", 0),
+                "planner_applied": agent_report["planner_report"].get("applied", False),
             },
         )
         alert_report = _build_alert_report(paths, run_record, agent_report, validation_summary)
@@ -463,7 +552,7 @@ def build_monitor_snapshot(paths: PipelinePaths) -> dict[str, Any]:
     report_path = validation_report_file(paths)
     agent_report_path = agent_report_file(paths)
     alert_report_path = alert_report_file(paths)
-    plan_report_path = paths.monitoring / "latest_plan_report.json"
+    plan_report_path = plan_report_file(paths)
     state = load_pipeline_state(state_path)
     latest_report = read_json(report_path, default={})
     latest_agent_report = read_json(agent_report_path, default={})
@@ -484,13 +573,25 @@ def build_monitor_snapshot(paths: PipelinePaths) -> dict[str, Any]:
         "latest_failed_checks": latest_report.get("failed_checks", []),
         "latest_agent_status": latest_agent_report.get("status"),
         "latest_agent_diagnoses": latest_agent_report.get("diagnoses", []),
+        "auto_remediation_applied": latest_agent_report.get("auto_remediation", {}).get(
+            "applied", False
+        ),
+        "auto_remediation_actions": latest_agent_report.get("auto_remediation", {}).get(
+            "actions", []
+        ),
+        "auto_remediation_classification": latest_agent_report.get("auto_remediation", {}).get(
+            "classification"
+        ),
         "latest_agent_fallback": latest_agent_report.get("fallback", {}),
+        "planner_report_path": str(plan_report_path),
         "latest_planner_changes": latest_plan_report.get(
             "proposals",
             latest_plan_report.get("changes", []),
         ),
         "latest_planner_proposals": latest_plan_report.get("proposals", []),
         "latest_planner_applied": latest_plan_report.get("applied"),
+        "planner_proposals": latest_plan_report.get("proposals", []),
+        "planner_applied": latest_plan_report.get("applied", False),
         "latest_alert_severity": latest_alert_report.get("event", {}).get("severity"),
         "latest_alert_should_alert": latest_alert_report.get("event", {}).get("should_alert"),
         "latest_alert_delivery": latest_alert_report.get("delivery", {}),

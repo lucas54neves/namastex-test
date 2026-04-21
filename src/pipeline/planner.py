@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -8,7 +9,12 @@ from typing import Any
 
 import pandas as pd
 
-from pipeline.approval import is_proposal_approved
+from pipeline.approval import (
+    APPROVAL_STATUS_APPROVED,
+    APPROVAL_STATUS_PENDING,
+    APPROVAL_STATUS_REJECTED,
+    get_proposal_approval_status,
+)
 from pipeline.compiler import compile_pipeline_spec
 from pipeline.config import PipelinePaths
 from pipeline.io import read_json, write_json
@@ -24,6 +30,8 @@ PROPOSAL_FAMILY_TRANSFORMATION = "transformation_rule_change"
 PROPOSAL_STATUS_PROPOSED = "proposed"
 PROPOSAL_STATUS_APPROVED = "approved"
 PROPOSAL_STATUS_APPLIED = "applied"
+PROPOSAL_STATUS_REJECTED = "rejected"
+PROPOSAL_STATUS_NOT_APPLICABLE = "not_applicable"
 
 _CAMEL_CASE_PATTERN = re.compile(r"(?<!^)(?=[A-Z])")
 
@@ -69,8 +77,23 @@ def _build_context(context_type: str, summary: str, evidence: dict[str, Any]) ->
     }
 
 
+def _proposal_fingerprint(
+    proposal_type: str,
+    proposal_family: str,
+    proposed_change: dict[str, Any],
+    items: list[str],
+) -> str:
+    payload = {
+        "proposal_type": proposal_type,
+        "proposal_family": proposal_family,
+        "proposed_change": proposed_change,
+        "items": items,
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+
 def _build_proposal(
-    proposal_id: str,
+    planning_run_id: str,
     proposal_type: str,
     proposal_family: str,
     title: str,
@@ -80,15 +103,22 @@ def _build_proposal(
     risk: str,
     impact_scope: str,
     requires_approval: bool,
-    safe_auto_apply: bool,
     rationale: str,
     affected_layers: list[str],
     affected_artifacts: list[str],
     privacy_impact: str,
     items: list[str] | None = None,
 ) -> dict[str, Any]:
+    proposal_items = items or []
+    proposal_id = "proposal_" + _proposal_fingerprint(
+        proposal_type,
+        proposal_family,
+        proposed_change,
+        proposal_items,
+    )
     return {
         "proposal_id": proposal_id,
+        "planning_run_id": planning_run_id,
         "proposal_type": proposal_type,
         "proposal_family": proposal_family,
         "title": title,
@@ -98,41 +128,46 @@ def _build_proposal(
         "risk": risk,
         "impact_scope": impact_scope,
         "requires_approval": requires_approval,
-        "safe_auto_apply": safe_auto_apply,
+        "safe_auto_apply": False,
+        "recommendation_only": True,
         "rationale": rationale,
         "affected_layers": affected_layers,
         "affected_artifacts": affected_artifacts,
         "privacy_impact": privacy_impact,
         "status": PROPOSAL_STATUS_PROPOSED,
-        "items": items or [],
+        "items": proposal_items,
     }
 
 
 def _apply_supported_proposals(
     spec: dict[str, Any], proposals: list[dict[str, Any]]
-) -> tuple[dict[str, Any], list[str]]:
+) -> tuple[dict[str, Any], list[str], list[str]]:
     updated_spec = copy.deepcopy(spec)
     applied_types: list[str] = []
+    applied_ids: list[str] = []
 
     for proposal in proposals:
         proposal_type = str(proposal["proposal_type"])
+        proposal_id = str(proposal["proposal_id"])
         items = list(proposal.get("items", []))
         if proposal_type == "bronze_required_columns_addition" and items:
             updated_spec["bronze"]["required_columns"] = sorted(
                 set(updated_spec["bronze"]["required_columns"]) | set(items)
             )
             applied_types.append(proposal_type)
+            applied_ids.append(proposal_id)
         elif proposal_type == "silver_metadata_fields_addition" and items:
             updated_spec["silver"]["metadata_fields"] = sorted(
                 set(updated_spec["silver"]["metadata_fields"]) | set(items)
             )
             applied_types.append(proposal_type)
+            applied_ids.append(proposal_id)
 
-    return updated_spec, applied_types
+    return updated_spec, applied_types, applied_ids
 
 
 def _schema_proposals(
-    proposal_id: str,
+    planning_run_id: str,
     spec: dict[str, Any],
     observed_columns: list[str],
     observed_metadata_fields: list[str],
@@ -150,7 +185,7 @@ def _schema_proposals(
         contexts.append(context)
         proposals.append(
             _build_proposal(
-                proposal_id=proposal_id,
+                planning_run_id=planning_run_id,
                 proposal_type="bronze_required_columns_addition",
                 proposal_family=PROPOSAL_FAMILY_SCHEMA_UPDATE,
                 title="Declarar novas colunas obrigatorias na Bronze",
@@ -167,7 +202,6 @@ def _schema_proposals(
                 risk="medium",
                 impact_scope="bronze",
                 requires_approval=True,
-                safe_auto_apply=False,
                 rationale=(
                     "Novas colunas na Bronze mudam o contrato de ingestao e exigem revisao humana."
                 ),
@@ -193,7 +227,7 @@ def _schema_proposals(
         contexts.append(context)
         proposals.append(
             _build_proposal(
-                proposal_id=proposal_id,
+                planning_run_id=planning_run_id,
                 proposal_type="silver_metadata_fields_addition",
                 proposal_family=PROPOSAL_FAMILY_SCHEMA_UPDATE,
                 title="Declarar novos campos de metadata na Silver",
@@ -209,11 +243,10 @@ def _schema_proposals(
                 ),
                 risk="low",
                 impact_scope="silver",
-                requires_approval=False,
-                safe_auto_apply=True,
+                requires_approval=True,
                 rationale=(
-                    "Declaracoes de campos de metadata podem ser atualizadas "
-                    "de forma controlada sem alterar a semantica publicada."
+                    "Mesmo mudancas declarativas no contrato publicado da Silver "
+                    "devem seguir aprovacao estrutural explicita."
                 ),
                 affected_layers=["silver"],
                 affected_artifacts=[
@@ -229,7 +262,7 @@ def _schema_proposals(
 
 
 def _validation_proposals(
-    proposal_id: str,
+    planning_run_id: str,
     metadata_objects: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     boolean_string_fields: dict[str, int] = {}
@@ -248,7 +281,7 @@ def _validation_proposals(
         {"items": items, "string_value_count": sum(boolean_string_fields.values())},
     )
     proposal = _build_proposal(
-        proposal_id=proposal_id,
+        planning_run_id=planning_run_id,
         proposal_type="metadata_boolean_validation_addition",
         proposal_family=PROPOSAL_FAMILY_VALIDATION,
         title="Adicionar validacao para coercao de booleanos em metadata",
@@ -266,7 +299,6 @@ def _validation_proposals(
         risk="medium",
         impact_scope="silver",
         requires_approval=True,
-        safe_auto_apply=False,
         rationale=(
             "Campos booleanos serializados como texto indicam uma lacuna "
             "de qualidade que precisa ser explicitamente validada."
@@ -283,7 +315,7 @@ def _validation_proposals(
 
 
 def _derived_column_proposals(
-    proposal_id: str,
+    planning_run_id: str,
     spec: dict[str, Any],
     metadata_objects: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -303,7 +335,7 @@ def _derived_column_proposals(
         {"items": ["is_business_hours"], "observed_count": len(metadata_objects)},
     )
     proposal = _build_proposal(
-        proposal_id=proposal_id,
+        planning_run_id=planning_run_id,
         proposal_type="gold_business_hours_metric_addition",
         proposal_family=PROPOSAL_FAMILY_DERIVED,
         title="Adicionar metrica derivada de horario comercial na Gold",
@@ -321,7 +353,6 @@ def _derived_column_proposals(
         risk="medium",
         impact_scope="gold",
         requires_approval=True,
-        safe_auto_apply=False,
         rationale=(
             "Ja existe sinal suficiente na Bronze para derivar uma metrica "
             "adicional util sem depender de texto livre."
@@ -338,7 +369,7 @@ def _derived_column_proposals(
 
 
 def _segmentation_proposals(
-    proposal_id: str,
+    planning_run_id: str,
     spec: dict[str, Any],
     bronze_df: pd.DataFrame,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -362,7 +393,7 @@ def _segmentation_proposals(
         {"items": ["em_negociacao"], "observed_count": negotiation_count},
     )
     proposal = _build_proposal(
-        proposal_id=proposal_id,
+        planning_run_id=planning_run_id,
         proposal_type="intent_stage_negotiation_extension",
         proposal_family=PROPOSAL_FAMILY_SEGMENTATION,
         title="Estender segmentacao de intent_stage para negociacao",
@@ -380,7 +411,6 @@ def _segmentation_proposals(
         risk="high",
         impact_scope="gold",
         requires_approval=True,
-        safe_auto_apply=False,
         rationale=(
             "Alteracoes de segmentacao mudam interpretacao analitica "
             "e precisam de aprovacao explicita."
@@ -397,7 +427,7 @@ def _segmentation_proposals(
 
 
 def _transformation_proposals(
-    proposal_id: str,
+    planning_run_id: str,
     metadata_objects: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     normalization_gaps: dict[str, str] = {}
@@ -421,7 +451,7 @@ def _transformation_proposals(
         {"items": items, "normalized_mapping": normalization_gaps},
     )
     proposal = _build_proposal(
-        proposal_id=proposal_id,
+        planning_run_id=planning_run_id,
         proposal_type="metadata_key_normalization_rule",
         proposal_family=PROPOSAL_FAMILY_TRANSFORMATION,
         title="Explicitar regra de normalizacao de chaves de metadata",
@@ -438,7 +468,6 @@ def _transformation_proposals(
         risk="medium",
         impact_scope="cross_layer",
         requires_approval=True,
-        safe_auto_apply=False,
         rationale=(
             "Variacoes de naming geram inconsistencias de transformacao "
             "e devem virar regra explicita de normalizacao."
@@ -461,7 +490,7 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
     observed_columns = sorted(bronze_df.columns.tolist())
     observed_metadata_fields = _discover_metadata_fields(metadata_objects)
 
-    proposal_id = f"proposal_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
+    planning_run_id = f"planning_run_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
     detected_contexts = [
         _build_context(
             "bronze_observation_summary",
@@ -477,36 +506,50 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
     proposals: list[dict[str, Any]] = []
 
     detector_results = [
-        _schema_proposals(proposal_id, spec, observed_columns, observed_metadata_fields),
-        _validation_proposals(proposal_id, metadata_objects),
-        _derived_column_proposals(proposal_id, spec, metadata_objects),
-        _segmentation_proposals(proposal_id, spec, bronze_df),
-        _transformation_proposals(proposal_id, metadata_objects),
+        _schema_proposals(planning_run_id, spec, observed_columns, observed_metadata_fields),
+        _validation_proposals(planning_run_id, metadata_objects),
+        _derived_column_proposals(planning_run_id, spec, metadata_objects),
+        _segmentation_proposals(planning_run_id, spec, bronze_df),
+        _transformation_proposals(planning_run_id, metadata_objects),
     ]
     for contexts, generated_proposals in detector_results:
         detected_contexts.extend(contexts)
         proposals.extend(generated_proposals)
 
+    approval_status_by_proposal = {
+        str(proposal["proposal_id"]): get_proposal_approval_status(
+            paths, str(proposal["proposal_id"])
+        )
+        for proposal in proposals
+    }
+    approved_proposal_ids = sorted(
+        proposal_id
+        for proposal_id, status in approval_status_by_proposal.items()
+        if status == APPROVAL_STATUS_APPROVED
+    )
+    rejected_proposal_ids = sorted(
+        proposal_id
+        for proposal_id, status in approval_status_by_proposal.items()
+        if status == APPROVAL_STATUS_REJECTED
+    )
     requires_approval = any(bool(proposal["requires_approval"]) for proposal in proposals)
-    approved = is_proposal_approved(paths, proposal_id) if requires_approval else False
-    planner_config = spec["agent"]["planner"]
-    auto_apply_safe = bool(planner_config.get("auto_apply_safe_updates", False))
+    approved = bool(proposals) and all(
+        approval_status_by_proposal[str(proposal["proposal_id"])] == APPROVAL_STATUS_APPROVED
+        for proposal in proposals
+        if proposal["requires_approval"]
+    )
 
     eligible_for_application = [
         proposal
         for proposal in proposals
-        if proposal["proposal_family"] == PROPOSAL_FAMILY_SCHEMA_UPDATE
-        and (proposal["safe_auto_apply"] or approved)
+        if approval_status_by_proposal[str(proposal["proposal_id"])] == APPROVAL_STATUS_APPROVED
     ]
-    should_apply = bool(eligible_for_application) and (
-        auto_apply_safe
-        or any(not proposal["safe_auto_apply"] for proposal in eligible_for_application)
-    )
 
     applied_proposal_types: list[str] = []
+    applied_proposal_ids: list[str] = []
     active_spec = spec
-    if should_apply:
-        updated_spec, applied_proposal_types = _apply_supported_proposals(
+    if eligible_for_application:
+        updated_spec, applied_proposal_types, applied_proposal_ids = _apply_supported_proposals(
             spec, eligible_for_application
         )
         if applied_proposal_types:
@@ -514,8 +557,9 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             history = read_json(paths.spec_history, default={"changes": []})
             history.setdefault("changes", []).append(
                 {
-                    "proposal_id": proposal_id,
+                    "planning_run_id": planning_run_id,
                     "applied_at_utc": _utc_now_iso(),
+                    "applied_proposal_ids": applied_proposal_ids,
                     "applied_proposal_types": applied_proposal_types,
                     "proposals": proposals,
                 }
@@ -524,10 +568,18 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             active_spec = updated_spec
 
     for proposal in proposals:
-        if proposal["proposal_type"] in applied_proposal_types:
+        proposal_id = str(proposal["proposal_id"])
+        approval_status = approval_status_by_proposal[proposal_id]
+        if proposal_id in applied_proposal_ids:
             proposal["status"] = PROPOSAL_STATUS_APPLIED
-        elif approved and proposal["requires_approval"]:
+        elif approval_status == APPROVAL_STATUS_APPROVED:
             proposal["status"] = PROPOSAL_STATUS_APPROVED
+        elif approval_status == APPROVAL_STATUS_REJECTED:
+            proposal["status"] = PROPOSAL_STATUS_REJECTED
+        elif approval_status == APPROVAL_STATUS_PENDING and proposal["requires_approval"]:
+            proposal["status"] = PROPOSAL_STATUS_PROPOSED
+        else:
+            proposal["status"] = PROPOSAL_STATUS_NOT_APPLICABLE
 
     compiled_plan = compile_pipeline_spec(active_spec)
     llm_advice = get_llm_advice(
@@ -542,7 +594,7 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
 
     report = {
         "generated_at_utc": _utc_now_iso(),
-        "proposal_id": proposal_id,
+        "proposal_id": planning_run_id,
         "detected_contexts": detected_contexts,
         "observed_columns": observed_columns,
         "observed_metadata_fields": observed_metadata_fields,
@@ -550,13 +602,35 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         "changes": proposals,
         "requires_approval": requires_approval,
         "approved": approved,
-        "applied": bool(applied_proposal_types),
+        "approved_proposal_ids": approved_proposal_ids,
+        "rejected_proposal_ids": rejected_proposal_ids,
+        "applied": bool(applied_proposal_ids),
+        "applied_proposal_ids": applied_proposal_ids,
         "applied_proposal_types": applied_proposal_types,
         "llm_advice": llm_advice,
         "summary": {
             "proposal_count": len(proposals),
             "context_count": len(detected_contexts),
             "families": sorted({str(proposal["proposal_family"]) for proposal in proposals}),
+            "status_counts": {
+                PROPOSAL_STATUS_PROPOSED: sum(
+                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_PROPOSED
+                ),
+                PROPOSAL_STATUS_APPROVED: sum(
+                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_APPROVED
+                ),
+                PROPOSAL_STATUS_APPLIED: sum(
+                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_APPLIED
+                ),
+                PROPOSAL_STATUS_REJECTED: sum(
+                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_REJECTED
+                ),
+                PROPOSAL_STATUS_NOT_APPLICABLE: sum(
+                    1
+                    for proposal in proposals
+                    if proposal["status"] == PROPOSAL_STATUS_NOT_APPLICABLE
+                ),
+            },
         },
     }
     write_json(report, paths.monitoring / "latest_plan_report.json")

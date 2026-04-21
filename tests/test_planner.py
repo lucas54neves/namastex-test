@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from pipeline.approval import approve_proposal
 from pipeline.config import build_paths
 from pipeline.planner import plan_pipeline_spec
 
@@ -59,7 +60,8 @@ def test_planner_emits_structured_schema_update_for_new_metadata_field(tmp_path:
     )
     assert proposal["proposal_family"] == "schema_update"
     assert proposal["context_detected"]["evidence"]["items"] == ["score_band"]
-    assert proposal["safe_auto_apply"] is True
+    assert proposal["safe_auto_apply"] is False
+    assert proposal["recommendation_only"] is True
     latest_report = json.loads(
         Path(paths.monitoring / "latest_plan_report.json").read_text(encoding="utf-8")
     )
@@ -93,6 +95,7 @@ def test_planner_keeps_detected_contexts_when_no_structural_proposal_exists(tmp_
     assert report["proposals"] == []
     assert report["detected_contexts"]
     assert report["requires_approval"] is False
+    assert report["applied"] is False
 
 
 def test_planner_emits_new_structured_proposal_families(tmp_path: Path) -> None:
@@ -143,3 +146,54 @@ def test_planner_emits_new_structured_proposal_families(tmp_path: Path) -> None:
     )
     assert validation["requires_approval"] is True
     assert validation["safe_auto_apply"] is False
+
+
+def test_planner_does_not_apply_structural_changes_without_explicit_approval(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    _write_bronze(root, [_base_row()])
+
+    paths = build_paths(root)
+    report = plan_pipeline_spec(paths)
+
+    proposal = next(
+        item
+        for item in report["proposals"]
+        if item["proposal_type"] == "silver_metadata_fields_addition"
+    )
+
+    assert report["applied"] is False
+    assert proposal["status"] == "proposed"
+    assert proposal["proposal_id"].startswith("proposal_")
+    assert paths.pipeline_spec.exists() is False
+
+
+def test_planner_applies_supported_structural_change_after_explicit_approval(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    _write_bronze(root, [_base_row()])
+
+    paths = build_paths(root)
+    first_report = plan_pipeline_spec(paths)
+    proposal = next(
+        item
+        for item in first_report["proposals"]
+        if item["proposal_type"] == "silver_metadata_fields_addition"
+    )
+    approve_proposal(paths, proposal["proposal_id"], "tester")
+
+    second_report = plan_pipeline_spec(paths)
+    applied = next(
+        item
+        for item in second_report["proposals"]
+        if item["proposal_type"] == "silver_metadata_fields_addition"
+    )
+    spec_after = json.loads(paths.pipeline_spec.read_text(encoding="utf-8"))
+
+    assert second_report["applied"] is True
+    assert proposal["proposal_id"] in second_report["approved_proposal_ids"]
+    assert proposal["proposal_id"] in second_report["applied_proposal_ids"]
+    assert applied["status"] == "applied"
+    assert "score_band" in spec_after["silver"]["metadata_fields"]

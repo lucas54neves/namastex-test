@@ -258,8 +258,6 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "fallback_to_last_successful_artifacts",
         ],
         "planner": {
-            "auto_apply_safe_updates": False,
-            "safe_auto_apply_families": ["schema_update"],
             "proposal_defaults": {
                 "recommendation_only": True,
                 "default_status": "proposed",
@@ -318,11 +316,6 @@ def validate_pipeline_spec(spec: dict[str, Any]) -> None:
     planner_config = spec.get("agent", {}).get("planner")
     if not isinstance(planner_config, dict):
         raise ValueError("Spec field agent.planner must be an object")
-    safe_families = planner_config.get("safe_auto_apply_families")
-    if not isinstance(safe_families, list) or not safe_families:
-        raise ValueError(
-            "Spec field agent.planner.safe_auto_apply_families must be a non-empty list"
-        )
     proposal_defaults = planner_config.get("proposal_defaults")
     if not isinstance(proposal_defaults, dict):
         raise ValueError("Spec field agent.planner.proposal_defaults must be an object")

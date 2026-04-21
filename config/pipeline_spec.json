@@ -247,7 +247,10 @@
       "fallback_to_last_successful_artifacts"
     ],
     "planner": {
-      "auto_apply_safe_updates": false
+      "proposal_defaults": {
+        "recommendation_only": true,
+        "default_status": "proposed"
+      }
     }
   },
   "llm": {

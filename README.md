@@ -1,6 +1,6 @@
 # Pipeline Medalhao com Agente Operacional Deterministico
 
-Este repositorio implementa a entrega do teste tecnico de Data & AI Engineering a partir de uma base transacional de conversas WhatsApp. A solucao foi estruturada como um pipeline medalhao em Python com execucao incremental, contratos de qualidade, artefatos operacionais persistidos e uma camada agentica deterministica para planejamento, diagnostico, remediacao segura, alerta e fallback.
+Este repositorio implementa a entrega do teste tecnico de Data & AI Engineering a partir de uma base transacional de conversas WhatsApp. A solucao foi estruturada como um pipeline medalhao em Python com execucao incremental, contratos de qualidade, artefatos operacionais persistidos e uma camada agentica deterministica para planejamento estrutural, diagnostico operacional, remediacao segura, alerta e fallback.
 
 O projeto nao usa LLM no caminho principal de execucao. O termo `agente` aqui significa um conjunto de modulos auditaveis que:
 
@@ -8,7 +8,7 @@ O projeto nao usa LLM no caminho principal de execucao. O termo `agente` aqui si
 - compila essa spec para o runtime
 - executa validacoes por camada
 - classifica falhas conhecidas
-- tenta auto-remediacao segura via playbooks permitidos
+- tenta auto-remediacao segura apenas para playbooks operacionais aprovados
 - isola registros invalidos em quarentena
 - registra relatorios operacionais e de validacao
 - preserva o ultimo estado integro quando ocorre erro inesperado
@@ -24,7 +24,7 @@ O projeto nao usa LLM no caminho principal de execucao. O termo `agente` aqui si
 O pipeline responde a quatro perguntas centrais do teste:
 
 1. O que o sistema faz?
-   Copia a Bronze para uma area controlada, normaliza e enriquece os eventos, publica uma `Silver` organizada por lead e uma `Gold` analitica por lead, e mantem relatorios operacionais para execucao, planejamento, diagnostico e alertas.
+   Copia a Bronze para uma area controlada, normaliza e enriquece os eventos, publica uma `Silver` organizada por lead e uma `Gold` analitica por lead, e mantem relatorios separados para execucao operacional, planejamento estrutural, diagnostico e alertas.
 2. O que e persistido em cada camada?
    `Bronze` replica a fonte bruta controlada, `Silver` publica um artefato principal por `lead_key` e um artefato auxiliar por mensagem, e `Gold` publica uma visao analitica tambem por `lead_key`.
 3. Como os dados sensiveis sao protegidos?
@@ -260,8 +260,8 @@ O pipeline e dirigido por spec:
 
 - `config/pipeline_spec.json` descreve colunas obrigatorias, deduplicacao, validacoes, segmentacoes e playbooks seguros
 - `src/pipeline/compiler.py` compila a spec para um plano executavel
-- `src/pipeline/planner.py` inspeciona a Bronze e propoe evolucoes estruturadas da spec
-- `src/pipeline/approval.py` controla aprovacao humana para mudancas que nao podem ser autoaplicadas com seguranca
+- `src/pipeline/planner.py` inspeciona a Bronze e propoe evolucoes estruturadas da spec em modo recomendacao por padrao
+- `src/pipeline/approval.py` controla aprovacao humana explicita para qualquer aplicacao estrutural na spec
 - `src/pipeline/operator.py` executa o ciclo operacional completo
 - `src/pipeline/agent.py` diagnostica falhas de validacao e escolhe playbooks seguros
 - `src/pipeline/llm_advisor.py` existe apenas como interface opcional; ele nao participa do caminho principal e pode estar desabilitado sem afetar a execucao
@@ -301,8 +301,9 @@ Status operacionais observaveis nos relatorios:
 - `fallback_to_last_successful`
 - `skipped_no_source_change`
 - `idle_no_source_change` no relatorio agencial quando nao ha mudanca na fonte
+- `auto_remediated`, `not_auto_remediable`, `manual_intervention_required` e `fallback_applied` no `latest_agent_report.json` para classificar o tratamento operacional
 
-Importante: o agente e deterministico e limitado ao escopo implementado no repositorio. Ele nao reescreve o codigo Python livremente nem executa evolucao autonoma irrestrita do sistema.
+Importante: o agente e deterministico e limitado ao escopo implementado no repositorio. Ele nao reescreve o codigo Python livremente, nao trata toda falha como auto-remediavel e nao executa evolucao estrutural autonoma sem aprovacao.
 
 ## Execucao
 
@@ -363,8 +364,8 @@ Observacao: arquivos legados, como `data/silver/conversations_silver.parquet`, p
 |---|---|
 | `reports/bronze_profile.json` | perfil exploratorio da Bronze |
 | `reports/monitoring/latest_run_report.json` | resumo da ultima execucao e das validacoes |
-| `reports/monitoring/latest_plan_report.json` | contexto detectado e propostas estruturadas do planner para evolucao da spec |
-| `reports/monitoring/latest_agent_report.json` | diagnostico, decisoes e fallback da camada agentica |
+| `reports/monitoring/latest_plan_report.json` | contexto detectado, propostas estruturais, estados de aprovacao e aplicacoes aprovadas |
+| `reports/monitoring/latest_agent_report.json` | diagnostico operacional, classificacao de auto-remediacao, decisoes, fallback e referencia ao planner |
 | `reports/monitoring/latest_alert_report.json` | consolidado do ultimo evento de alerta |
 | `reports/agent_decisions/latest_agent_decision.json` | resumo auditavel das decisoes do agente |
 | `reports/alerts/alert_history.json` | historico consolidado de eventos de alerta |
@@ -375,7 +376,7 @@ Observacao: arquivos legados, como `data/silver/conversations_silver.parquet`, p
 | Caminho | Papel operacional |
 |---|---|
 | `state/pipeline_state.json` | estado de execucao, fingerprint e historico de runs |
-| `state/approval_state.json` | aprovacoes humanas persistidas para mudancas estruturais |
+| `state/approval_state.json` | decisoes humanas persistidas para propostas estruturais identificadas por `proposal_id` |
 | `state/pipeline_spec_history.json` | historico de propostas/aplicacoes de mudanca da spec |
 
 ## Decisoes e trade-offs

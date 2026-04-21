@@ -12,6 +12,7 @@ from pipeline.io import read_json, write_json
 
 ALERTABLE_AGENT_STATUSES = {
     "degraded_validation_failed",
+    "not_auto_remediable",
     "fallback_applied",
     "manual_intervention_required",
 }
@@ -21,6 +22,7 @@ SEVERITY_BY_AGENT_STATUS = {
     "idle_no_source_change": "info",
     "auto_remediated": "warning",
     "degraded_validation_failed": "high",
+    "not_auto_remediable": "high",
     "fallback_applied": "high",
     "manual_intervention_required": "critical",
 }
