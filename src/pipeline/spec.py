@@ -80,6 +80,21 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "is_business_hours",
             "lead_source",
         ],
+        "derived_fields": [
+            "mentions_vehicle",
+            "mentions_competitor",
+            "mentions_sinistro",
+            "contains_email",
+            "contains_phone",
+            "contains_cpf",
+            "contains_cep",
+            "contains_plate",
+            "vehicle_make",
+            "vehicle_model",
+            "vehicle_year",
+            "quoted_price",
+            "sinistro_type",
+        ],
     },
     "gold": {
         "required_columns": [
@@ -222,6 +237,18 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "risk_signal_valid",
             "persona_profile_not_null",
         ],
+        "validation_rules": {
+            "bronze": ["required_columns", "metadata_json_valid"],
+            "silver": [
+                "masked_text_fields_not_leaking",
+                "derived_vehicle_consistency",
+            ],
+            "gold": [
+                "engagement_bucket_valid",
+                "persona_profile_valid",
+                "audience_segment_valid",
+            ],
+        },
     },
     "agent": {
         "safe_auto_apply_playbooks": [
@@ -232,6 +259,11 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
         ],
         "planner": {
             "auto_apply_safe_updates": False,
+            "safe_auto_apply_families": ["schema_update"],
+            "proposal_defaults": {
+                "recommendation_only": True,
+                "default_status": "proposed",
+            },
         },
     },
     "llm": {
@@ -257,6 +289,7 @@ def validate_pipeline_spec(spec: dict[str, Any]) -> None:
         ("silver", "lead_required_columns"),
         ("silver", "message_required_columns"),
         ("silver", "dedupe_keys"),
+        ("silver", "derived_fields"),
         ("gold", "required_columns"),
         ("gold", "valid_buckets"),
         ("gold", "valid_personas"),
@@ -271,6 +304,28 @@ def validate_pipeline_spec(spec: dict[str, Any]) -> None:
         value = spec.get(section, {}).get(key)
         if not isinstance(value, list) or not value:
             raise ValueError(f"Spec field {section}.{key} must be a non-empty list")
+
+    validation_rules = spec.get("quality", {}).get("validation_rules")
+    if not isinstance(validation_rules, dict):
+        raise ValueError("Spec field quality.validation_rules must be an object")
+    for layer in ("bronze", "silver", "gold"):
+        rules = validation_rules.get(layer)
+        if not isinstance(rules, list) or not rules:
+            raise ValueError(
+                f"Spec field quality.validation_rules.{layer} must be a non-empty list"
+            )
+
+    planner_config = spec.get("agent", {}).get("planner")
+    if not isinstance(planner_config, dict):
+        raise ValueError("Spec field agent.planner must be an object")
+    safe_families = planner_config.get("safe_auto_apply_families")
+    if not isinstance(safe_families, list) or not safe_families:
+        raise ValueError(
+            "Spec field agent.planner.safe_auto_apply_families must be a non-empty list"
+        )
+    proposal_defaults = planner_config.get("proposal_defaults")
+    if not isinstance(proposal_defaults, dict):
+        raise ValueError("Spec field agent.planner.proposal_defaults must be an object")
 
 
 def load_pipeline_spec(path: Path) -> dict[str, Any]:

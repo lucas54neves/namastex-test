@@ -485,7 +485,11 @@ def build_monitor_snapshot(paths: PipelinePaths) -> dict[str, Any]:
         "latest_agent_status": latest_agent_report.get("status"),
         "latest_agent_diagnoses": latest_agent_report.get("diagnoses", []),
         "latest_agent_fallback": latest_agent_report.get("fallback", {}),
-        "latest_planner_changes": latest_plan_report.get("changes", []),
+        "latest_planner_changes": latest_plan_report.get(
+            "proposals",
+            latest_plan_report.get("changes", []),
+        ),
+        "latest_planner_proposals": latest_plan_report.get("proposals", []),
         "latest_planner_applied": latest_plan_report.get("applied"),
         "latest_alert_severity": latest_alert_report.get("event", {}).get("severity"),
         "latest_alert_should_alert": latest_alert_report.get("event", {}).get("should_alert"),

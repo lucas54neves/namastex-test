@@ -16,6 +16,7 @@ def compile_pipeline_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "silver_message_required_columns": list(spec["silver"]["message_required_columns"]),
         "dedupe_keys": list(spec["silver"]["dedupe_keys"]),
         "metadata_fields": list(spec["silver"].get("metadata_fields", [])),
+        "silver_derived_fields": list(spec["silver"].get("derived_fields", [])),
         "gold_required_columns": list(spec["gold"]["required_columns"]),
         "gold_valid_buckets": set(spec["gold"]["valid_buckets"]),
         "gold_valid_personas": set(spec["gold"]["valid_personas"]),
@@ -27,7 +28,9 @@ def compile_pipeline_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "gold_valid_risk_signals": set(spec["gold"]["valid_risk_signals"]),
         "gold_segmentation": dict(spec["gold"]["segmentation"]),
         "quality": dict(spec["quality"]),
+        "quality_validation_rules": dict(spec["quality"].get("validation_rules", {})),
         "agent": dict(spec["agent"]),
+        "agent_planner": dict(spec["agent"].get("planner", {})),
         "llm": dict(spec["llm"]),
     }
 

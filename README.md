@@ -363,7 +363,7 @@ Observacao: arquivos legados, como `data/silver/conversations_silver.parquet`, p
 |---|---|
 | `reports/bronze_profile.json` | perfil exploratorio da Bronze |
 | `reports/monitoring/latest_run_report.json` | resumo da ultima execucao e das validacoes |
-| `reports/monitoring/latest_plan_report.json` | proposta atual do planner para evolucao da spec |
+| `reports/monitoring/latest_plan_report.json` | contexto detectado e propostas estruturadas do planner para evolucao da spec |
 | `reports/monitoring/latest_agent_report.json` | diagnostico, decisoes e fallback da camada agentica |
 | `reports/monitoring/latest_alert_report.json` | consolidado do ultimo evento de alerta |
 | `reports/agent_decisions/latest_agent_decision.json` | resumo auditavel das decisoes do agente |
@@ -393,7 +393,7 @@ Observacao: arquivos legados, como `data/silver/conversations_silver.parquet`, p
 
 - o agente atual e deterministico e baseado em regras; o `llm_advisor` e opcional
 - a operacao continua e por polling local, nao por orquestrador externo como Airflow ou systemd
-- o planner evolui a spec com foco em drift de schema e campos de `metadata`; ele nao altera o codigo Python por conta propria
+- o planner agora emite propostas estruturadas e auditaveis para schema, validacoes, derivacoes, segmentacoes e regras de transformacao; ele nao altera o codigo Python por conta propria
 - a `Gold` e explicavel e reproduzivel, mas ainda pode evoluir com enriquecimentos adicionais de dominio
 
 ## Testes automatizados
