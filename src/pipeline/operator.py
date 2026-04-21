@@ -21,6 +21,7 @@ from pipeline.quality import (
     validate_bronze,
     validate_gold,
     validate_silver,
+    validate_silver_messages,
 )
 from pipeline.quarantine import quarantine_bronze_records
 from pipeline.spec import ensure_pipeline_spec
@@ -30,13 +31,14 @@ from pipeline.state import (
     load_pipeline_state,
     save_pipeline_state,
 )
-from pipeline.transforms import build_gold, build_silver, load_bronze_frame
+from pipeline.transforms import build_gold, build_silver, build_silver_leads, load_bronze_frame
 
 
 @dataclass(frozen=True)
 class PipelineArtifacts:
     bronze_path: str
     silver_path: str
+    silver_messages_path: str
     gold_path: str
     state_path: str
     validation_report_path: str
@@ -88,7 +90,8 @@ def _run_record(
 def _skip_artifacts(paths: PipelinePaths) -> PipelineArtifacts:
     return PipelineArtifacts(
         bronze_path=str(paths.bronze / "conversations.parquet"),
-        silver_path=str(paths.silver / "conversations_silver.parquet"),
+        silver_path=str(paths.silver / "silver_leads.parquet"),
+        silver_messages_path=str(paths.silver / "silver_messages.parquet"),
         gold_path=str(paths.gold / "conversations_gold.parquet"),
         state_path=str(state_file(paths)),
         validation_report_path=str(validation_report_file(paths)),
@@ -148,7 +151,8 @@ def _write_reports(
 def _success_artifacts(paths: PipelinePaths, status: str) -> PipelineArtifacts:
     return PipelineArtifacts(
         bronze_path=str(paths.bronze / "conversations.parquet"),
-        silver_path=str(paths.silver / "conversations_silver.parquet"),
+        silver_path=str(paths.silver / "silver_leads.parquet"),
+        silver_messages_path=str(paths.silver / "silver_messages.parquet"),
         gold_path=str(paths.gold / "conversations_gold.parquet"),
         state_path=str(state_file(paths)),
         validation_report_path=str(validation_report_file(paths)),
@@ -226,7 +230,8 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
         return _skip_artifacts(paths)
 
     bronze_path = paths.bronze / "conversations.parquet"
-    silver_path = paths.silver / "conversations_silver.parquet"
+    silver_path = paths.silver / "silver_leads.parquet"
+    silver_messages_path = paths.silver / "silver_messages.parquet"
     gold_path = paths.gold / "conversations_gold.parquet"
 
     try:
@@ -235,17 +240,24 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
         bronze_df = cast(Any, quarantine["clean_df"])
         write_parquet(bronze_df, bronze_path)
 
-        silver_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
+        silver_messages_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
+        silver_runtime_df = build_silver_leads(silver_messages_runtime_df)
         silver_df = sanitize_for_publication(silver_runtime_df, "silver")
+        silver_messages_df = sanitize_for_publication(
+            silver_messages_runtime_df,
+            "silver_messages",
+        )
         write_parquet(silver_df, silver_path)
+        write_parquet(silver_messages_df, silver_messages_path)
 
-        gold_runtime_df = build_gold(silver_runtime_df, compiled_plan=compiled_plan)
+        gold_runtime_df = build_gold(silver_messages_runtime_df, compiled_plan=compiled_plan)
         gold_df = sanitize_for_publication(gold_runtime_df, "gold")
         write_parquet(gold_df, gold_path)
 
         validation_results = (
             validate_bronze(bronze_df, compiled_plan=compiled_plan)
             + validate_silver(silver_df, compiled_plan=compiled_plan)
+            + validate_silver_messages(silver_messages_df, compiled_plan=compiled_plan)
             + validate_gold(gold_df, compiled_plan=compiled_plan)
         )
         validation_summary = summarize_validation_results(validation_results)
@@ -253,6 +265,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
         validation_summary["row_counts"] = {
             "bronze": int(len(bronze_df)),
             "silver": int(len(silver_df)),
+            "silver_messages": int(len(silver_messages_df)),
             "gold": int(len(gold_df)),
         }
         validation_summary["source_fingerprint"] = current_fingerprint
@@ -278,18 +291,22 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             remediation = attempt_auto_remediation(
                 bronze_df=bronze_df,
                 silver_df=silver_df,
+                silver_messages_df=silver_messages_df,
                 gold_df=gold_df,
                 failed_checks=failed_checks,
                 compiled_plan=compiled_plan,
             )
             if remediation["resolved"]:
                 silver_df = remediation["silver_df"]
+                silver_messages_df = remediation["silver_messages_df"]
                 gold_df = remediation["gold_df"]
                 write_parquet(silver_df, silver_path)
+                write_parquet(silver_messages_df, silver_messages_path)
                 write_parquet(gold_df, gold_path)
                 validation_results = (
                     validate_bronze(bronze_df, compiled_plan=compiled_plan)
                     + validate_silver(silver_df, compiled_plan=compiled_plan)
+                    + validate_silver_messages(silver_messages_df, compiled_plan=compiled_plan)
                     + validate_gold(gold_df, compiled_plan=compiled_plan)
                 )
                 validation_summary = summarize_validation_results(validation_results)
@@ -297,6 +314,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 validation_summary["row_counts"] = {
                     "bronze": int(len(bronze_df)),
                     "silver": int(len(silver_df)),
+                    "silver_messages": int(len(silver_messages_df)),
                     "gold": int(len(gold_df)),
                 }
                 validation_summary["source_fingerprint"] = current_fingerprint
@@ -358,6 +376,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             state["last_successful_artifacts"] = {
                 "bronze_path": str(bronze_path),
                 "silver_path": str(silver_path),
+                "silver_messages_path": str(silver_messages_path),
                 "gold_path": str(gold_path),
                 "validation_report_path": str(report_path),
                 "agent_report_path": str(agent_report_path),

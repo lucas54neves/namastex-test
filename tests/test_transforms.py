@@ -5,6 +5,8 @@ import pandas as pd
 from pipeline.transforms import (
     add_conversation_context,
     add_gold_segments,
+    build_silver,
+    build_silver_leads,
     deduplicate_events,
     mask_message_body,
 )
@@ -84,6 +86,65 @@ def test_conversation_context_uses_first_inbound_and_outbound_names() -> None:
 
     assert enriched["conversation_agent_name"].tolist() == ["Diego", "Diego", "Diego"]
     assert enriched["conversation_lead_name"].tolist() == ["Ana Paula", "Ana Paula", "Ana Paula"]
+
+
+def test_build_silver_leads_consolidates_multiple_conversations_for_same_lead() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511982222222",
+                "sender_name": "Ana Paula",
+                "message_type": "text",
+                "message_body": "quero cotacao do Civic 2019",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": (
+                    '{"device":"iphone","city":"Sao Paulo","state":"SP",'
+                    '"response_time_sec":60,"is_business_hours":true,'
+                    '"lead_source":"google_ads"}'
+                ),
+            },
+            {
+                "message_id": "m2",
+                "conversation_id": "conv_2",
+                "timestamp": pd.Timestamp("2026-02-03 11:00:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511982222222",
+                "sender_name": "Ana Paula",
+                "message_type": "text",
+                "message_body": "Porto Seguro me cobrou R$ 2.500,00",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_2",
+                "agent_id": "agent_2",
+                "conversation_outcome": "proposta_enviada",
+                "metadata": (
+                    '{"device":"iphone","city":"Sao Paulo","state":"SP",'
+                    '"response_time_sec":120,"is_business_hours":false,'
+                    '"lead_source":"referral"}'
+                ),
+            },
+        ]
+    )
+
+    silver_messages = build_silver(bronze)
+    silver_leads = build_silver_leads(silver_messages)
+
+    assert len(silver_leads) == 1
+    assert silver_leads.iloc[0]["conversation_count"] == 2
+    assert silver_leads.iloc[0]["message_count"] == 2
+    assert silver_leads.iloc[0]["canonical_lead_name_masked"] == "XXX XXXXX"
+    assert silver_leads.iloc[0]["observed_campaign_ids"] == '["camp_1", "camp_2"]'
+    assert silver_leads.iloc[0]["observed_lead_sources"] == '["google_ads", "referral"]'
+    assert bool(silver_leads.iloc[0]["has_vehicle_signal"]) is True
+    assert bool(silver_leads.iloc[0]["has_competitor_signal"]) is True
 
 
 def test_add_gold_segments_assigns_persona_and_audience() -> None:

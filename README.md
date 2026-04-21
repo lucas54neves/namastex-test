@@ -111,18 +111,55 @@ Replica o arquivo de origem em parquet para a área controlada do pipeline, pres
 
 ### Silver
 
-Camada de limpeza e enriquecimento. O frame de trabalho usa colunas cruas apenas em memória para derivação, deduplicação e agregação da Gold. O parquet publicado em `data/silver/conversations_silver.parquet` aplica uma política explícita de persistência sem PII e não grava:
+Camada de limpeza e enriquecimento remodelada para ter granularidade principal por lead. O runtime continua usando colunas cruas apenas em memória para derivação, deduplicação e agregação da Gold, mas a publicação agora materializa dois artefatos:
+
+- `data/silver/silver_leads.parquet`
+  contrato principal da Silver, com uma linha por `lead_key`
+- `data/silver/silver_messages.parquet`
+  tabela auxiliar por mensagem deduplicada para rastreabilidade `lead_key -> conversation_id -> message_id`
+
+Ambos os parquets aplicam uma política explícita de persistência sem PII e não gravam:
 
 - `sender_name`
 - `sender_phone`
 - `message_body`
 - `conversation_lead_name`
+- `conversation_lead_phone`
 - `conversation_agent_name`
 - `sender_name_normalized`
+- `lead_name_raw`
+- `lead_phone_raw`
 
-O artefato persistido contém:
+O artefato principal `silver_leads.parquet` contém, entre outras, as colunas:
+
+- `lead_key`
+- `canonical_lead_name_masked`
+- `lead_contact_ref`
+- `city`
+- `state`
+- `first_seen_at`
+- `last_seen_at`
+- `conversation_count`
+- `message_count`
+- `observed_campaign_ids`
+- `observed_lead_sources`
+- `observed_outcomes`
+- flags agregadas de sinal:
+  - `has_vehicle_signal`
+  - `has_competitor_signal`
+  - `has_sinistro_signal`
+  - `has_email_signal`
+  - `has_phone_signal`
+  - `has_cpf_signal`
+  - `has_cep_signal`
+  - `has_plate_signal`
+
+As coleções observadas são persistidas como listas ordenadas serializadas em JSON para manter determinismo e facilidade de revisão.
+
+O artefato auxiliar `silver_messages.parquet` contém:
 
 - `metadata_*` expandido da coluna JSON
+- `lead_key`
 - flags `is_inbound` e `is_outbound`
 - colunas mascaradas:
   - `sender_name_masked`
@@ -190,6 +227,7 @@ Exemplos:
 O pipeline passou a ser dirigido por spec:
 
 - `config/pipeline_spec.json` descreve colunas obrigatórias, deduplicação, validações, segmentações e playbooks seguros
+- a spec agora diferencia o contrato da Silver principal por lead e o contrato auxiliar de `silver_messages`
 - `compiler.py` compila a spec para um plano executável
 - `planner.py` inspeciona a Bronze, detecta drift e propõe mudanças na spec
 - `approval.py` controla aprovação humana para mudanças estruturais
@@ -203,18 +241,25 @@ As validações atuais cobrem:
   - unicidade de `message_id`
   - canal restrito a `whatsapp`
 - Silver:
-  - ausência de colunas cruas proibidas no artefato publicado
-  - presença das colunas mascaradas obrigatórias
-  - colunas críticas presentes
-  - `timestamp` não nulo
-  - ausência de duplicidade pós-deduplicação
-  - contratos anti-vazamento por classe sensível em `message_body_masked`:
+  - `silver_leads`:
+    - ausência de colunas cruas proibidas no artefato publicado
+    - presença de `canonical_lead_name_masked` e `lead_contact_ref`
+    - unicidade de `lead_key`
+    - `first_seen_at` e `last_seen_at` não nulos
+    - contagens agregadas não negativas
+    - varredura anti-vazamento em campos textuais publicados
+  - `silver_messages`:
+    - ausência de colunas cruas proibidas no artefato publicado
+    - presença das colunas mascaradas obrigatórias
+    - `timestamp` não nulo
+    - ausência de duplicidade pós-deduplicação
+    - contratos anti-vazamento por classe sensível em `message_body_masked`:
     - e-mail
     - telefone
     - CPF
     - CEP
     - placa
-  - consistência de `mentions_vehicle`
+    - consistência de `mentions_vehicle`
 - Gold:
   - ausência de colunas cruas proibidas no artefato publicado
   - varredura anti-vazamento em qualquer coluna textual publicada não excluída explicitamente
@@ -286,7 +331,8 @@ venv/bin/python scripts/run_pipeline_daemon.py \
 ## Artefatos gerados
 
 - Bronze: `data/bronze/conversations.parquet`
-- Silver: `data/silver/conversations_silver.parquet`
+- Silver principal: `data/silver/silver_leads.parquet`
+- Silver auxiliar: `data/silver/silver_messages.parquet`
 - Gold: `data/gold/conversations_gold.parquet`
 - Quarentena: `data/quarantine/quarantined_bronze_rows.parquet`
 - Spec do pipeline: `config/pipeline_spec.json`

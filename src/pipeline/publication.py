@@ -10,8 +10,11 @@ SILVER_FORBIDDEN_COLUMNS = frozenset(
         "sender_phone",
         "message_body",
         "conversation_lead_name",
+        "conversation_lead_phone",
         "conversation_agent_name",
         "sender_name_normalized",
+        "lead_phone_raw",
+        "lead_name_raw",
     }
 )
 GOLD_FORBIDDEN_COLUMNS = frozenset(
@@ -20,8 +23,11 @@ GOLD_FORBIDDEN_COLUMNS = frozenset(
         "sender_phone",
         "message_body",
         "conversation_lead_name",
+        "conversation_lead_phone",
         "conversation_agent_name",
         "sender_name_normalized",
+        "lead_phone_raw",
+        "lead_name_raw",
     }
 )
 SILVER_REQUIRED_SAFE_COLUMNS = frozenset(
@@ -38,7 +44,7 @@ PUBLISH_SAFE_SILVER_KEY_MAP = {
 
 
 def forbidden_columns_for_layer(layer: str) -> frozenset[str]:
-    if layer == "silver":
+    if layer in {"silver", "silver_messages"}:
         return SILVER_FORBIDDEN_COLUMNS
     if layer == "gold":
         return GOLD_FORBIDDEN_COLUMNS
@@ -47,6 +53,13 @@ def forbidden_columns_for_layer(layer: str) -> frozenset[str]:
 
 def required_safe_columns_for_layer(layer: str) -> frozenset[str]:
     if layer == "silver":
+        return frozenset(
+            {
+                "canonical_lead_name_masked",
+                "lead_contact_ref",
+            }
+        )
+    if layer == "silver_messages":
         return SILVER_REQUIRED_SAFE_COLUMNS
     if layer == "gold":
         return frozenset()

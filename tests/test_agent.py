@@ -8,7 +8,7 @@ from pipeline.agent import (
     diagnose_validation_failures,
 )
 from pipeline.compiler import get_default_compiled_plan
-from pipeline.transforms import build_gold, build_silver
+from pipeline.transforms import build_gold, build_silver, build_silver_leads
 
 
 def _sample_bronze_frame() -> pd.DataFrame:
@@ -62,7 +62,7 @@ def test_diagnose_validation_failures_maps_known_check() -> None:
     diagnoses = diagnose_validation_failures(
         [
             {
-                "layer": "silver",
+                "layer": "silver_messages",
                 "check": "dedupe_keys_unique",
                 "status": "failed",
                 "detail": {"duplicate_rows": 2},
@@ -80,14 +80,16 @@ def test_diagnose_validation_failures_maps_known_check() -> None:
 def test_attempt_auto_remediation_rebuilds_gold_when_gold_check_fails() -> None:
     bronze = _sample_bronze_frame()
     bronze["timestamp"] = pd.to_datetime(bronze["timestamp"])
-    silver = build_silver(bronze)
-    gold = build_gold(silver)
+    silver_messages = build_silver(bronze)
+    silver = build_silver_leads(silver_messages)
+    gold = build_gold(silver_messages)
     broken_gold = gold.copy()
     broken_gold["engagement_bucket"] = "quebrado"
 
     remediation = attempt_auto_remediation(
         bronze_df=bronze,
         silver_df=silver,
+        silver_messages_df=silver_messages,
         gold_df=broken_gold,
         failed_checks=[
             {
@@ -101,6 +103,7 @@ def test_attempt_auto_remediation_rebuilds_gold_when_gold_check_fails() -> None:
     )
 
     assert remediation["resolved"] is True
+    assert "lead_key" in remediation["silver_messages_df"].columns
     assert "rebuild_gold_from_silver" in remediation["actions"]
     assert remediation["decisions"][0]["playbook"]["playbook_id"] == "rebuild_gold_from_silver"
 

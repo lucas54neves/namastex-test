@@ -14,7 +14,8 @@ from pipeline.publication import (
 )
 from pipeline.transforms import detect_unmasked_sensitive_classes
 
-SILVER_TEXT_COLUMNS = ("message_body_masked",)
+SILVER_TEXT_COLUMNS = ("canonical_lead_name_masked", "lead_contact_ref")
+SILVER_MESSAGES_TEXT_COLUMNS = ("message_body_masked", "sender_name_masked", "sender_phone_masked")
 GOLD_TEXT_SCAN_EXCLUDED_COLUMNS = frozenset(
     {
         "conversation_id",
@@ -75,6 +76,8 @@ def _column_set_check(
 def _published_text_columns(df: pd.DataFrame, layer: str) -> list[str]:
     if layer == "silver":
         return [column for column in SILVER_TEXT_COLUMNS if column in df.columns]
+    if layer == "silver_messages":
+        return [column for column in SILVER_MESSAGES_TEXT_COLUMNS if column in df.columns]
     if layer == "gold":
         return [
             column
@@ -175,9 +178,7 @@ def validate_silver(
     df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
 ) -> list[ValidationResult]:
     plan = compiled_plan or get_default_compiled_plan()
-    dedupe_keys = resolve_publish_safe_keys(cast(list[str], plan["dedupe_keys"]), df.columns)
-    silver_required_columns = cast(list[str], plan["silver_required_columns"])
-    duplicate_rows = int(df.duplicated(subset=dedupe_keys).sum()) if dedupe_keys else 0
+    silver_required_columns = cast(list[str], plan["silver_lead_required_columns"])
     forbidden_columns = forbidden_columns_present(df, "silver")
     missing_safe_columns = missing_required_safe_columns(df, "silver")
     results = [
@@ -196,24 +197,73 @@ def validate_silver(
         ),
         _result(
             "silver",
+            "lead_key_unique",
+            df["lead_key"].nunique(dropna=False) == len(df),
+            unique_ids=int(df["lead_key"].nunique(dropna=False)),
+            rows=int(len(df)),
+        ),
+        _result(
+            "silver",
+            "lead_timestamps_not_null",
+            df["first_seen_at"].notna().all() and df["last_seen_at"].notna().all(),
+            null_first_seen=int(df["first_seen_at"].isna().sum()),
+            null_last_seen=int(df["last_seen_at"].isna().sum()),
+        ),
+        _result(
+            "silver",
+            "lead_counts_non_negative",
+            bool((df["conversation_count"] >= 0).all() and (df["message_count"] >= 0).all()),
+            min_conversation_count=int(df["conversation_count"].min()),
+            min_message_count=int(df["message_count"].min()),
+        ),
+        _masked_text_fields_not_leaking_check(df, "silver"),
+    ]
+    return results
+
+
+def validate_silver_messages(
+    df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+) -> list[ValidationResult]:
+    plan = compiled_plan or get_default_compiled_plan()
+    dedupe_keys = resolve_publish_safe_keys(cast(list[str], plan["dedupe_keys"]), df.columns)
+    silver_required_columns = cast(list[str], plan["silver_message_required_columns"])
+    duplicate_rows = int(df.duplicated(subset=dedupe_keys).sum()) if dedupe_keys else 0
+    forbidden_columns = forbidden_columns_present(df, "silver_messages")
+    missing_safe_columns = missing_required_safe_columns(df, "silver_messages")
+    results = [
+        _column_set_check(df, silver_required_columns, "silver_messages"),
+        _result(
+            "silver_messages",
+            "forbidden_raw_columns_absent",
+            not forbidden_columns,
+            forbidden_columns=forbidden_columns,
+        ),
+        _result(
+            "silver_messages",
+            "required_safe_columns_present",
+            not missing_safe_columns,
+            missing_safe_columns=missing_safe_columns,
+        ),
+        _result(
+            "silver_messages",
             "timestamp_not_null",
             df["timestamp"].notna().all(),
             null_timestamps=int(df["timestamp"].isna().sum()),
         ),
         _result(
-            "silver",
+            "silver_messages",
             "dedupe_keys_unique",
             duplicate_rows == 0,
             duplicate_rows=duplicate_rows,
             dedupe_keys=dedupe_keys,
         ),
-        _sensitive_class_check(df, "silver", "email"),
-        _sensitive_class_check(df, "silver", "phone"),
-        _sensitive_class_check(df, "silver", "cpf"),
-        _sensitive_class_check(df, "silver", "cep"),
-        _sensitive_class_check(df, "silver", "plate"),
+        _sensitive_class_check(df, "silver_messages", "email"),
+        _sensitive_class_check(df, "silver_messages", "phone"),
+        _sensitive_class_check(df, "silver_messages", "cpf"),
+        _sensitive_class_check(df, "silver_messages", "cep"),
+        _sensitive_class_check(df, "silver_messages", "plate"),
         _result(
-            "silver",
+            "silver_messages",
             "vehicle_mentions_consistent",
             bool(
                 (

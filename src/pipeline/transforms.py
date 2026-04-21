@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
@@ -129,6 +130,41 @@ def _safe_string(value: object) -> str:
     if isinstance(value, float) and pd.isna(value):
         return ""
     return str(value)
+
+
+def _stable_hash_token(*parts: object, prefix: str) -> str:
+    normalized_parts = [_normalize_for_match(_safe_string(part)) for part in parts]
+    joined = "|".join(part for part in normalized_parts if part)
+    if not joined:
+        joined = "unknown"
+    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}_{digest}"
+
+
+def _first_non_empty(values: pd.Series) -> str:
+    for value in values:
+        text = _safe_string(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _json_sorted_unique(values: pd.Series) -> str:
+    collected = sorted(
+        {_safe_string(value).strip() for value in values if _safe_string(value).strip()}
+    )
+    return json.dumps(collected, ensure_ascii=True)
+
+
+def _first_non_null(values: pd.Series) -> object:
+    for value in values:
+        if pd.notna(value):
+            return value
+    return None
+
+
+def _max_or_false(values: pd.Series) -> bool:
+    return bool(values.fillna(False).astype(bool).max())
 
 
 def detect_sensitive_classes(value: object, classes: Iterable[str] | None = None) -> set[str]:
@@ -329,8 +365,43 @@ def add_conversation_context(df: pd.DataFrame) -> pd.DataFrame:
         .transform("first")
         .fillna("")
     )
+    sender_phone = (
+        enriched["sender_phone"]
+        if "sender_phone" in enriched.columns
+        else pd.Series("", index=enriched.index, dtype="object")
+    )
+    lead_phone = (
+        sender_phone.where(enriched["direction"].eq("inbound"))
+        .groupby(enriched["conversation_id"])
+        .transform("first")
+        .fillna("")
+    )
     enriched["conversation_lead_name"] = lead_name
     enriched["conversation_agent_name"] = agent_name
+    enriched["conversation_lead_phone"] = lead_phone
+    return enriched
+
+
+def add_lead_context(df: pd.DataFrame) -> pd.DataFrame:
+    enriched = df.copy()
+    enriched["lead_phone_raw"] = enriched["conversation_lead_phone"].map(_safe_string)
+    enriched["lead_phone_masked"] = enriched["lead_phone_raw"].map(_mask_digits)
+    enriched["lead_name_raw"] = enriched["conversation_lead_name"].map(_safe_string)
+    enriched["lead_key"] = [
+        _stable_hash_token(
+            phone if phone else name,
+            city,
+            state,
+            prefix="lead",
+        )
+        for phone, name, city, state in zip(
+            enriched["lead_phone_raw"],
+            enriched["lead_name_raw"],
+            enriched.get("metadata_city", pd.Series("", index=enriched.index)),
+            enriched.get("metadata_state", pd.Series("", index=enriched.index)),
+            strict=False,
+        )
+    ]
     return enriched
 
 
@@ -376,9 +447,69 @@ def build_silver(df: pd.DataFrame, compiled_plan: dict[str, object] | None = Non
     silver = add_conversation_context(silver)
     silver = deduplicate_events(silver, compiled_plan=compiled_plan)
     silver = add_message_signals(silver)
+    silver = add_lead_context(silver)
     silver["is_inbound"] = silver["direction"].eq("inbound")
     silver["is_outbound"] = silver["direction"].eq("outbound")
     return silver.sort_values(["conversation_id", "timestamp", "message_id"]).reset_index(drop=True)
+
+
+def build_silver_leads(silver_messages: pd.DataFrame) -> pd.DataFrame:
+    grouped = silver_messages.groupby("lead_key", dropna=False)
+    leads = grouped.agg(
+        canonical_lead_name_masked=(
+            "lead_name_raw",
+            lambda values: mask_sender_name(_first_non_empty(values)),
+        ),
+        lead_contact_ref=("lead_phone_masked", lambda values: _first_non_empty(values) or ""),
+        city=("metadata_city", lambda values: _first_non_empty(values) or ""),
+        state=("metadata_state", lambda values: _first_non_empty(values) or ""),
+        first_seen_at=("timestamp", "min"),
+        last_seen_at=("timestamp", "max"),
+        conversation_count=("conversation_id", "nunique"),
+        message_count=("message_id", "nunique"),
+        observed_campaign_ids=("campaign_id", _json_sorted_unique),
+        observed_lead_sources=("metadata_lead_source", _json_sorted_unique),
+        observed_outcomes=("conversation_outcome", _json_sorted_unique),
+        has_vehicle_signal=("mentions_vehicle", _max_or_false),
+        has_competitor_signal=("mentions_competitor", _max_or_false),
+        has_sinistro_signal=("mentions_sinistro", _max_or_false),
+        has_email_signal=("contains_email", _max_or_false),
+        has_phone_signal=("contains_phone", _max_or_false),
+        has_cpf_signal=("contains_cpf", _max_or_false),
+        has_cep_signal=("contains_cep", _max_or_false),
+        has_plate_signal=("contains_plate", _max_or_false),
+        primary_campaign_id=("campaign_id", lambda values: _first_non_empty(values) or ""),
+        latest_outcome=(
+            "conversation_outcome",
+            lambda values: _first_non_empty(values.iloc[::-1]) or "",
+        ),
+        vehicle_make_observed=(
+            "vehicle_make",
+            lambda values: _safe_string(_first_non_null(values)),
+        ),
+        vehicle_model_observed=(
+            "vehicle_model",
+            lambda values: _safe_string(_first_non_null(values)),
+        ),
+        vehicle_year_observed=(
+            "vehicle_year",
+            lambda values: _safe_string(_first_non_null(values)),
+        ),
+        primary_competitor_observed=(
+            "competitor_mentioned",
+            lambda values: _safe_string(_first_non_null(values)),
+        ),
+        quoted_price_min=("quoted_price", "min"),
+        quoted_price_max=("quoted_price", "max"),
+        quoted_price_last=("quoted_price", lambda values: _first_non_null(values.iloc[::-1])),
+        avg_response_time_sec=("metadata_response_time_sec", "mean"),
+        business_hours_ratio=("metadata_is_business_hours", "mean"),
+    ).reset_index()
+    leads["lead_contact_ref"] = leads["lead_contact_ref"].where(
+        leads["lead_contact_ref"].astype(str).str.strip().ne(""),
+        leads["lead_key"],
+    )
+    return leads.sort_values("lead_key").reset_index(drop=True)
 
 
 def add_gold_segments(

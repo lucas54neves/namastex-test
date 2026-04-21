@@ -27,7 +27,28 @@
     }
   },
   "silver": {
-    "required_columns": [
+    "lead_required_columns": [
+      "lead_key",
+      "canonical_lead_name_masked",
+      "lead_contact_ref",
+      "first_seen_at",
+      "last_seen_at",
+      "conversation_count",
+      "message_count",
+      "observed_campaign_ids",
+      "observed_lead_sources",
+      "observed_outcomes",
+      "has_vehicle_signal",
+      "has_competitor_signal",
+      "has_sinistro_signal",
+      "has_email_signal",
+      "has_phone_signal",
+      "has_cpf_signal",
+      "has_cep_signal",
+      "has_plate_signal"
+    ],
+    "message_required_columns": [
+      "lead_key",
       "message_body_masked",
       "sender_name_masked",
       "sender_phone_masked",

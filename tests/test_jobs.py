@@ -95,22 +95,29 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
     alert_report = json.loads(Path(result.alert_report_path).read_text(encoding="utf-8"))
     silver_df = pd.read_parquet(result.silver_path)
+    silver_messages_df = pd.read_parquet(result.silver_messages_path)
     gold_df = pd.read_parquet(result.gold_path)
     assert result.status == "success"
     assert report["status"] == "passed"
-    assert report["row_counts"] == {"bronze": 2, "silver": 2, "gold": 1}
+    assert report["row_counts"] == {"bronze": 2, "silver": 1, "silver_messages": 2, "gold": 1}
     assert report["pipeline_spec_path"].endswith("pipeline_spec.json")
     assert "planner_report" in agent_report
     assert alert_report["event"]["severity"] == "info"
     assert alert_report["event"]["should_alert"] is False
     assert "sender_name" not in silver_df.columns
     assert "sender_phone" not in silver_df.columns
-    assert "message_body" not in silver_df.columns
-    assert "conversation_lead_name" not in silver_df.columns
-    assert "conversation_agent_name" not in silver_df.columns
-    assert "sender_name_masked" in silver_df.columns
-    assert "sender_phone_masked" in silver_df.columns
-    assert "message_body_masked" in silver_df.columns
+    assert "canonical_lead_name_masked" in silver_df.columns
+    assert "lead_contact_ref" in silver_df.columns
+    assert "lead_key" in silver_df.columns
+    assert "sender_name" not in silver_messages_df.columns
+    assert "sender_phone" not in silver_messages_df.columns
+    assert "message_body" not in silver_messages_df.columns
+    assert "conversation_lead_name" not in silver_messages_df.columns
+    assert "conversation_agent_name" not in silver_messages_df.columns
+    assert "sender_name_masked" in silver_messages_df.columns
+    assert "sender_phone_masked" in silver_messages_df.columns
+    assert "message_body_masked" in silver_messages_df.columns
+    assert "lead_key" in silver_messages_df.columns
     assert "sender_name" not in gold_df.columns
     assert "sender_phone" not in gold_df.columns
     assert "message_body" not in gold_df.columns
