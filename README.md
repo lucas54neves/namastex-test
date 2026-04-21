@@ -203,12 +203,21 @@ As validações atuais cobrem:
   - unicidade de `message_id`
   - canal restrito a `whatsapp`
 - Silver:
+  - ausência de colunas cruas proibidas no artefato publicado
+  - presença das colunas mascaradas obrigatórias
   - colunas críticas presentes
   - `timestamp` não nulo
   - ausência de duplicidade pós-deduplicação
-  - checagem de vazamento de CPF mascarado
+  - contratos anti-vazamento por classe sensível em `message_body_masked`:
+    - e-mail
+    - telefone
+    - CPF
+    - CEP
+    - placa
   - consistência de `mentions_vehicle`
 - Gold:
+  - ausência de colunas cruas proibidas no artefato publicado
+  - varredura anti-vazamento em qualquer coluna textual publicada não excluída explicitamente
   - colunas analíticas obrigatórias
   - unicidade de `conversation_id`
   - métricas não negativas

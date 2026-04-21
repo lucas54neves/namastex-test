@@ -15,7 +15,7 @@ def test_mask_message_body_preserves_shape_for_structured_pii() -> None:
         {
             "message_body": (
                 "Ana Paula, meu cpf eh 123.456.789-00, cep 04567-123, "
-                "email ana.paula@gmail.com e placa ABC1D23"
+                "email ana.paula@gmail.com, telefone +55 11 99999-9999 e placa ABC1D23"
             ),
             "sender_name": "Ana Paula",
             "conversation_lead_name": "Ana Paula",
@@ -28,10 +28,12 @@ def test_mask_message_body_preserves_shape_for_structured_pii() -> None:
     assert "123.456.789-00" not in masked
     assert "04567-123" not in masked
     assert "ana.paula@gmail.com" not in masked
+    assert "+55 11 99999-9999" not in masked
     assert "ABC1D23" not in masked
     assert "XXX.XXX.XXX-XX" in masked
     assert "XXXXX-XXX" in masked
     assert "@xxxxx." in masked
+    assert "+XX XX XXXXX-XXXX" in masked
     assert "XXX9X99" in masked
 
 

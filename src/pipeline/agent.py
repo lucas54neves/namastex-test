@@ -83,7 +83,31 @@ VALIDATION_CHECK_MAP = {
         "playbook_id": "rebuild_silver_from_bronze",
         "suggested_action": "Reaplicar deduplicação semântica na Silver e recalcular a Gold.",
     },
+    ("silver", "masked_email_not_leaking"): {
+        "kind": "pii_masking_leak",
+        "severity": "high",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Reconstruir a Silver reaplicando mascaramento antes de publicar.",
+    },
+    ("silver", "masked_phone_not_leaking"): {
+        "kind": "pii_masking_leak",
+        "severity": "high",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Reconstruir a Silver reaplicando mascaramento antes de publicar.",
+    },
     ("silver", "masked_cpf_not_leaking"): {
+        "kind": "pii_masking_leak",
+        "severity": "high",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Reconstruir a Silver reaplicando mascaramento antes de publicar.",
+    },
+    ("silver", "masked_cep_not_leaking"): {
+        "kind": "pii_masking_leak",
+        "severity": "high",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Reconstruir a Silver reaplicando mascaramento antes de publicar.",
+    },
+    ("silver", "masked_plate_not_leaking"): {
         "kind": "pii_masking_leak",
         "severity": "high",
         "playbook_id": "rebuild_silver_from_bronze",
@@ -130,6 +154,12 @@ VALIDATION_CHECK_MAP = {
         "severity": "high",
         "playbook_id": "rebuild_gold_from_silver",
         "suggested_action": "Reconstruir a Gold e reaplicar a política de publicação segura.",
+    },
+    ("gold", "masked_text_fields_not_leaking"): {
+        "kind": "pii_masking_leak",
+        "severity": "high",
+        "playbook_id": "rebuild_gold_from_silver",
+        "suggested_action": "Reconstruir a Gold e revisar qualquer campo textual publicado.",
     },
     ("gold", "engagement_bucket_valid"): {
         "kind": "gold_bucket_invalid",

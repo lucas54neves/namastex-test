@@ -4,12 +4,39 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import pandas as pd
+from pandas.api.types import is_object_dtype, is_string_dtype
 
 from pipeline.compiler import get_default_compiled_plan
 from pipeline.publication import (
     forbidden_columns_present,
     missing_required_safe_columns,
     resolve_publish_safe_keys,
+)
+from pipeline.transforms import detect_unmasked_sensitive_classes
+
+SILVER_TEXT_COLUMNS = ("message_body_masked",)
+GOLD_TEXT_SCAN_EXCLUDED_COLUMNS = frozenset(
+    {
+        "conversation_id",
+        "campaign_id",
+        "agent_id",
+        "engagement_bucket",
+        "persona_profile",
+        "audience_segment",
+        "lead_temperature",
+        "price_sensitivity",
+        "intent_stage",
+        "contact_readiness",
+        "risk_signal",
+        "primary_competitor",
+        "city",
+        "state",
+        "lead_source",
+        "vehicle_make",
+        "vehicle_model",
+        "primary_sinistro_type",
+        "conversation_outcome",
+    }
 )
 
 
@@ -43,6 +70,68 @@ def _column_set_check(
 ) -> ValidationResult:
     missing = sorted(set(required_columns) - set(df.columns))
     return _result(layer, "required_columns", not missing, missing=missing)
+
+
+def _published_text_columns(df: pd.DataFrame, layer: str) -> list[str]:
+    if layer == "silver":
+        return [column for column in SILVER_TEXT_COLUMNS if column in df.columns]
+    if layer == "gold":
+        return [
+            column
+            for column in df.columns
+            if column not in GOLD_TEXT_SCAN_EXCLUDED_COLUMNS
+            and (is_string_dtype(df[column]) or is_object_dtype(df[column]))
+        ]
+    raise ValueError(f"Unsupported validation layer: {layer}")
+
+
+def _sensitive_leak_detail(
+    df: pd.DataFrame, columns: list[str], classes: list[str]
+) -> dict[str, Any]:
+    leaking_rows: set[int] = set()
+    matched_patterns: set[str] = set()
+    leaking_columns: set[str] = set()
+    for column in columns:
+        for row_position, value in enumerate(df[column].tolist()):
+            matches = detect_unmasked_sensitive_classes(value, classes=classes)
+            if not matches:
+                continue
+            leaking_rows.add(row_position)
+            leaking_columns.add(column)
+            matched_patterns.update(matches)
+    return {
+        "checked_columns": columns,
+        "leaking_rows": len(leaking_rows),
+        "matched_patterns": sorted(matched_patterns),
+        "leaking_columns": sorted(leaking_columns),
+        "matched_row_indices": sorted(leaking_rows)[:10],
+    }
+
+
+def _sensitive_class_check(df: pd.DataFrame, layer: str, sensitive_class: str) -> ValidationResult:
+    checked_columns = _published_text_columns(df, layer)
+    detail = _sensitive_leak_detail(df, checked_columns, [sensitive_class])
+    return _result(
+        layer,
+        f"masked_{sensitive_class}_not_leaking",
+        detail["leaking_rows"] == 0,
+        **detail,
+    )
+
+
+def _masked_text_fields_not_leaking_check(df: pd.DataFrame, layer: str) -> ValidationResult:
+    checked_columns = _published_text_columns(df, layer)
+    detail = _sensitive_leak_detail(
+        df,
+        checked_columns,
+        ["email", "phone", "cpf", "cep", "plate"],
+    )
+    return _result(
+        layer,
+        "masked_text_fields_not_leaking",
+        detail["leaking_rows"] == 0,
+        **detail,
+    )
 
 
 def validate_bronze(
@@ -89,14 +178,6 @@ def validate_silver(
     dedupe_keys = resolve_publish_safe_keys(cast(list[str], plan["dedupe_keys"]), df.columns)
     silver_required_columns = cast(list[str], plan["silver_required_columns"])
     duplicate_rows = int(df.duplicated(subset=dedupe_keys).sum()) if dedupe_keys else 0
-    pii_leak_count = int(
-        (
-            df["contains_cpf"]
-            & df["message_body_masked"]
-            .fillna("")
-            .str.contains(r"\d{3}\.\d{3}\.\d{3}-\d{2}", regex=True)
-        ).sum()
-    )
     forbidden_columns = forbidden_columns_present(df, "silver")
     missing_safe_columns = missing_required_safe_columns(df, "silver")
     results = [
@@ -126,12 +207,11 @@ def validate_silver(
             duplicate_rows=duplicate_rows,
             dedupe_keys=dedupe_keys,
         ),
-        _result(
-            "silver",
-            "masked_cpf_not_leaking",
-            pii_leak_count == 0,
-            leaking_rows=pii_leak_count,
-        ),
+        _sensitive_class_check(df, "silver", "email"),
+        _sensitive_class_check(df, "silver", "phone"),
+        _sensitive_class_check(df, "silver", "cpf"),
+        _sensitive_class_check(df, "silver", "cep"),
+        _sensitive_class_check(df, "silver", "plate"),
         _result(
             "silver",
             "vehicle_mentions_consistent",
@@ -170,6 +250,7 @@ def validate_gold(
             not forbidden_columns,
             forbidden_columns=forbidden_columns,
         ),
+        _masked_text_fields_not_leaking_check(df, "gold"),
         _result(
             "gold",
             "conversation_id_unique",

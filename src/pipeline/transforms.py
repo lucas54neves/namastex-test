@@ -78,6 +78,13 @@ VEHICLE_MODELS = (
     "kicks",
 )
 STATUS_PRIORITY = {"failed": 0, "sent": 1, "delivered": 2, "read": 3}
+SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "email": EMAIL_PATTERN,
+    "phone": PHONE_PATTERN,
+    "cpf": CPF_PATTERN,
+    "cep": CEP_PATTERN,
+    "plate": PLATE_PATTERN,
+}
 
 
 def _normalize_ascii(value: str) -> str:
@@ -122,6 +129,45 @@ def _safe_string(value: object) -> str:
     if isinstance(value, float) and pd.isna(value):
         return ""
     return str(value)
+
+
+def detect_sensitive_classes(value: object, classes: Iterable[str] | None = None) -> set[str]:
+    text = _safe_string(value)
+    requested = set(classes) if classes is not None else set(SENSITIVE_PATTERNS)
+    return {
+        name
+        for name, pattern in SENSITIVE_PATTERNS.items()
+        if name in requested and pattern.search(text)
+    }
+
+
+def _is_masked_email(value: str) -> bool:
+    return bool(re.fullmatch(r"[xX._%+-]+@[xX.-]+\.[xX]{2,}", value))
+
+
+def _is_masked_plate(value: str) -> bool:
+    normalized = value.upper()
+    return bool(normalized) and set(normalized) <= {"X", "9", "-"}
+
+
+def detect_unmasked_sensitive_classes(
+    value: object, classes: Iterable[str] | None = None
+) -> set[str]:
+    text = _safe_string(value)
+    requested = set(classes) if classes is not None else set(SENSITIVE_PATTERNS)
+    matches: set[str] = set()
+    for name, pattern in SENSITIVE_PATTERNS.items():
+        if name not in requested:
+            continue
+        for match in pattern.finditer(text):
+            token = match.group(0)
+            if name == "email" and _is_masked_email(token):
+                continue
+            if name == "plate" and _is_masked_plate(token):
+                continue
+            matches.add(name)
+            break
+    return matches
 
 
 def load_bronze_frame(source_path: str) -> pd.DataFrame:
