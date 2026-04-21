@@ -94,6 +94,25 @@ state/
 | Protecao de dados sensiveis | policy de publicacao sem PII e checks anti-vazamento | `src/pipeline/publication.py`, `src/pipeline/quality.py`, `tests/test_quality.py` |
 | Agente operacional | planejamento, diagnostico, playbooks seguros, fallback e aprovacao humana para mudancas estruturais | `src/pipeline/planner.py`, `src/pipeline/agent.py`, `src/pipeline/approval.py`, `src/pipeline/operator.py` |
 
+## Suite de aderencia
+
+Existe uma suite dedicada e avaliavel para os requisitos centrais do enunciado em `tests/test_requirements_adherence.py`.
+
+Ela funciona como a entrada principal para revisar, em poucos testes, as evidencias automatizadas de que o repositorio atende aos pontos mais cobrados do teste:
+
+- `Silver` principal com granularidade por lead e unicidade por `lead_key`
+- ausencia de campos crus de PII publicados em `Silver` e `Gold`
+- atualizacao automatica de `Gold` quando a `Bronze` cresce
+- persistencia de estado operacional em artefato sob `state/`
+- geracao de diagnostico e alerta em falha simulada
+
+Execucao recomendada:
+
+```bash
+venv/bin/python -m pytest -q
+venv/bin/python -m pytest tests/test_requirements_adherence.py -q
+```
+
 ## Camadas do pipeline
 
 ### Bronze
