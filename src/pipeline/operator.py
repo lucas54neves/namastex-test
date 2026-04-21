@@ -19,6 +19,7 @@ from pipeline.publication import sanitize_for_publication
 from pipeline.quality import (
     summarize_validation_results,
     validate_bronze,
+    validate_cross_layer_consistency,
     validate_gold,
     validate_silver,
     validate_silver_messages,
@@ -295,6 +296,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             + validate_silver(silver_df, compiled_plan=compiled_plan)
             + validate_silver_messages(silver_messages_df, compiled_plan=compiled_plan)
             + validate_gold(gold_df, compiled_plan=compiled_plan)
+            + validate_cross_layer_consistency(
+                silver_df,
+                silver_messages_df,
+                gold_df,
+                compiled_plan=compiled_plan,
+            )
         )
         validation_summary = summarize_validation_results(validation_results)
         validation_summary["executed_at_utc"] = _utc_now_iso()
@@ -353,6 +360,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                     + validate_silver(silver_df, compiled_plan=compiled_plan)
                     + validate_silver_messages(silver_messages_df, compiled_plan=compiled_plan)
                     + validate_gold(gold_df, compiled_plan=compiled_plan)
+                    + validate_cross_layer_consistency(
+                        silver_df,
+                        silver_messages_df,
+                        gold_df,
+                        compiled_plan=compiled_plan,
+                    )
                 )
                 validation_summary = summarize_validation_results(validation_results)
                 validation_summary["executed_at_utc"] = _utc_now_iso()

@@ -291,6 +291,7 @@ Checks atuais de validacao:
   - colunas obrigatorias
   - unicidade de `message_id`
   - canal restrito a `whatsapp`
+  - regra semantica de que a primeira mensagem por `conversation_id` deve ser `outbound`, com diagnostico por conversa violadora
 - Silver principal:
   - ausencia de colunas cruas proibidas
   - presenca de `canonical_lead_name_masked` e `lead_contact_ref`
@@ -298,6 +299,7 @@ Checks atuais de validacao:
   - `first_seen_at` e `last_seen_at` nao nulos
   - contagens agregadas nao negativas
   - varredura anti-vazamento em campos publicados
+  - consistencia semantica com `silver_messages` para `first_seen_at`, `last_seen_at`, `conversation_count`, `message_count` e propagacao de sinais booleanos
 - Silver auxiliar:
   - ausencia de colunas cruas proibidas
   - presenca de `sender_name_masked`, `sender_phone_masked` e `message_body_masked`
@@ -312,6 +314,10 @@ Checks atuais de validacao:
   - unicidade de `lead_key`
   - `conversation_count`, `total_messages` e `duplicate_events_removed` nao negativos
   - vocabularios validos para `engagement_bucket`, `persona_profile`, `audience_segment`, `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness` e `risk_signal`
+  - consistencia semantica com `silver` e `silver_messages` para chaves, intervalos de tempo, totais agregados e sinais observados
+  - coerencia deterministica de `engagement_bucket`, `lead_temperature`, `contact_readiness` e `risk_signal` com os fatos publicados na propria linha
+
+As validacoes semanticas usam apenas identificadores tecnicos e amostras limitadas de `lead_key` ou `conversation_id` nos diagnosticos. O runtime nao publica corpo de mensagem, nome cru, telefone cru ou outros valores sensiveis nos payloads de falha.
 
 Status operacionais observaveis nos relatorios:
 

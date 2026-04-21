@@ -4,10 +4,31 @@ import pandas as pd
 
 from pipeline.quality import (
     summarize_validation_results,
+    validate_bronze,
+    validate_cross_layer_consistency,
     validate_gold,
     validate_silver,
     validate_silver_messages,
 )
+
+
+def _base_bronze_row() -> dict[str, object]:
+    return {
+        "message_id": "m1",
+        "conversation_id": "conv_1",
+        "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+        "direction": "outbound",
+        "sender_phone": "+5511999999999",
+        "sender_name": "Ana Paula",
+        "message_type": "text",
+        "message_body": "oi",
+        "status": "delivered",
+        "channel": "whatsapp",
+        "campaign_id": "camp_1",
+        "agent_id": "agent_1",
+        "conversation_outcome": "em_negociacao",
+        "metadata": "{}",
+    }
 
 
 def _base_silver_row() -> dict[str, object]:
@@ -39,8 +60,8 @@ def _base_gold_row() -> dict[str, object]:
         "first_seen_at": pd.Timestamp("2026-02-01 10:00:00"),
         "last_seen_at": pd.Timestamp("2026-02-01 10:01:00"),
         "conversation_count": 1,
-        "total_messages": 3,
-        "inbound_messages": 2,
+        "total_messages": 2,
+        "inbound_messages": 1,
         "outbound_messages": 1,
         "duplicate_events_removed": 0,
         "contains_email": False,
@@ -58,13 +79,13 @@ def _base_gold_row() -> dict[str, object]:
         "observed_campaign_ids": '["camp_1"]',
         "observed_outcomes": '["em_negociacao"]',
         "engagement_bucket": "lead_frio",
-        "data_shared_score": 1,
+        "data_shared_score": 0,
         "persona_profile": "lead_frio",
         "audience_segment": "nutricao_basica",
-        "lead_temperature": "morno",
+        "lead_temperature": "frio",
         "price_sensitivity": "baixa",
         "intent_stage": "descoberta_inicial",
-        "contact_readiness": "media",
+        "contact_readiness": "baixa",
         "risk_signal": "baixo",
     }
 
@@ -92,6 +113,39 @@ def _base_silver_message_row() -> dict[str, object]:
         "vehicle_model": None,
         "vehicle_year": None,
     }
+
+
+def test_validate_bronze_rejects_conversation_starting_inbound() -> None:
+    first = _base_bronze_row()
+    first["direction"] = "inbound"
+    second = dict(first)
+    second["message_id"] = "m2"
+    second["timestamp"] = pd.Timestamp("2026-02-01 10:01:00")
+    second["direction"] = "outbound"
+    df = pd.DataFrame([second, first])
+
+    summary = summarize_validation_results(validate_bronze(df))
+
+    assert summary["status"] == "failed"
+    failure = next(
+        item for item in summary["failed_checks"] if item["check"] == "first_message_outbound"
+    )
+    assert failure["detail"]["violating_conversations"] == 1
+    assert failure["detail"]["sample_conversation_ids"] == ["conv_1"]
+
+
+def test_validate_bronze_accepts_outbound_first_message() -> None:
+    first = _base_bronze_row()
+    second = dict(first)
+    second["message_id"] = "m2"
+    second["timestamp"] = pd.Timestamp("2026-02-01 10:01:00")
+    second["direction"] = "inbound"
+    df = pd.DataFrame([second, first])
+
+    summary = summarize_validation_results(validate_bronze(df))
+
+    assert summary["status"] == "passed"
+    assert all(item["check"] != "first_message_outbound_ratio" for item in summary["checks"])
 
 
 def test_validate_silver_detects_duplicate_rows() -> None:
@@ -247,3 +301,102 @@ def test_validate_silver_messages_detects_duplicate_rows() -> None:
 
     assert summary["status"] == "failed"
     assert any(item["check"] == "dedupe_keys_unique" for item in summary["failed_checks"])
+
+
+def test_validate_cross_layer_consistency_rejects_silver_mismatched_aggregates() -> None:
+    silver_df = pd.DataFrame([_base_silver_row()])
+    silver_messages_df = pd.DataFrame(
+        [
+            _base_silver_message_row(),
+            {
+                **_base_silver_message_row(),
+                "message_body_masked": "resposta",
+                "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
+                "direction": "outbound",
+            },
+        ]
+    )
+    gold_df = pd.DataFrame([_base_gold_row()])
+    silver_df.loc[0, "message_count"] = 99
+
+    summary = summarize_validation_results(
+        validate_cross_layer_consistency(silver_df, silver_messages_df, gold_df)
+    )
+
+    assert summary["status"] == "failed"
+    assert any(
+        item["check"] == "silver_message_count_matches_messages"
+        for item in summary["failed_checks"]
+    )
+
+
+def test_validate_cross_layer_consistency_rejects_gold_lead_missing_in_silver() -> None:
+    silver_df = pd.DataFrame([_base_silver_row()])
+    silver_messages_df = pd.DataFrame(
+        [
+            _base_silver_message_row(),
+            {
+                **_base_silver_message_row(),
+                "message_body_masked": "resposta",
+                "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
+                "direction": "outbound",
+            },
+        ]
+    )
+    gold_row = _base_gold_row()
+    gold_row["lead_key"] = "lead_missing"
+    gold_df = pd.DataFrame([gold_row])
+
+    summary = summarize_validation_results(
+        validate_cross_layer_consistency(silver_df, silver_messages_df, gold_df)
+    )
+
+    assert summary["status"] == "failed"
+    assert any(item["check"] == "gold_lead_keys_in_silver" for item in summary["failed_checks"])
+
+
+def test_validate_cross_layer_consistency_rejects_gold_semantic_incoherence() -> None:
+    silver_df = pd.DataFrame([_base_silver_row()])
+    silver_messages_df = pd.DataFrame(
+        [
+            _base_silver_message_row(),
+            {
+                **_base_silver_message_row(),
+                "message_body_masked": "resposta",
+                "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
+                "direction": "outbound",
+            },
+        ]
+    )
+    gold_row = _base_gold_row()
+    gold_row["engagement_bucket"] = "longa"
+    gold_df = pd.DataFrame([gold_row])
+
+    summary = summarize_validation_results(
+        validate_cross_layer_consistency(silver_df, silver_messages_df, gold_df)
+    )
+
+    assert summary["status"] == "failed"
+    assert any(item["check"] == "engagement_bucket_coherent" for item in summary["failed_checks"])
+
+
+def test_validate_cross_layer_consistency_accepts_consistent_published_artifacts() -> None:
+    silver_df = pd.DataFrame([_base_silver_row()])
+    silver_messages_df = pd.DataFrame(
+        [
+            _base_silver_message_row(),
+            {
+                **_base_silver_message_row(),
+                "message_body_masked": "resposta",
+                "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
+                "direction": "outbound",
+            },
+        ]
+    )
+    gold_df = pd.DataFrame([_base_gold_row()])
+
+    summary = summarize_validation_results(
+        validate_cross_layer_consistency(silver_df, silver_messages_df, gold_df)
+    )
+
+    assert summary["status"] == "passed"
