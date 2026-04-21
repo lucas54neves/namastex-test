@@ -73,11 +73,14 @@ def _base_gold_row() -> dict[str, object]:
         "mentioned_competitor": False,
         "mentioned_sinistro": False,
         "avg_response_time_sec": 60.0,
+        "avg_quoted_price": None,
+        "primary_competitor": None,
         "city": "Sao Paulo",
         "state": "SP",
         "observed_lead_sources": '["google_ads"]',
         "observed_campaign_ids": '["camp_1"]',
         "observed_outcomes": '["em_negociacao"]',
+        "dominant_email_provider": None,
         "engagement_bucket": "lead_frio",
         "data_shared_score": 0,
         "persona_profile": "lead_frio",
@@ -87,6 +90,12 @@ def _base_gold_row() -> dict[str, object]:
         "intent_stage": "descoberta_inicial",
         "contact_readiness": "baixa",
         "risk_signal": "baixo",
+        "response_latency_band": "rapida",
+        "closure_outcome_group": "aberto",
+        "has_closed_outcome": False,
+        "price_objection_intensity": "nenhuma",
+        "commercial_urgency_signal": "nenhuma",
+        "competitor_pressure_level": "nenhuma",
     }
 
 
@@ -188,6 +197,46 @@ def test_validate_gold_rejects_invalid_price_sensitivity() -> None:
 
     assert summary["status"] == "failed"
     assert any(item["check"] == "price_sensitivity_valid" for item in summary["failed_checks"])
+
+
+def test_validate_gold_rejects_invalid_response_latency_band() -> None:
+    row = _base_gold_row()
+    row["response_latency_band"] = "instantanea"
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(item["check"] == "response_latency_band_valid" for item in summary["failed_checks"])
+
+
+def test_validate_gold_rejects_contradictory_closure_flag() -> None:
+    row = _base_gold_row()
+    row["closure_outcome_group"] = "fechado"
+    row["has_closed_outcome"] = False
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(
+        item["check"] == "closure_outcome_flag_coherent" for item in summary["failed_checks"]
+    )
+
+
+def test_validate_gold_rejects_email_provider_without_email_signal() -> None:
+    row = _base_gold_row()
+    row["dominant_email_provider"] = "gmail"
+    row["contains_email"] = False
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(
+        item["check"] == "dominant_email_provider_nullability_coherent"
+        for item in summary["failed_checks"]
+    )
 
 
 def test_validate_silver_rejects_forbidden_raw_columns() -> None:

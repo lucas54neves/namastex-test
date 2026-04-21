@@ -18,6 +18,27 @@ CEP_PATTERN = re.compile(r"\b\d{5}-?\d{3}\b")
 PLATE_PATTERN = re.compile(r"\b[A-Z]{3}[0-9][A-Z0-9][0-9]{2}\b", re.IGNORECASE)
 YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
 PRICE_PATTERN = re.compile(r"r\$\s?(\d[\d.]*(?:,\d{2})?)", re.IGNORECASE)
+PRICE_OBJECTION_PATTERN = re.compile(
+    r"\b(caro|cara|preco alto|muito caro|acima do orçamento|acima do orcamento|desconto|"
+    r"parcel[ao]s?|mensalidade|cotacao|cotação|orcamento|orçamento)\b",
+    re.IGNORECASE,
+)
+URGENCY_STRONG_PATTERN = re.compile(
+    r"\b(urgente|hoje mesmo|agora|imediat|quanto antes|pra hoje|para hoje|fechar hoje)\b",
+    re.IGNORECASE,
+)
+URGENCY_MODERATE_PATTERN = re.compile(
+    r"\b(essa semana|esta semana|amanha|amanhã|rapido|rápido|prioridade|preciso logo)\b",
+    re.IGNORECASE,
+)
+COMPETITOR_COMPARISON_PATTERN = re.compile(
+    r"\b(cobriu|cobrou|melhor que|mais barato|mais caro|compar|concorrente|outra seguradora)\b",
+    re.IGNORECASE,
+)
+EMAIL_PROVIDER_DOMAIN_PATTERN = re.compile(
+    r"\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b",
+    re.IGNORECASE,
+)
 COMPETITOR_PATTERNS = {
     "porto_seguro": re.compile(r"\bporto seguro\b", re.IGNORECASE),
     "azul_seguros": re.compile(r"\bazul(?: seguros)?\b", re.IGNORECASE),
@@ -130,6 +151,24 @@ def _safe_string(value: object) -> str:
     if isinstance(value, float) and pd.isna(value):
         return ""
     return str(value)
+
+
+def _safe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    try:
+        return float(cast(float | int | str, value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: object) -> int:
+    converted = _safe_float(value)
+    if converted is None:
+        return 0
+    return int(converted)
 
 
 def _stable_hash_token(*parts: object, prefix: str) -> str:
@@ -336,6 +375,137 @@ def _extract_price(text: str) -> float | None:
         return None
 
 
+def _extract_email_provider(text: str) -> str | None:
+    match = EMAIL_PROVIDER_DOMAIN_PATTERN.search(text)
+    if not match:
+        return None
+    domain = match.group(1).lower()
+    if domain.endswith("gmail.com"):
+        return "gmail"
+    if domain.endswith(("hotmail.com", "outlook.com", "live.com", "msn.com")):
+        return "outlook"
+    if domain.endswith(("yahoo.com", "yahoo.com.br")):
+        return "yahoo"
+    if domain.endswith(("icloud.com", "me.com")):
+        return "icloud"
+    if domain.endswith("uol.com.br"):
+        return "uol"
+    if domain.endswith("bol.com.br"):
+        return "bol"
+    if domain.endswith("terra.com.br"):
+        return "terra"
+    return "other"
+
+
+def _extract_price_objection_signal(text: str) -> bool:
+    return bool(PRICE_OBJECTION_PATTERN.search(text))
+
+
+def _extract_urgency_strength(text: str) -> int:
+    if URGENCY_STRONG_PATTERN.search(text):
+        return 2
+    if URGENCY_MODERATE_PATTERN.search(text):
+        return 1
+    return 0
+
+
+def _extract_competitor_comparison_signal(text: str) -> bool:
+    return bool(COMPETITOR_COMPARISON_PATTERN.search(text))
+
+
+def _parse_json_list(raw: object) -> list[str]:
+    text = _safe_string(raw).strip()
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _normalize_outcome_group(observed_outcomes: object) -> str:
+    closed_outcomes = {
+        "fechado_ganho",
+        "fechado",
+        "apolice_emitida",
+        "venda_realizada",
+        "contrato_assinado",
+    }
+    lost_outcomes = {
+        "fechado_perdido",
+        "perdido",
+        "sem_interesse",
+        "cancelado",
+        "nao_convertido",
+    }
+    normalized = {
+        _normalize_for_match(item).replace(" ", "_") for item in _parse_json_list(observed_outcomes)
+    }
+    if normalized & closed_outcomes:
+        return "fechado"
+    if normalized & lost_outcomes:
+        return "perdido"
+    return "aberto"
+
+
+def _response_latency_band(avg_response_time_sec: object) -> str:
+    value = _safe_float(avg_response_time_sec)
+    if value is None:
+        return "sem_evidencia"
+    if value <= 300:
+        return "rapida"
+    if value <= 1800:
+        return "moderada"
+    return "lenta"
+
+
+def _price_objection_intensity(
+    price_objection_hits: object,
+    competitor_mentions: object,
+    quoted_price_mentions: object,
+) -> str:
+    hits = _safe_int(price_objection_hits)
+    competitor_count = _safe_int(competitor_mentions)
+    quote_count = _safe_int(quoted_price_mentions)
+    if hits >= 2 or (hits >= 1 and competitor_count >= 1) or quote_count >= 2:
+        return "forte"
+    if hits >= 1 or quote_count >= 1 or competitor_count >= 1:
+        return "leve"
+    return "nenhuma"
+
+
+def _commercial_urgency_signal(
+    urgency_strength_max: object,
+    urgency_hits: object,
+    lead_lifecycle_hours: object,
+) -> str:
+    max_strength = _safe_int(urgency_strength_max)
+    hit_count = _safe_int(urgency_hits)
+    if max_strength >= 2 or hit_count >= 2:
+        return "alta"
+    if max_strength >= 1:
+        return "moderada"
+    return "nenhuma"
+
+
+def _competitor_pressure_level(
+    primary_competitor: object,
+    competitor_mentions: object,
+    competitor_comparison_hits: object,
+) -> str:
+    has_primary = bool(_safe_string(primary_competitor).strip())
+    mentions = _safe_int(competitor_mentions)
+    comparisons = _safe_int(competitor_comparison_hits)
+    if not has_primary and mentions == 0 and comparisons == 0:
+        return "nenhuma"
+    if comparisons >= 1 or mentions >= 2:
+        return "alta"
+    return "leve"
+
+
 def deduplicate_events(
     df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
 ) -> pd.DataFrame:
@@ -433,7 +603,13 @@ def add_message_signals(df: pd.DataFrame) -> pd.DataFrame:
     enriched["vehicle_make"] = message_body.map(_extract_vehicle_make)
     enriched["vehicle_model"] = message_body.map(_extract_vehicle_model)
     enriched["competitor_mentioned"] = message_body.map(_extract_competitor)
+    enriched["email_provider"] = message_body.map(_extract_email_provider)
     enriched["quoted_price"] = message_body.map(_extract_price)
+    enriched["price_objection_signal"] = message_body.map(_extract_price_objection_signal)
+    enriched["urgency_strength"] = message_body.map(_extract_urgency_strength)
+    enriched["competitor_comparison_signal"] = message_body.map(
+        _extract_competitor_comparison_signal
+    )
     enriched["sinistro_type"] = [
         _extract_sinistro_type(text, direction)
         for text, direction in zip(message_body, enriched["direction"], strict=False)
@@ -461,7 +637,19 @@ def build_silver(df: pd.DataFrame, compiled_plan: dict[str, object] | None = Non
 
 
 def build_silver_leads(silver_messages: pd.DataFrame) -> pd.DataFrame:
-    grouped = silver_messages.groupby("lead_key", dropna=False)
+    lead_frame = silver_messages.copy()
+    optional_defaults: dict[str, object] = {
+        "metadata_city": "",
+        "metadata_state": "",
+        "metadata_lead_source": "",
+        "metadata_response_time_sec": pd.NA,
+        "metadata_is_business_hours": pd.NA,
+    }
+    for column, default in optional_defaults.items():
+        if column not in lead_frame.columns:
+            lead_frame[column] = default
+
+    grouped = lead_frame.groupby("lead_key", dropna=False)
     leads = grouped.agg(
         canonical_lead_name_masked=(
             "lead_name_raw",
@@ -641,6 +829,13 @@ def build_gold(
         mentioned_sinistro=("mentions_sinistro", _max_or_false),
         avg_quoted_price=("quoted_price", "mean"),
         primary_competitor=("competitor_mentioned", _last_non_null),
+        dominant_email_provider=("email_provider", _last_non_null),
+        quoted_price_mentions=("quoted_price", lambda values: int(values.notna().sum())),
+        price_objection_hits=("price_objection_signal", "sum"),
+        urgency_hits=("urgency_strength", lambda values: int(values.gt(0).sum())),
+        urgency_strength_max=("urgency_strength", "max"),
+        competitor_mentions_count=("mentions_competitor", "sum"),
+        competitor_comparison_hits=("competitor_comparison_signal", "sum"),
     ).reset_index()
 
     vehicle_context = (
@@ -688,5 +883,56 @@ def build_gold(
         .astype(int)
         .sum(axis=1)
     )
+    gold["lead_lifecycle_hours"] = (
+        gold["last_seen_at"] - gold["first_seen_at"]
+    ).dt.total_seconds() / 3600.0
+    gold["response_latency_band"] = gold["avg_response_time_sec"].map(_response_latency_band)
+    gold["closure_outcome_group"] = gold["observed_outcomes"].map(_normalize_outcome_group)
+    gold["has_closed_outcome"] = gold["closure_outcome_group"].eq("fechado")
+    gold["price_objection_intensity"] = [
+        _price_objection_intensity(price_hits, competitor_mentions, quote_mentions)
+        for price_hits, competitor_mentions, quote_mentions in zip(
+            gold["price_objection_hits"],
+            gold["competitor_mentions_count"],
+            gold["quoted_price_mentions"],
+            strict=False,
+        )
+    ]
+    gold["commercial_urgency_signal"] = [
+        _commercial_urgency_signal(max_strength, hit_count, lifecycle_hours)
+        for max_strength, hit_count, lifecycle_hours in zip(
+            gold["urgency_strength_max"],
+            gold["urgency_hits"],
+            gold["lead_lifecycle_hours"],
+            strict=False,
+        )
+    ]
+    gold["competitor_pressure_level"] = [
+        _competitor_pressure_level(primary_competitor, mentions, comparison_hits)
+        for primary_competitor, mentions, comparison_hits in zip(
+            gold["primary_competitor"],
+            gold["competitor_mentions_count"],
+            gold["competitor_comparison_hits"],
+            strict=False,
+        )
+    ]
     gold = add_gold_segments(gold, compiled_plan=compiled_plan)
-    return gold.sort_values("lead_key").reset_index(drop=True)
+    gold["dominant_email_provider"] = gold["dominant_email_provider"].where(
+        gold["contains_email"],
+        None,
+    )
+    return (
+        gold.drop(
+            columns=[
+                "quoted_price_mentions",
+                "price_objection_hits",
+                "urgency_hits",
+                "urgency_strength_max",
+                "competitor_mentions_count",
+                "competitor_comparison_hits",
+                "lead_lifecycle_hours",
+            ]
+        )
+        .sort_values("lead_key")
+        .reset_index(drop=True)
+    )

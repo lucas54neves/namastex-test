@@ -446,6 +446,16 @@ def validate_gold_consistency(
         "lead_temperature",
         "contact_readiness",
         "risk_signal",
+        "dominant_email_provider",
+        "response_latency_band",
+        "closure_outcome_group",
+        "has_closed_outcome",
+        "price_objection_intensity",
+        "commercial_urgency_signal",
+        "competitor_pressure_level",
+        "avg_response_time_sec",
+        "avg_quoted_price",
+        "primary_competitor",
     ]
     required_silver_columns = ["lead_key", "first_seen_at", "last_seen_at", "conversation_count"]
     required_message_columns = [
@@ -642,6 +652,112 @@ def validate_gold_consistency(
             sample_lead_keys=_bounded_sample(violating_risk),
         )
     )
+    provider_mask = (
+        gold_common["dominant_email_provider"]
+        .notna()
+        .eq(gold_common["contains_email"].astype(bool))
+    )
+    violating_provider = gold_common.index[~provider_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "dominant_email_provider_coherent",
+            len(violating_provider) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_provider),
+            sample_lead_keys=_bounded_sample(violating_provider),
+        )
+    )
+
+    expected_latency = gold_common["avg_response_time_sec"].map(
+        lambda value: "sem_evidencia"
+        if pd.isna(value)
+        else "rapida"
+        if float(value) <= 300
+        else "moderada"
+        if float(value) <= 1800
+        else "lenta"
+    )
+    latency_mask = _series_equal(
+        gold_common["response_latency_band"].astype("string"),
+        expected_latency.astype("string"),
+    )
+    violating_latency = gold_common.index[~latency_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "response_latency_band_coherent",
+            len(violating_latency) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_latency),
+            sample_lead_keys=_bounded_sample(violating_latency),
+        )
+    )
+
+    closure_mask = (
+        gold_common["has_closed_outcome"]
+        .astype(bool)
+        .eq(gold_common["closure_outcome_group"].eq("fechado"))
+    )
+    violating_closure = gold_common.index[~closure_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "closure_outcome_coherent",
+            len(violating_closure) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_closure),
+            sample_lead_keys=_bounded_sample(violating_closure),
+        )
+    )
+
+    price_mask = ~gold_common["price_objection_intensity"].eq("nenhuma") | (
+        ~gold_common["mentioned_competitor"].astype(bool) & gold_common["avg_quoted_price"].isna()
+    )
+    violating_price = gold_common.index[~price_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "price_objection_intensity_coherent",
+            len(violating_price) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_price),
+            sample_lead_keys=_bounded_sample(violating_price),
+        )
+    )
+
+    urgency_mask = ~gold_common["commercial_urgency_signal"].eq("alta") | (
+        gold_common["commercial_urgency_signal"].eq("alta")
+        & ~gold_common["response_latency_band"].eq("sem_evidencia")
+    )
+    violating_urgency = gold_common.index[~urgency_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "commercial_urgency_signal_coherent",
+            len(violating_urgency) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_urgency),
+            sample_lead_keys=_bounded_sample(violating_urgency),
+        )
+    )
+
+    competitor_mask = (
+        gold_common["competitor_pressure_level"]
+        .eq("nenhuma")
+        .eq(~gold_common["mentioned_competitor"].astype(bool))
+    )
+    violating_competitor = gold_common.index[~competitor_mask].tolist()
+    results.append(
+        _result(
+            "gold",
+            "competitor_pressure_level_coherent",
+            len(violating_competitor) == 0,
+            checked_leads=int(len(comparable)),
+            violating_leads=len(violating_competitor),
+            sample_lead_keys=_bounded_sample(violating_competitor),
+        )
+    )
     return results
 
 
@@ -805,6 +921,14 @@ def validate_gold(
     valid_intent_stages = cast(set[str], plan["gold_valid_intent_stages"])
     valid_contact_readiness = cast(set[str], plan["gold_valid_contact_readiness"])
     valid_risk_signals = cast(set[str], plan["gold_valid_risk_signals"])
+    valid_email_providers = cast(set[str], plan["gold_valid_email_providers"])
+    valid_response_latency_bands = cast(set[str], plan["gold_valid_response_latency_bands"])
+    valid_closure_outcome_groups = cast(set[str], plan["gold_valid_closure_outcome_groups"])
+    valid_price_objection_intensities = cast(
+        set[str], plan["gold_valid_price_objection_intensities"]
+    )
+    valid_commercial_urgency_signals = cast(set[str], plan["gold_valid_commercial_urgency_signals"])
+    valid_competitor_pressure_levels = cast(set[str], plan["gold_valid_competitor_pressure_levels"])
     gold_required_columns = cast(list[str], plan["gold_required_columns"])
     forbidden_columns = forbidden_columns_present(df, "gold")
     results = [
@@ -905,9 +1029,91 @@ def validate_gold(
         ),
         _result(
             "gold",
+            "dominant_email_provider_valid",
+            set(df["dominant_email_provider"].dropna().astype(str).unique()).issubset(
+                valid_email_providers
+            ),
+            distinct_email_providers=sorted(
+                df["dominant_email_provider"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "response_latency_band_valid",
+            set(df["response_latency_band"].dropna().astype(str).unique()).issubset(
+                valid_response_latency_bands
+            ),
+            distinct_response_latency_bands=sorted(
+                df["response_latency_band"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "closure_outcome_group_valid",
+            set(df["closure_outcome_group"].dropna().astype(str).unique()).issubset(
+                valid_closure_outcome_groups
+            ),
+            distinct_closure_outcome_groups=sorted(
+                df["closure_outcome_group"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "price_objection_intensity_valid",
+            set(df["price_objection_intensity"].dropna().astype(str).unique()).issubset(
+                valid_price_objection_intensities
+            ),
+            distinct_price_objection_intensities=sorted(
+                df["price_objection_intensity"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "commercial_urgency_signal_valid",
+            set(df["commercial_urgency_signal"].dropna().astype(str).unique()).issubset(
+                valid_commercial_urgency_signals
+            ),
+            distinct_commercial_urgency_signals=sorted(
+                df["commercial_urgency_signal"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "competitor_pressure_level_valid",
+            set(df["competitor_pressure_level"].dropna().astype(str).unique()).issubset(
+                valid_competitor_pressure_levels
+            ),
+            distinct_competitor_pressure_levels=sorted(
+                df["competitor_pressure_level"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
             "persona_profile_not_null",
             df["persona_profile"].notna().all(),
             null_rows=int(df["persona_profile"].isna().sum()),
+        ),
+        _result(
+            "gold",
+            "closure_outcome_flag_coherent",
+            df["has_closed_outcome"]
+            .astype(bool)
+            .eq(df["closure_outcome_group"].eq("fechado"))
+            .all(),
+            violating_rows=int(
+                (
+                    df["has_closed_outcome"].astype(bool)
+                    != df["closure_outcome_group"].eq("fechado")
+                ).sum()
+            ),
+        ),
+        _result(
+            "gold",
+            "dominant_email_provider_nullability_coherent",
+            df["dominant_email_provider"].notna().eq(df["contains_email"].astype(bool)).all(),
+            violating_rows=int(
+                (df["dominant_email_provider"].notna() != df["contains_email"].astype(bool)).sum()
+            ),
         ),
     ]
     return results

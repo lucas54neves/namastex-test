@@ -233,6 +233,7 @@ Principais colunas analiticas:
 - `observed_lead_sources`
 - `observed_campaign_ids`
 - `observed_outcomes`
+- `dominant_email_provider`
 - `engagement_bucket`
 - `data_shared_score`
 - `persona_profile`
@@ -242,12 +243,34 @@ Principais colunas analiticas:
 - `intent_stage`
 - `contact_readiness`
 - `risk_signal`
+- `response_latency_band`
+- `closure_outcome_group`
+- `has_closed_outcome`
+- `price_objection_intensity`
+- `commercial_urgency_signal`
+- `competitor_pressure_level`
 
 Segmentacoes atuais:
 
 - `persona_profile`: `cotador_comparador`, `cliente_pos_sinistro`, `lead_engajado_com_dados`, `lead_frio`
 - `audience_segment`: `oferta_competitiva`, `retencao_pos_sinistro`, `close_comercial`, `nutricao_basica`
 - `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness` e `risk_signal` com vocabularios controlados validados em runtime
+
+Enriquecimentos analiticos adicionais:
+
+- `dominant_email_provider`: familia normalizada inferida deterministicamente de e-mails observados no historico, com vocabulario controlado e `null` quando nao ha evidencia
+- `response_latency_band`: `sem_evidencia`, `rapida`, `moderada` ou `lenta`, derivada de `avg_response_time_sec`
+- `closure_outcome_group` e `has_closed_outcome`: normalizacao de desfechos observados para suportar analise de taxa de fechamento por perfil
+- `price_objection_intensity`: `nenhuma`, `leve` ou `forte`, derivada de sinais de cotacao, pressao de preco e contexto competitivo
+- `commercial_urgency_signal`: `nenhuma`, `moderada` ou `alta`, derivada de sinais linguísticos de urgencia e do ciclo observado do lead
+- `competitor_pressure_level`: `nenhuma`, `leve` ou `alta`, derivada de mencoes a concorrentes e sinais de comparacao comercial
+
+Exemplos de grouped analysis habilitados diretamente pela `Gold`:
+
+- fechamento por `persona_profile` usando `has_closed_outcome` ou `closure_outcome_group`
+- latencia media e distribuicao de `response_latency_band` por `audience_segment`, `city` ou `state`
+- intensidade de objecao de preco por canal de origem usando `price_objection_intensity`
+- pressao competitiva por perfil usando `competitor_pressure_level` e `primary_competitor`
 
 ## Politica de protecao de dados
 
@@ -313,9 +336,9 @@ Checks atuais de validacao:
   - colunas obrigatorias
   - unicidade de `lead_key`
   - `conversation_count`, `total_messages` e `duplicate_events_removed` nao negativos
-  - vocabularios validos para `engagement_bucket`, `persona_profile`, `audience_segment`, `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness` e `risk_signal`
+  - vocabularios validos para `engagement_bucket`, `persona_profile`, `audience_segment`, `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level`
   - consistencia semantica com `silver` e `silver_messages` para chaves, intervalos de tempo, totais agregados e sinais observados
-  - coerencia deterministica de `engagement_bucket`, `lead_temperature`, `contact_readiness` e `risk_signal` com os fatos publicados na propria linha
+  - coerencia deterministica de `engagement_bucket`, `lead_temperature`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `has_closed_outcome`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level` com os fatos publicados na propria linha
 
 As validacoes semanticas usam apenas identificadores tecnicos e amostras limitadas de `lead_key` ou `conversation_id` nos diagnosticos. O runtime nao publica corpo de mensagem, nome cru, telefone cru ou outros valores sensiveis nos payloads de falha.
 

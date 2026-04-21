@@ -207,12 +207,12 @@ def test_build_gold_consolidates_multiple_conversations_per_lead() -> None:
                 "sender_phone": "+5511982222222",
                 "sender_name": "Ana Paula",
                 "message_type": "text",
-                "message_body": "quero cotacao do Civic 2019",
+                "message_body": "quero cotacao do Civic 2019, meu email eh ana@gmail.com",
                 "status": "read",
                 "channel": "whatsapp",
                 "campaign_id": "camp_1",
                 "agent_id": "agent_1",
-                "conversation_outcome": "em_negociacao",
+                "conversation_outcome": "fechado",
                 "metadata": (
                     '{"device":"iphone","city":"Sao Paulo","state":"SP",'
                     '"response_time_sec":60,"is_business_hours":true,'
@@ -227,7 +227,9 @@ def test_build_gold_consolidates_multiple_conversations_per_lead() -> None:
                 "sender_phone": "+5511982222222",
                 "sender_name": "Ana Paula",
                 "message_type": "text",
-                "message_body": "Porto Seguro me cobrou R$ 2.500,00 e tive sinistro",
+                "message_body": (
+                    "Porto Seguro me cobrou R$ 2.500,00 e tive sinistro, preciso fechar hoje"
+                ),
                 "status": "read",
                 "channel": "whatsapp",
                 "campaign_id": "camp_2",
@@ -253,5 +255,48 @@ def test_build_gold_consolidates_multiple_conversations_per_lead() -> None:
     assert bool(gold.iloc[0]["mentioned_competitor"]) is True
     assert bool(gold.iloc[0]["mentioned_sinistro"]) is True
     assert gold.iloc[0]["observed_campaign_ids"] == '["camp_1", "camp_2"]'
-    assert gold.iloc[0]["lead_temperature"] == "frio"
+    assert gold.iloc[0]["lead_temperature"] == "morno"
     assert gold.iloc[0]["intent_stage"] == "pos_sinistro"
+    assert gold.iloc[0]["dominant_email_provider"] == "gmail"
+    assert gold.iloc[0]["response_latency_band"] == "rapida"
+    assert gold.iloc[0]["closure_outcome_group"] == "fechado"
+    assert bool(gold.iloc[0]["has_closed_outcome"]) is True
+    assert gold.iloc[0]["price_objection_intensity"] == "forte"
+    assert gold.iloc[0]["commercial_urgency_signal"] == "alta"
+    assert gold.iloc[0]["competitor_pressure_level"] == "alta"
+
+
+def test_build_gold_keeps_provider_null_and_sem_evidencia_without_supporting_data() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511981111111",
+                "sender_name": "Carlos",
+                "message_type": "text",
+                "message_body": "quero saber mais",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"device":"iphone","city":"Campinas","state":"SP"}',
+            }
+        ]
+    )
+
+    silver_messages = build_silver(bronze)
+    silver_leads = build_silver_leads(silver_messages)
+    gold = build_gold(silver_leads, silver_messages)
+
+    assert pd.isna(gold.iloc[0]["avg_response_time_sec"])
+    assert gold.iloc[0]["response_latency_band"] == "sem_evidencia"
+    assert pd.isna(gold.iloc[0]["dominant_email_provider"])
+    assert gold.iloc[0]["closure_outcome_group"] == "aberto"
+    assert bool(gold.iloc[0]["has_closed_outcome"]) is False
+    assert gold.iloc[0]["price_objection_intensity"] == "nenhuma"
+    assert gold.iloc[0]["commercial_urgency_signal"] == "nenhuma"
+    assert gold.iloc[0]["competitor_pressure_level"] == "nenhuma"

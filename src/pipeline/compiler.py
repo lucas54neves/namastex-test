@@ -26,6 +26,18 @@ def compile_pipeline_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "gold_valid_intent_stages": set(spec["gold"]["valid_intent_stages"]),
         "gold_valid_contact_readiness": set(spec["gold"]["valid_contact_readiness"]),
         "gold_valid_risk_signals": set(spec["gold"]["valid_risk_signals"]),
+        "gold_valid_email_providers": set(spec["gold"]["valid_email_providers"]),
+        "gold_valid_response_latency_bands": set(spec["gold"]["valid_response_latency_bands"]),
+        "gold_valid_closure_outcome_groups": set(spec["gold"]["valid_closure_outcome_groups"]),
+        "gold_valid_price_objection_intensities": set(
+            spec["gold"]["valid_price_objection_intensities"]
+        ),
+        "gold_valid_commercial_urgency_signals": set(
+            spec["gold"]["valid_commercial_urgency_signals"]
+        ),
+        "gold_valid_competitor_pressure_levels": set(
+            spec["gold"]["valid_competitor_pressure_levels"]
+        ),
         "gold_segmentation": dict(spec["gold"]["segmentation"]),
         "quality": dict(spec["quality"]),
         "quality_validation_rules": dict(spec["quality"].get("validation_rules", {})),
