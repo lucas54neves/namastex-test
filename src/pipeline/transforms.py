@@ -163,6 +163,13 @@ def _first_non_null(values: pd.Series) -> object:
     return None
 
 
+def _last_non_null(values: pd.Series) -> object:
+    for value in values.iloc[::-1]:
+        if pd.notna(value):
+            return value
+    return None
+
+
 def _max_or_false(values: pd.Series) -> bool:
     return bool(values.fillna(False).astype(bool).max())
 
@@ -610,65 +617,58 @@ def add_gold_segments(
 
 
 def build_gold(
-    silver: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+    silver_leads: pd.DataFrame,
+    silver_messages: pd.DataFrame,
+    compiled_plan: dict[str, object] | None = None,
 ) -> pd.DataFrame:
-    grouped = silver.groupby("conversation_id", dropna=False)
-    gold = grouped.agg(
-        started_at=("timestamp", "min"),
-        ended_at=("timestamp", "max"),
-        campaign_id=("campaign_id", "first"),
-        agent_id=("agent_id", "first"),
-        conversation_outcome=("conversation_outcome", "last"),
+    ordered_messages = silver_messages.sort_values(
+        ["lead_key", "timestamp", "conversation_id", "message_id"]
+    ).reset_index(drop=True)
+    grouped = ordered_messages.groupby("lead_key", dropna=False)
+
+    message_aggregates = grouped.agg(
         total_messages=("message_id", "count"),
         inbound_messages=("is_inbound", "sum"),
         outbound_messages=("is_outbound", "sum"),
-        non_text_messages=("message_type", lambda values: int((values != "text").sum())),
         duplicate_events_removed=("dropped_duplicate_events", "sum"),
-        contains_email=("contains_email", "max"),
-        contains_phone=("contains_phone", "max"),
-        contains_cpf=("contains_cpf", "max"),
-        contains_cep=("contains_cep", "max"),
-        contains_plate=("contains_plate", "max"),
-        mentioned_vehicle=("mentions_vehicle", "max"),
-        mentioned_competitor=("mentions_competitor", "max"),
-        mentioned_sinistro=("mentions_sinistro", "max"),
-        primary_competitor=("competitor_mentioned", "first"),
-        avg_response_time_sec=("metadata_response_time_sec", "mean"),
+        contains_email=("contains_email", _max_or_false),
+        contains_phone=("contains_phone", _max_or_false),
+        contains_cpf=("contains_cpf", _max_or_false),
+        contains_cep=("contains_cep", _max_or_false),
+        contains_plate=("contains_plate", _max_or_false),
+        mentioned_vehicle=("mentions_vehicle", _max_or_false),
+        mentioned_competitor=("mentions_competitor", _max_or_false),
+        mentioned_sinistro=("mentions_sinistro", _max_or_false),
         avg_quoted_price=("quoted_price", "mean"),
-        city=("metadata_city", "first"),
-        state=("metadata_state", "first"),
-        lead_source=("metadata_lead_source", "first"),
-        lead_name_masked=(
-            "conversation_lead_name",
-            lambda values: mask_sender_name(values.iloc[0]),
-        ),
+        primary_competitor=("competitor_mentioned", _last_non_null),
     ).reset_index()
 
     vehicle_context = (
-        silver.loc[
-            silver["mentions_vehicle"],
-            ["conversation_id", "vehicle_make", "vehicle_model", "vehicle_year"],
+        ordered_messages.loc[
+            ordered_messages["mentions_vehicle"],
+            ["lead_key", "vehicle_make", "vehicle_model", "vehicle_year"],
         ]
-        .groupby("conversation_id", dropna=False)
+        .groupby("lead_key", dropna=False)
         .agg(
-            vehicle_make=("vehicle_make", "first"),
-            vehicle_model=("vehicle_model", "first"),
-            vehicle_year=("vehicle_year", "first"),
+            vehicle_make=("vehicle_make", _last_non_null),
+            vehicle_model=("vehicle_model", _last_non_null),
+            vehicle_year=("vehicle_year", _last_non_null),
         )
         .reset_index()
     )
     sinistro_context = (
-        silver.loc[silver["mentions_sinistro"], ["conversation_id", "sinistro_type"]]
-        .groupby("conversation_id", dropna=False)
-        .agg(primary_sinistro_type=("sinistro_type", "first"))
+        ordered_messages.loc[
+            ordered_messages["mentions_sinistro"],
+            ["lead_key", "sinistro_type"],
+        ]
+        .groupby("lead_key", dropna=False)
+        .agg(primary_sinistro_type=("sinistro_type", _last_non_null))
         .reset_index()
     )
 
-    gold = gold.merge(vehicle_context, on="conversation_id", how="left")
-    gold = gold.merge(sinistro_context, on="conversation_id", how="left")
-    gold["conversation_duration_min"] = (
-        (gold["ended_at"] - gold["started_at"]).dt.total_seconds() / 60.0
-    ).fillna(0.0)
+    gold = silver_leads.merge(message_aggregates, on="lead_key", how="left")
+    gold = gold.merge(vehicle_context, on="lead_key", how="left")
+    gold = gold.merge(sinistro_context, on="lead_key", how="left")
     gold["engagement_bucket"] = pd.cut(
         gold["total_messages"],
         bins=[0, 4, 10, 20, float("inf")],
@@ -689,4 +689,4 @@ def build_gold(
         .sum(axis=1)
     )
     gold = add_gold_segments(gold, compiled_plan=compiled_plan)
-    return gold.sort_values("conversation_id").reset_index(drop=True)
+    return gold.sort_values("lead_key").reset_index(drop=True)

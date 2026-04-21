@@ -76,9 +76,28 @@
   },
   "gold": {
     "required_columns": [
-      "conversation_id",
+      "lead_key",
+      "first_seen_at",
+      "last_seen_at",
+      "conversation_count",
       "total_messages",
+      "inbound_messages",
+      "outbound_messages",
       "duplicate_events_removed",
+      "contains_email",
+      "contains_phone",
+      "contains_cpf",
+      "contains_cep",
+      "contains_plate",
+      "mentioned_vehicle",
+      "mentioned_competitor",
+      "mentioned_sinistro",
+      "avg_response_time_sec",
+      "city",
+      "state",
+      "observed_lead_sources",
+      "observed_campaign_ids",
+      "observed_outcomes",
       "engagement_bucket",
       "data_shared_score",
       "persona_profile",
@@ -111,6 +130,26 @@
       "frio",
       "morno",
       "quente"
+    ],
+    "valid_price_sensitivities": [
+      "baixa",
+      "alta"
+    ],
+    "valid_intent_stages": [
+      "descoberta_inicial",
+      "pos_sinistro",
+      "pesquisa_mercado",
+      "cotacao_ativa"
+    ],
+    "valid_contact_readiness": [
+      "baixa",
+      "media",
+      "alta"
+    ],
+    "valid_risk_signals": [
+      "baixo",
+      "medio",
+      "alto"
     ],
     "segmentation": {
       "lead_temperature": {
@@ -185,13 +224,18 @@
       "required_columns",
       "forbidden_raw_columns_absent",
       "masked_text_fields_not_leaking",
-      "conversation_id_unique",
+      "lead_key_unique",
+      "conversation_count_non_negative",
       "message_totals_non_negative",
       "engagement_bucket_valid",
       "duplicate_events_removed_non_negative",
       "persona_profile_valid",
       "audience_segment_valid",
       "lead_temperature_valid",
+      "price_sensitivity_valid",
+      "intent_stage_valid",
+      "contact_readiness_valid",
+      "risk_signal_valid",
       "persona_profile_not_null"
     ]
   },

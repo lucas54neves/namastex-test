@@ -290,6 +290,10 @@ def validate_gold(
     valid_personas = cast(set[str], plan["gold_valid_personas"])
     valid_audiences = cast(set[str], plan["gold_valid_audiences"])
     valid_temperatures = cast(set[str], plan["gold_valid_temperatures"])
+    valid_price_sensitivities = cast(set[str], plan["gold_valid_price_sensitivities"])
+    valid_intent_stages = cast(set[str], plan["gold_valid_intent_stages"])
+    valid_contact_readiness = cast(set[str], plan["gold_valid_contact_readiness"])
+    valid_risk_signals = cast(set[str], plan["gold_valid_risk_signals"])
     gold_required_columns = cast(list[str], plan["gold_required_columns"])
     forbidden_columns = forbidden_columns_present(df, "gold")
     results = [
@@ -303,10 +307,16 @@ def validate_gold(
         _masked_text_fields_not_leaking_check(df, "gold"),
         _result(
             "gold",
-            "conversation_id_unique",
-            df["conversation_id"].nunique(dropna=False) == len(df),
-            unique_ids=int(df["conversation_id"].nunique(dropna=False)),
+            "lead_key_unique",
+            df["lead_key"].nunique(dropna=False) == len(df),
+            unique_ids=int(df["lead_key"].nunique(dropna=False)),
             rows=int(len(df)),
+        ),
+        _result(
+            "gold",
+            "conversation_count_non_negative",
+            bool((df["conversation_count"] >= 0).all()),
+            min_conversation_count=int(df["conversation_count"].min()),
         ),
         _result(
             "gold",
@@ -347,6 +357,40 @@ def validate_gold(
             distinct_temperatures=sorted(
                 df["lead_temperature"].dropna().astype(str).unique().tolist()
             ),
+        ),
+        _result(
+            "gold",
+            "price_sensitivity_valid",
+            set(df["price_sensitivity"].dropna().astype(str).unique()).issubset(
+                valid_price_sensitivities
+            ),
+            distinct_price_sensitivities=sorted(
+                df["price_sensitivity"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "intent_stage_valid",
+            set(df["intent_stage"].dropna().astype(str).unique()).issubset(valid_intent_stages),
+            distinct_intent_stages=sorted(
+                df["intent_stage"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "contact_readiness_valid",
+            set(df["contact_readiness"].dropna().astype(str).unique()).issubset(
+                valid_contact_readiness
+            ),
+            distinct_contact_readiness=sorted(
+                df["contact_readiness"].dropna().astype(str).unique().tolist()
+            ),
+        ),
+        _result(
+            "gold",
+            "risk_signal_valid",
+            set(df["risk_signal"].dropna().astype(str).unique()).issubset(valid_risk_signals),
+            distinct_risk_signals=sorted(df["risk_signal"].dropna().astype(str).unique().tolist()),
         ),
         _result(
             "gold",

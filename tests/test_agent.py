@@ -82,7 +82,7 @@ def test_attempt_auto_remediation_rebuilds_gold_when_gold_check_fails() -> None:
     bronze["timestamp"] = pd.to_datetime(bronze["timestamp"])
     silver_messages = build_silver(bronze)
     silver = build_silver_leads(silver_messages)
-    gold = build_gold(silver_messages)
+    gold = build_gold(silver, silver_messages)
     broken_gold = gold.copy()
     broken_gold["engagement_bucket"] = "quebrado"
 

@@ -250,7 +250,11 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
         write_parquet(silver_df, silver_path)
         write_parquet(silver_messages_df, silver_messages_path)
 
-        gold_runtime_df = build_gold(silver_messages_runtime_df, compiled_plan=compiled_plan)
+        gold_runtime_df = build_gold(
+            silver_runtime_df,
+            silver_messages_runtime_df,
+            compiled_plan=compiled_plan,
+        )
         gold_df = sanitize_for_publication(gold_runtime_df, "gold")
         write_parquet(gold_df, gold_path)
 

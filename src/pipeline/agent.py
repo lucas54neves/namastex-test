@@ -174,11 +174,17 @@ VALIDATION_CHECK_MAP = {
         "playbook_id": "rebuild_gold_from_silver",
         "suggested_action": "Reconstruir a Gold a partir da Silver válida.",
     },
-    ("gold", "conversation_id_unique"): {
+    ("gold", "lead_key_unique"): {
         "kind": "gold_aggregation_duplication",
         "severity": "high",
         "playbook_id": "rebuild_gold_from_silver",
         "suggested_action": "Reexecutar agregação da Gold a partir da Silver.",
+    },
+    ("gold", "conversation_count_non_negative"): {
+        "kind": "gold_metric_corruption",
+        "severity": "high",
+        "playbook_id": "rebuild_gold_from_silver",
+        "suggested_action": "Recalcular contagens consolidadas da Gold a partir da Silver.",
     },
     ("gold", "message_totals_non_negative"): {
         "kind": "gold_metric_corruption",
@@ -358,6 +364,7 @@ def attempt_auto_remediation(
 
     if touched_silver or touched_gold:
         repaired_gold_runtime = build_gold(
+            repaired_silver_runtime,
             repaired_silver_messages_runtime,
             compiled_plan=compiled_plan,
         )

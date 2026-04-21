@@ -86,7 +86,7 @@ state/
   - concorrente citado
   - valor cotado
   - tipo de sinistro
-- Gold agregada por `conversation_id`
+- Gold agregada por `lead_key`
 - segmentação analítica da Gold por persona, audiência, temperatura do lead, estágio de intenção, prontidão de contato, sensibilidade a preço e sinal de risco
 - `pipeline_spec.json` como contrato versionado do pipeline
 - compiler para traduzir spec em plano executável
@@ -179,16 +179,29 @@ O artefato auxiliar `silver_messages.parquet` contém:
 
 ### Gold
 
-Camada analítica agregada por conversa. Mantém métricas de engajamento e sinais transacionais, além de classificações derivadas por regra.
+Camada analítica agregada por lead. A Gold passa a consumir explicitamente o contrato remodelado da Silver:
+
+- `silver_leads.parquet` como fonte primária com uma linha por `lead_key`
+- `silver_messages.parquet` como artefato auxiliar para recompor métricas dependentes do histórico de mensagens
+
+Cada linha publicada em `data/gold/conversations_gold.parquet` representa um único `lead_key` consolidando todas as conversas conhecidas do lead. A agregação usa regras determinísticas:
+
+- `first_seen_at` e `last_seen_at` por mínimo e máximo do histórico do lead
+- `conversation_count` por contagem distinta de `conversation_id`
+- `total_messages`, `inbound_messages`, `outbound_messages` e `duplicate_events_removed` por soma no histórico deduplicado
+- sinais booleanos como `contains_email`, `contains_phone`, `mentioned_vehicle`, `mentioned_competitor` e `mentioned_sinistro` por OR lógico
+- coleções observadas como campanhas, origens e outcomes preservadas a partir da Silver principal em JSON ordenado e determinístico
+- contexto de preço, concorrente, veículo e sinistro escolhido de forma determinística a partir do último valor não nulo observado no histórico do lead
 
 Principais métricas:
 
-- duração da conversa
+- primeira e última atividade do lead
+- total de conversas distintas por lead
 - total de mensagens inbound e outbound
 - score de compartilhamento de dados
 - total de duplicidades removidas
 - presença de veículo, concorrente e sinistro
-- cidade, estado, campanha, agente e origem do lead
+- cidade, estado, campanhas, outcomes e origens observadas do lead
 
 Novas colunas de segmentação:
 
@@ -207,6 +220,12 @@ Perfis e audiências atuais:
 - `lead_engajado_com_dados` para conversas mais quentes com maior compartilhamento de dados
 - `lead_frio` para conversas pouco engajadas
 - `oferta_competitiva`, `retencao_pos_sinistro`, `close_comercial` e `nutricao_basica` como audiências operacionais
+
+Validações da Gold agora verificam explicitamente:
+
+- unicidade de `lead_key`
+- `conversation_count` e `total_messages` não negativos
+- vocabulários válidos para persona, audiência, temperatura, sensibilidade a preço, estágio de intenção, prontidão de contato e sinal de risco
 
 ## Política de mascaramento
 

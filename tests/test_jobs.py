@@ -135,7 +135,9 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
 
     import pipeline.operator as operator_module
 
-    def explode(_silver: pd.DataFrame, compiled_plan=None) -> pd.DataFrame:
+    def explode(
+        _silver: pd.DataFrame, _silver_messages: pd.DataFrame, compiled_plan=None
+    ) -> pd.DataFrame:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(operator_module, "build_gold", explode)

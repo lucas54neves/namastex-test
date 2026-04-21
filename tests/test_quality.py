@@ -35,9 +35,28 @@ def _base_silver_row() -> dict[str, object]:
 
 def _base_gold_row() -> dict[str, object]:
     return {
-        "conversation_id": "conv_1",
+        "lead_key": "lead_123",
+        "first_seen_at": pd.Timestamp("2026-02-01 10:00:00"),
+        "last_seen_at": pd.Timestamp("2026-02-01 10:01:00"),
+        "conversation_count": 1,
         "total_messages": 3,
+        "inbound_messages": 2,
+        "outbound_messages": 1,
         "duplicate_events_removed": 0,
+        "contains_email": False,
+        "contains_phone": False,
+        "contains_cpf": False,
+        "contains_cep": False,
+        "contains_plate": False,
+        "mentioned_vehicle": False,
+        "mentioned_competitor": False,
+        "mentioned_sinistro": False,
+        "avg_response_time_sec": 60.0,
+        "city": "Sao Paulo",
+        "state": "SP",
+        "observed_lead_sources": '["google_ads"]',
+        "observed_campaign_ids": '["camp_1"]',
+        "observed_outcomes": '["em_negociacao"]',
         "engagement_bucket": "lead_frio",
         "data_shared_score": 1,
         "persona_profile": "lead_frio",
@@ -104,6 +123,17 @@ def test_validate_gold_rejects_invalid_persona_profile() -> None:
 
     assert summary["status"] == "failed"
     assert any(item["check"] == "persona_profile_valid" for item in summary["failed_checks"])
+
+
+def test_validate_gold_rejects_invalid_price_sensitivity() -> None:
+    row = _base_gold_row()
+    row["price_sensitivity"] = "desconhecida"
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "failed"
+    assert any(item["check"] == "price_sensitivity_valid" for item in summary["failed_checks"])
 
 
 def test_validate_silver_rejects_forbidden_raw_columns() -> None:
