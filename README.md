@@ -15,8 +15,8 @@ O projeto nao usa LLM no caminho principal de execucao. O termo `agente` aqui si
 
 ## Fontes
 
-- Enunciado: `docs/Teste Tecnico de Data & AI Engineering.docx`
-- Dicionario de dados: `docs/Dicionario de Dados - Teste Tecnico de Data & AI Engineering.docx`
+- Enunciado: `docs/technical-test-data-ai-engineering.md`
+- Dicionario de dados: `docs/data-dictionary-data-ai-engineering.md`
 - Bronze de entrada: `docs/conversations_bronze.parquet`
 
 ## Visao geral
