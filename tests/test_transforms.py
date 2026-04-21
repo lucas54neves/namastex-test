@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 
+import pipeline.conversation_enrichment as conversation_enrichment
+from pipeline.compiler import get_default_compiled_plan
+from pipeline.conversation_enrichment import (
+    build_conversation_enrichment,
+    consolidate_gold_semantics,
+)
 from pipeline.transforms import (
     add_conversation_context,
     add_gold_segments,
@@ -246,7 +252,10 @@ def test_build_gold_consolidates_multiple_conversations_per_lead() -> None:
 
     silver_messages = build_silver(bronze)
     silver_leads = build_silver_leads(silver_messages)
-    gold = build_gold(silver_leads, silver_messages)
+    silver_conversations_llm = build_conversation_enrichment(
+        silver_messages, {"llm": {"enabled": False}}
+    )
+    gold = build_gold(silver_leads, silver_messages, silver_conversations_llm)
 
     assert len(gold) == 1
     assert gold.iloc[0]["lead_key"] == silver_leads.iloc[0]["lead_key"]
@@ -258,8 +267,146 @@ def test_build_gold_consolidates_multiple_conversations_per_lead() -> None:
     assert gold.iloc[0]["lead_temperature"] == "morno"
     assert gold.iloc[0]["intent_stage"] == "pos_sinistro"
     assert gold.iloc[0]["dominant_email_provider"] == "gmail"
-    assert gold.iloc[0]["conversation_sentiment_label"] == "sem_evidencia"
-    assert gold.iloc[0]["conversation_sentiment_support"] == "sem_evidencia"
+
+
+def test_build_conversation_enrichment_uses_cache_and_marks_cache_hit() -> None:
+    silver_messages = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": "lead_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "message_id": "m1",
+                "direction": "inbound",
+                "message_type": "text",
+                "message_body_masked": "quero cotacao",
+                "mentions_vehicle": False,
+                "mentions_competitor": False,
+                "mentions_sinistro": False,
+                "quoted_price": None,
+                "metadata_response_time_sec": 60.0,
+                "contains_email": False,
+                "contains_phone": False,
+                "contains_cpf": False,
+                "contains_cep": False,
+                "contains_plate": False,
+                "price_objection_signal": False,
+                "urgency_strength": 0,
+                "competitor_comparison_signal": False,
+                "competitor_mentioned": None,
+            }
+        ]
+    )
+    first = build_conversation_enrichment(silver_messages, {"llm": {"enabled": False}})
+    second = build_conversation_enrichment(
+        silver_messages,
+        {"llm": {"enabled": False}},
+        existing_enrichment=first,
+    )
+
+    assert first.iloc[0]["inference_status"] == "disabled"
+    assert second.iloc[0]["inference_status"] == "skipped_cache_hit"
+
+
+def test_build_conversation_enrichment_accepts_mocked_llm_success(monkeypatch) -> None:
+    monkeypatch.setenv("PIPELINE_ENABLE_LLM_ENRICHMENT", "1")
+
+    silver_messages = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": "lead_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "message_id": "m1",
+                "direction": "inbound",
+                "message_type": "text",
+                "message_body_masked": "Porto fez mais barato, quero comparar",
+                "mentions_vehicle": False,
+                "mentions_competitor": True,
+                "mentions_sinistro": False,
+                "quoted_price": 2500.0,
+                "metadata_response_time_sec": 60.0,
+                "contains_email": False,
+                "contains_phone": False,
+                "contains_cpf": False,
+                "contains_cep": False,
+                "contains_plate": False,
+                "price_objection_signal": True,
+                "urgency_strength": 1,
+                "competitor_comparison_signal": True,
+                "competitor_mentioned": "porto_seguro",
+            }
+        ]
+    )
+
+    def fake_infer(payload, compiled_plan):
+        del payload
+        del compiled_plan
+        return {
+            "sentiment_label": "neutro",
+            "sentiment_confidence_band": "moderado",
+            "intent_stage": "pesquisa_mercado",
+            "persona_profile": "cotador_comparador",
+            "audience_segment": "oferta_competitiva",
+            "price_objection_intensity": "forte",
+            "competitor_pressure_level": "alta",
+            "commercial_urgency_signal": "moderada",
+            "recommended_next_action": "reforcar_diferenciais_e_retirar_objecao_preco",
+            "explanation_short": "Lead compara proposta concorrente com interesse ativo.",
+        }
+
+    monkeypatch.setattr(conversation_enrichment, "infer_conversation_semantics", fake_infer)
+    enrichment = build_conversation_enrichment(
+        silver_messages,
+        {
+            **get_default_compiled_plan(),
+            "llm": {"enabled": True, "provider": "mock", "model": "mock-model"},
+        },
+    )
+
+    assert enrichment.iloc[0]["inference_status"] == "success"
+    assert enrichment.iloc[0]["persona_profile"] == "cotador_comparador"
+
+
+def test_consolidate_gold_semantics_respects_dominance_and_recency() -> None:
+    enrichment = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": "lead_1",
+                "conversation_last_message_at": pd.Timestamp("2026-02-01 10:00:00"),
+                "intent_stage": "descoberta_inicial",
+                "persona_profile": "lead_frio",
+                "audience_segment": "nutricao_basica",
+                "price_objection_intensity": "nenhuma",
+                "competitor_pressure_level": "nenhuma",
+                "commercial_urgency_signal": "nenhuma",
+                "sentiment_label": "neutro",
+                "sentiment_confidence_band": "fraco",
+            },
+            {
+                "conversation_id": "conv_2",
+                "lead_key": "lead_1",
+                "conversation_last_message_at": pd.Timestamp("2026-02-03 10:00:00"),
+                "intent_stage": "pesquisa_mercado",
+                "persona_profile": "cotador_comparador",
+                "audience_segment": "oferta_competitiva",
+                "price_objection_intensity": "forte",
+                "competitor_pressure_level": "alta",
+                "commercial_urgency_signal": "moderada",
+                "sentiment_label": "neutro",
+                "sentiment_confidence_band": "moderado",
+            },
+        ]
+    )
+
+    consolidated = consolidate_gold_semantics(enrichment)
+
+    assert consolidated.iloc[0]["persona_profile"] == "cotador_comparador"
+    assert consolidated.iloc[0]["audience_segment"] == "oferta_competitiva"
+    assert consolidated.iloc[0]["price_objection_intensity"] == "forte"
+    assert consolidated.iloc[0]["conversation_sentiment_label"] == "neutro"
+    assert consolidated.iloc[0]["conversation_sentiment_support"] == "moderado"
 
 
 def test_build_gold_derives_positive_sentiment_from_inbound_cues() -> None:

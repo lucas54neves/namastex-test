@@ -7,6 +7,7 @@ import pandas as pd
 from pandas.api.types import is_object_dtype, is_string_dtype
 
 from pipeline.compiler import get_default_compiled_plan
+from pipeline.conversation_enrichment import validate_conversation_enrichment_frame
 from pipeline.publication import (
     forbidden_columns_present,
     missing_required_safe_columns,
@@ -20,6 +21,7 @@ from pipeline.transforms import (
 
 SILVER_TEXT_COLUMNS = ("canonical_lead_name_masked", "lead_contact_ref")
 SILVER_MESSAGES_TEXT_COLUMNS = ("message_body_masked", "sender_name_masked", "sender_phone_masked")
+SILVER_CONVERSATIONS_LLM_TEXT_COLUMNS = ("explanation_short",)
 GOLD_TEXT_SCAN_EXCLUDED_COLUMNS = frozenset(
     {
         "conversation_id",
@@ -82,6 +84,8 @@ def _published_text_columns(df: pd.DataFrame, layer: str) -> list[str]:
         return [column for column in SILVER_TEXT_COLUMNS if column in df.columns]
     if layer == "silver_messages":
         return [column for column in SILVER_MESSAGES_TEXT_COLUMNS if column in df.columns]
+    if layer == "silver_conversations_llm":
+        return [column for column in SILVER_CONVERSATIONS_LLM_TEXT_COLUMNS if column in df.columns]
     if layer == "gold":
         return [
             column
@@ -420,6 +424,36 @@ def validate_silver_consistency(
         )
     )
     return results
+
+
+def validate_silver_conversations_llm(
+    enrichment_df: pd.DataFrame,
+    compiled_plan: dict[str, object] | None = None,
+) -> list[ValidationResult]:
+    plan = compiled_plan or get_default_compiled_plan()
+    validation_errors = validate_conversation_enrichment_frame(enrichment_df, plan)
+    return [
+        _result(
+            "silver_conversations_llm",
+            "conversation_enrichment_contract_valid",
+            len(validation_errors) == 0,
+            validation_errors=validation_errors[:10],
+            validation_error_count=len(validation_errors),
+        ),
+        _result(
+            "silver_conversations_llm",
+            "forbidden_raw_columns_absent",
+            len(forbidden_columns_present(enrichment_df, "silver_conversations_llm")) == 0,
+            present=forbidden_columns_present(enrichment_df, "silver_conversations_llm"),
+        ),
+        _result(
+            "silver_conversations_llm",
+            "required_safe_columns_present",
+            len(missing_required_safe_columns(enrichment_df, "silver_conversations_llm")) == 0,
+            missing=missing_required_safe_columns(enrichment_df, "silver_conversations_llm"),
+        ),
+        _masked_text_fields_not_leaking_check(enrichment_df, "silver_conversations_llm"),
+    ]
 
 
 def validate_gold_consistency(

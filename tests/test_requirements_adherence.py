@@ -126,6 +126,7 @@ def test_adherence_published_artifacts_do_not_expose_raw_pii(tmp_path: Path) -> 
     result = run_pipeline(paths, force=True)
 
     silver_df = pd.read_parquet(result.silver_path)
+    silver_conversations_llm_df = pd.read_parquet(result.silver_conversations_llm_path)
     gold_df = pd.read_parquet(result.gold_path)
     forbidden_raw_columns = {
         "sender_name",
@@ -141,6 +142,7 @@ def test_adherence_published_artifacts_do_not_expose_raw_pii(tmp_path: Path) -> 
 
     assert forbidden_raw_columns.isdisjoint(silver_df.columns)
     assert forbidden_raw_columns.isdisjoint(gold_df.columns)
+    assert forbidden_raw_columns.isdisjoint(silver_conversations_llm_df.columns)
     assert "canonical_lead_name_masked" in silver_df.columns
     assert "lead_contact_ref" in silver_df.columns
 
@@ -176,6 +178,9 @@ def test_adherence_pipeline_persists_operational_state(tmp_path: Path) -> None:
     assert result.status == "success"
     assert state["last_source_fingerprint"]["path"].endswith("docs/conversations_bronze.parquet")
     assert state["last_successful_artifacts"]["silver_path"].endswith("silver_leads.parquet")
+    assert state["last_successful_artifacts"]["silver_conversations_llm_path"].endswith(
+        "silver_conversations_llm.parquet"
+    )
     assert state["last_successful_artifacts"]["gold_path"].endswith("conversations_gold.parquet")
     assert state["runs"]
     assert state["runs"][-1]["status"] == "success"
@@ -194,7 +199,10 @@ def test_adherence_simulated_failure_generates_alert_and_diagnosis(
     import pipeline.operator as operator_module
 
     def explode(
-        _silver: pd.DataFrame, _silver_messages: pd.DataFrame, compiled_plan=None
+        _silver: pd.DataFrame,
+        _silver_messages: pd.DataFrame,
+        _silver_conversations_llm: pd.DataFrame | None = None,
+        compiled_plan=None,
     ) -> pd.DataFrame:
         raise RuntimeError("boom")
 

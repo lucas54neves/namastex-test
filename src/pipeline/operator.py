@@ -13,7 +13,8 @@ from pipeline.agent import (
 from pipeline.alerts import handle_alerting
 from pipeline.compiler import compile_pipeline_spec
 from pipeline.config import PipelinePaths, ensure_directories
-from pipeline.io import read_json, write_json, write_parquet
+from pipeline.conversation_enrichment import build_conversation_enrichment
+from pipeline.io import read_json, read_parquet, write_json, write_parquet
 from pipeline.planner import plan_pipeline_spec
 from pipeline.publication import sanitize_for_publication
 from pipeline.quality import (
@@ -22,6 +23,7 @@ from pipeline.quality import (
     validate_cross_layer_consistency,
     validate_gold,
     validate_silver,
+    validate_silver_conversations_llm,
     validate_silver_messages,
 )
 from pipeline.quarantine import quarantine_bronze_records
@@ -40,6 +42,7 @@ class PipelineArtifacts:
     bronze_path: str
     silver_path: str
     silver_messages_path: str
+    silver_conversations_llm_path: str
     gold_path: str
     state_path: str
     validation_report_path: str
@@ -114,6 +117,7 @@ def _skip_artifacts(paths: PipelinePaths) -> PipelineArtifacts:
         bronze_path=str(paths.bronze / "conversations.parquet"),
         silver_path=str(paths.silver / "silver_leads.parquet"),
         silver_messages_path=str(paths.silver / "silver_messages.parquet"),
+        silver_conversations_llm_path=str(paths.silver / "silver_conversations_llm.parquet"),
         gold_path=str(paths.gold / "conversations_gold.parquet"),
         state_path=str(state_file(paths)),
         validation_report_path=str(validation_report_file(paths)),
@@ -177,6 +181,7 @@ def _success_artifacts(paths: PipelinePaths, status: str) -> PipelineArtifacts:
         bronze_path=str(paths.bronze / "conversations.parquet"),
         silver_path=str(paths.silver / "silver_leads.parquet"),
         silver_messages_path=str(paths.silver / "silver_messages.parquet"),
+        silver_conversations_llm_path=str(paths.silver / "silver_conversations_llm.parquet"),
         gold_path=str(paths.gold / "conversations_gold.parquet"),
         state_path=str(state_file(paths)),
         validation_report_path=str(validation_report_file(paths)),
@@ -265,6 +270,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
     bronze_path = paths.bronze / "conversations.parquet"
     silver_path = paths.silver / "silver_leads.parquet"
     silver_messages_path = paths.silver / "silver_messages.parquet"
+    silver_conversations_llm_path = paths.silver / "silver_conversations_llm.parquet"
     gold_path = paths.gold / "conversations_gold.parquet"
 
     try:
@@ -280,12 +286,28 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             silver_messages_runtime_df,
             "silver_messages",
         )
+        existing_enrichment = (
+            read_parquet(silver_conversations_llm_path)
+            if silver_conversations_llm_path.exists()
+            else None
+        )
+        silver_conversations_llm_runtime_df = build_conversation_enrichment(
+            silver_messages_runtime_df,
+            compiled_plan=compiled_plan,
+            existing_enrichment=existing_enrichment,
+        )
+        silver_conversations_llm_df = sanitize_for_publication(
+            silver_conversations_llm_runtime_df,
+            "silver_conversations_llm",
+        )
         write_parquet(silver_df, silver_path)
         write_parquet(silver_messages_df, silver_messages_path)
+        write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
 
         gold_runtime_df = build_gold(
             silver_runtime_df,
             silver_messages_runtime_df,
+            silver_conversations_llm_runtime_df,
             compiled_plan=compiled_plan,
         )
         gold_df = sanitize_for_publication(gold_runtime_df, "gold")
@@ -295,6 +317,10 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             validate_bronze(bronze_df, compiled_plan=compiled_plan)
             + validate_silver(silver_df, compiled_plan=compiled_plan)
             + validate_silver_messages(silver_messages_df, compiled_plan=compiled_plan)
+            + validate_silver_conversations_llm(
+                silver_conversations_llm_df,
+                compiled_plan=compiled_plan,
+            )
             + validate_gold(gold_df, compiled_plan=compiled_plan)
             + validate_cross_layer_consistency(
                 silver_df,
@@ -309,6 +335,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             "bronze": int(len(bronze_df)),
             "silver": int(len(silver_df)),
             "silver_messages": int(len(silver_messages_df)),
+            "silver_conversations_llm": int(len(silver_conversations_llm_df)),
             "gold": int(len(gold_df)),
         }
         validation_summary["source_fingerprint"] = current_fingerprint
@@ -354,11 +381,16 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 gold_df = remediation["gold_df"]
                 write_parquet(silver_df, silver_path)
                 write_parquet(silver_messages_df, silver_messages_path)
+                write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
                 write_parquet(gold_df, gold_path)
                 validation_results = (
                     validate_bronze(bronze_df, compiled_plan=compiled_plan)
                     + validate_silver(silver_df, compiled_plan=compiled_plan)
                     + validate_silver_messages(silver_messages_df, compiled_plan=compiled_plan)
+                    + validate_silver_conversations_llm(
+                        silver_conversations_llm_df,
+                        compiled_plan=compiled_plan,
+                    )
                     + validate_gold(gold_df, compiled_plan=compiled_plan)
                     + validate_cross_layer_consistency(
                         silver_df,
@@ -373,6 +405,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                     "bronze": int(len(bronze_df)),
                     "silver": int(len(silver_df)),
                     "silver_messages": int(len(silver_messages_df)),
+                    "silver_conversations_llm": int(len(silver_conversations_llm_df)),
                     "gold": int(len(gold_df)),
                 }
                 validation_summary["source_fingerprint"] = current_fingerprint
@@ -462,6 +495,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 "bronze_path": str(bronze_path),
                 "silver_path": str(silver_path),
                 "silver_messages_path": str(silver_messages_path),
+                "silver_conversations_llm_path": str(silver_conversations_llm_path),
                 "gold_path": str(gold_path),
                 "validation_report_path": str(report_path),
                 "agent_report_path": str(agent_report_path),

@@ -96,10 +96,17 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     alert_report = json.loads(Path(result.alert_report_path).read_text(encoding="utf-8"))
     silver_df = pd.read_parquet(result.silver_path)
     silver_messages_df = pd.read_parquet(result.silver_messages_path)
+    silver_conversations_llm_df = pd.read_parquet(result.silver_conversations_llm_path)
     gold_df = pd.read_parquet(result.gold_path)
     assert result.status == "success"
     assert report["status"] == "passed"
-    assert report["row_counts"] == {"bronze": 2, "silver": 1, "silver_messages": 2, "gold": 1}
+    assert report["row_counts"] == {
+        "bronze": 2,
+        "silver": 1,
+        "silver_messages": 2,
+        "silver_conversations_llm": 1,
+        "gold": 1,
+    }
     assert report["pipeline_spec_path"].endswith("pipeline_spec.json")
     assert "planner_report" in agent_report
     assert agent_report["planner_report"]["report_path"].endswith("latest_plan_report.json")
@@ -120,6 +127,9 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     assert "sender_phone_masked" in silver_messages_df.columns
     assert "message_body_masked" in silver_messages_df.columns
     assert "lead_key" in silver_messages_df.columns
+    assert "conversation_id" in silver_conversations_llm_df.columns
+    assert "inference_status" in silver_conversations_llm_df.columns
+    assert silver_conversations_llm_df["inference_status"].iloc[0] == "disabled"
     assert "sender_name" not in gold_df.columns
     assert "sender_phone" not in gold_df.columns
     assert "message_body" not in gold_df.columns
@@ -138,7 +148,10 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
     import pipeline.operator as operator_module
 
     def explode(
-        _silver: pd.DataFrame, _silver_messages: pd.DataFrame, compiled_plan=None
+        _silver: pd.DataFrame,
+        _silver_messages: pd.DataFrame,
+        _silver_conversations_llm: pd.DataFrame | None = None,
+        compiled_plan=None,
     ) -> pd.DataFrame:
         raise RuntimeError("boom")
 

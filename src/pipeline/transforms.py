@@ -868,8 +868,12 @@ def add_gold_segments(
 def build_gold(
     silver_leads: pd.DataFrame,
     silver_messages: pd.DataFrame,
+    silver_conversations_llm: pd.DataFrame | None = None,
     compiled_plan: dict[str, object] | None = None,
 ) -> pd.DataFrame:
+    if silver_conversations_llm is not None:
+        from pipeline.conversation_enrichment import consolidate_gold_semantics
+
     ordered_messages = silver_messages.sort_values(
         ["lead_key", "timestamp", "conversation_id", "message_id"]
     ).reset_index(drop=True)
@@ -963,50 +967,96 @@ def build_gold(
     gold["response_latency_band"] = gold["avg_response_time_sec"].map(_response_latency_band)
     gold["closure_outcome_group"] = gold["observed_outcomes"].map(_normalize_outcome_group)
     gold["has_closed_outcome"] = gold["closure_outcome_group"].eq("fechado")
-    gold["price_objection_intensity"] = [
-        _price_objection_intensity(price_hits, competitor_mentions, quote_mentions)
-        for price_hits, competitor_mentions, quote_mentions in zip(
-            gold["price_objection_hits"],
-            gold["competitor_mentions_count"],
-            gold["quoted_price_mentions"],
-            strict=False,
-        )
+    deterministic_semantics = pd.DataFrame(
+        {
+            "lead_key": gold["lead_key"],
+            "price_objection_intensity": [
+                _price_objection_intensity(price_hits, competitor_mentions, quote_mentions)
+                for price_hits, competitor_mentions, quote_mentions in zip(
+                    gold["price_objection_hits"],
+                    gold["competitor_mentions_count"],
+                    gold["quoted_price_mentions"],
+                    strict=False,
+                )
+            ],
+            "commercial_urgency_signal": [
+                _commercial_urgency_signal(max_strength, hit_count, lifecycle_hours)
+                for max_strength, hit_count, lifecycle_hours in zip(
+                    gold["urgency_strength_max"],
+                    gold["urgency_hits"],
+                    gold["lead_lifecycle_hours"],
+                    strict=False,
+                )
+            ],
+            "competitor_pressure_level": [
+                _competitor_pressure_level(primary_competitor, mentions, comparison_hits)
+                for primary_competitor, mentions, comparison_hits in zip(
+                    gold["primary_competitor"],
+                    gold["competitor_mentions_count"],
+                    gold["competitor_comparison_hits"],
+                    strict=False,
+                )
+            ],
+            "conversation_sentiment_label": [
+                derive_conversation_sentiment_label(positive_hits, negative_hits)
+                for positive_hits, negative_hits in zip(
+                    gold["positive_tone_hits"],
+                    gold["negative_tone_hits"],
+                    strict=False,
+                )
+            ],
+            "conversation_sentiment_support": [
+                derive_conversation_sentiment_support(positive_hits, negative_hits)
+                for positive_hits, negative_hits in zip(
+                    gold["positive_tone_hits"],
+                    gold["negative_tone_hits"],
+                    strict=False,
+                )
+            ],
+        }
+    )
+    segmented_baseline = add_gold_segments(gold, compiled_plan=compiled_plan)
+    deterministic_semantics["intent_stage"] = segmented_baseline["intent_stage"]
+    deterministic_semantics["persona_profile"] = segmented_baseline["persona_profile"]
+    deterministic_semantics["audience_segment"] = segmented_baseline["audience_segment"]
+    gold = segmented_baseline
+    semantic_columns = [
+        "intent_stage",
+        "persona_profile",
+        "audience_segment",
+        "price_objection_intensity",
+        "competitor_pressure_level",
+        "commercial_urgency_signal",
+        "conversation_sentiment_label",
+        "conversation_sentiment_support",
     ]
-    gold["commercial_urgency_signal"] = [
-        _commercial_urgency_signal(max_strength, hit_count, lifecycle_hours)
-        for max_strength, hit_count, lifecycle_hours in zip(
-            gold["urgency_strength_max"],
-            gold["urgency_hits"],
-            gold["lead_lifecycle_hours"],
-            strict=False,
+    gold = gold.drop(columns=semantic_columns, errors="ignore")
+    if silver_conversations_llm is None:
+        semantic_gold = deterministic_semantics.copy()
+    else:
+        fallback_semantics = deterministic_semantics.rename(
+            columns={column: f"{column}_fallback" for column in semantic_columns}
         )
-    ]
-    gold["competitor_pressure_level"] = [
-        _competitor_pressure_level(primary_competitor, mentions, comparison_hits)
-        for primary_competitor, mentions, comparison_hits in zip(
-            gold["primary_competitor"],
-            gold["competitor_mentions_count"],
-            gold["competitor_comparison_hits"],
-            strict=False,
+        semantic_gold = fallback_semantics.merge(
+            consolidate_gold_semantics(silver_conversations_llm),
+            on="lead_key",
+            how="left",
         )
-    ]
-    gold["conversation_sentiment_label"] = [
-        derive_conversation_sentiment_label(positive_hits, negative_hits)
-        for positive_hits, negative_hits in zip(
-            gold["positive_tone_hits"],
-            gold["negative_tone_hits"],
-            strict=False,
-        )
-    ]
-    gold["conversation_sentiment_support"] = [
-        derive_conversation_sentiment_support(positive_hits, negative_hits)
-        for positive_hits, negative_hits in zip(
-            gold["positive_tone_hits"],
-            gold["negative_tone_hits"],
-            strict=False,
-        )
-    ]
-    gold = add_gold_segments(gold, compiled_plan=compiled_plan)
+        for column in semantic_columns:
+            fallback_column = f"{column}_fallback"
+            if fallback_column not in semantic_gold.columns:
+                semantic_gold[fallback_column] = None
+        for column in semantic_columns:
+            fallback_column = f"{column}_fallback"
+            if fallback_column not in semantic_gold.columns:
+                continue
+            semantic_gold[column] = semantic_gold[column].where(
+                semantic_gold[column].notna()
+                & semantic_gold[column].astype("string").str.strip().ne(""),
+                semantic_gold[fallback_column],
+            )
+        semantic_gold = semantic_gold[["lead_key", *semantic_columns]]
+    gold = gold.merge(semantic_gold, on="lead_key", how="left")
     gold["dominant_email_provider"] = gold["dominant_email_provider"].where(
         gold["contains_email"],
         None,

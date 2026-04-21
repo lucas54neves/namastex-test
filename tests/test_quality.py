@@ -8,6 +8,7 @@ from pipeline.quality import (
     validate_cross_layer_consistency,
     validate_gold,
     validate_silver,
+    validate_silver_conversations_llm,
     validate_silver_messages,
 )
 
@@ -125,6 +126,32 @@ def _base_silver_message_row() -> dict[str, object]:
         "vehicle_make": None,
         "vehicle_model": None,
         "vehicle_year": None,
+    }
+
+
+def _base_conversation_enrichment_row() -> dict[str, object]:
+    return {
+        "conversation_id": "conv_1",
+        "lead_key": "lead_123",
+        "conversation_started_at": pd.Timestamp("2026-02-01 10:00:00"),
+        "conversation_last_message_at": pd.Timestamp("2026-02-01 10:01:00"),
+        "llm_input_hash": "hash_123",
+        "prompt_version": "v1",
+        "llm_model": "mock-model",
+        "inference_status": "disabled",
+        "processed_at_utc": "2026-02-01T10:05:00+00:00",
+        "sentiment_label": "sem_evidencia",
+        "sentiment_confidence_band": "sem_evidencia",
+        "intent_stage": "descoberta_inicial",
+        "persona_profile": "lead_frio",
+        "audience_segment": "nutricao_basica",
+        "price_objection_intensity": "nenhuma",
+        "competitor_pressure_level": "nenhuma",
+        "commercial_urgency_signal": "nenhuma",
+        "recommended_next_action": "avancar_coleta_de_contexto",
+        "explanation_short": "Fallback deterministico aplicado.",
+        "fallback_reason": "llm_enrichment_disabled",
+        "validation_error": None,
     }
 
 
@@ -397,6 +424,28 @@ def test_validate_silver_messages_detects_duplicate_rows() -> None:
 
     assert summary["status"] == "failed"
     assert any(item["check"] == "dedupe_keys_unique" for item in summary["failed_checks"])
+
+
+def test_validate_silver_conversations_llm_accepts_valid_contract() -> None:
+    df = pd.DataFrame([_base_conversation_enrichment_row()])
+
+    summary = summarize_validation_results(validate_silver_conversations_llm(df))
+
+    assert summary["status"] == "passed"
+
+
+def test_validate_silver_conversations_llm_rejects_invalid_status() -> None:
+    row = _base_conversation_enrichment_row()
+    row["inference_status"] = "mystery"
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_silver_conversations_llm(df))
+
+    assert summary["status"] == "failed"
+    assert any(
+        item["check"] == "conversation_enrichment_contract_valid"
+        for item in summary["failed_checks"]
+    )
 
 
 def test_validate_cross_layer_consistency_rejects_silver_mismatched_aggregates() -> None:

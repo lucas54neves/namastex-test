@@ -46,6 +46,8 @@ PUBLISH_SAFE_SILVER_KEY_MAP = {
 def forbidden_columns_for_layer(layer: str) -> frozenset[str]:
     if layer in {"silver", "silver_messages"}:
         return SILVER_FORBIDDEN_COLUMNS
+    if layer == "silver_conversations_llm":
+        return frozenset()
     if layer == "gold":
         return GOLD_FORBIDDEN_COLUMNS
     raise ValueError(f"Unsupported publication layer: {layer}")
@@ -61,6 +63,8 @@ def required_safe_columns_for_layer(layer: str) -> frozenset[str]:
         )
     if layer == "silver_messages":
         return SILVER_REQUIRED_SAFE_COLUMNS
+    if layer == "silver_conversations_llm":
+        return frozenset()
     if layer == "gold":
         return frozenset()
     raise ValueError(f"Unsupported publication layer: {layer}")
