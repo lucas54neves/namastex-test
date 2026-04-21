@@ -6,6 +6,11 @@ from typing import Any, cast
 import pandas as pd
 
 from pipeline.compiler import get_default_compiled_plan
+from pipeline.publication import (
+    forbidden_columns_present,
+    missing_required_safe_columns,
+    resolve_publish_safe_keys,
+)
 
 
 @dataclass(frozen=True)
@@ -81,9 +86,9 @@ def validate_silver(
     df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
 ) -> list[ValidationResult]:
     plan = compiled_plan or get_default_compiled_plan()
-    dedupe_keys = cast(list[str], plan["dedupe_keys"])
+    dedupe_keys = resolve_publish_safe_keys(cast(list[str], plan["dedupe_keys"]), df.columns)
     silver_required_columns = cast(list[str], plan["silver_required_columns"])
-    duplicate_rows = int(df.duplicated(subset=dedupe_keys).sum())
+    duplicate_rows = int(df.duplicated(subset=dedupe_keys).sum()) if dedupe_keys else 0
     pii_leak_count = int(
         (
             df["contains_cpf"]
@@ -92,8 +97,22 @@ def validate_silver(
             .str.contains(r"\d{3}\.\d{3}\.\d{3}-\d{2}", regex=True)
         ).sum()
     )
+    forbidden_columns = forbidden_columns_present(df, "silver")
+    missing_safe_columns = missing_required_safe_columns(df, "silver")
     results = [
         _column_set_check(df, silver_required_columns, "silver"),
+        _result(
+            "silver",
+            "forbidden_raw_columns_absent",
+            not forbidden_columns,
+            forbidden_columns=forbidden_columns,
+        ),
+        _result(
+            "silver",
+            "required_safe_columns_present",
+            not missing_safe_columns,
+            missing_safe_columns=missing_safe_columns,
+        ),
         _result(
             "silver",
             "timestamp_not_null",
@@ -105,6 +124,7 @@ def validate_silver(
             "dedupe_keys_unique",
             duplicate_rows == 0,
             duplicate_rows=duplicate_rows,
+            dedupe_keys=dedupe_keys,
         ),
         _result(
             "silver",
@@ -141,8 +161,15 @@ def validate_gold(
     valid_audiences = cast(set[str], plan["gold_valid_audiences"])
     valid_temperatures = cast(set[str], plan["gold_valid_temperatures"])
     gold_required_columns = cast(list[str], plan["gold_required_columns"])
+    forbidden_columns = forbidden_columns_present(df, "gold")
     results = [
         _column_set_check(df, gold_required_columns, "gold"),
+        _result(
+            "gold",
+            "forbidden_raw_columns_absent",
+            not forbidden_columns,
+            forbidden_columns=forbidden_columns,
+        ),
         _result(
             "gold",
             "conversation_id_unique",

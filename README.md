@@ -111,7 +111,16 @@ Replica o arquivo de origem em parquet para a área controlada do pipeline, pres
 
 ### Silver
 
-Camada de limpeza e enriquecimento. Contém:
+Camada de limpeza e enriquecimento. O frame de trabalho usa colunas cruas apenas em memória para derivação, deduplicação e agregação da Gold. O parquet publicado em `data/silver/conversations_silver.parquet` aplica uma política explícita de persistência sem PII e não grava:
+
+- `sender_name`
+- `sender_phone`
+- `message_body`
+- `conversation_lead_name`
+- `conversation_agent_name`
+- `sender_name_normalized`
+
+O artefato persistido contém:
 
 - `metadata_*` expandido da coluna JSON
 - flags `is_inbound` e `is_outbound`
@@ -165,6 +174,8 @@ Perfis e audiências atuais:
 ## Política de mascaramento
 
 O masking preserva a forma visível do dado para manter utilidade analítica sem expor o valor original.
+
+Além do masking, a persistência de `Silver` e `Gold` remove colunas cruas de identidade e texto livre antes da escrita em parquet. A validação do pipeline passa a checar o contrato do frame final publicado, não apenas o frame intermediário em memória.
 
 Exemplos:
 

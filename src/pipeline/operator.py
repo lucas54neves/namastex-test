@@ -15,6 +15,7 @@ from pipeline.compiler import compile_pipeline_spec
 from pipeline.config import PipelinePaths, ensure_directories
 from pipeline.io import read_json, write_json, write_parquet
 from pipeline.planner import plan_pipeline_spec
+from pipeline.publication import sanitize_for_publication
 from pipeline.quality import (
     summarize_validation_results,
     validate_bronze,
@@ -234,10 +235,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
         bronze_df = cast(Any, quarantine["clean_df"])
         write_parquet(bronze_df, bronze_path)
 
-        silver_df = build_silver(bronze_df, compiled_plan=compiled_plan)
+        silver_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
+        silver_df = sanitize_for_publication(silver_runtime_df, "silver")
         write_parquet(silver_df, silver_path)
 
-        gold_df = build_gold(silver_df, compiled_plan=compiled_plan)
+        gold_runtime_df = build_gold(silver_runtime_df, compiled_plan=compiled_plan)
+        gold_df = sanitize_for_publication(gold_runtime_df, "gold")
         write_parquet(gold_df, gold_path)
 
         validation_results = (

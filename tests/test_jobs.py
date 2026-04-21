@@ -94,6 +94,8 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     report = json.loads(Path(result.validation_report_path).read_text(encoding="utf-8"))
     agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
     alert_report = json.loads(Path(result.alert_report_path).read_text(encoding="utf-8"))
+    silver_df = pd.read_parquet(result.silver_path)
+    gold_df = pd.read_parquet(result.gold_path)
     assert result.status == "success"
     assert report["status"] == "passed"
     assert report["row_counts"] == {"bronze": 2, "silver": 2, "gold": 1}
@@ -101,6 +103,17 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     assert "planner_report" in agent_report
     assert alert_report["event"]["severity"] == "info"
     assert alert_report["event"]["should_alert"] is False
+    assert "sender_name" not in silver_df.columns
+    assert "sender_phone" not in silver_df.columns
+    assert "message_body" not in silver_df.columns
+    assert "conversation_lead_name" not in silver_df.columns
+    assert "conversation_agent_name" not in silver_df.columns
+    assert "sender_name_masked" in silver_df.columns
+    assert "sender_phone_masked" in silver_df.columns
+    assert "message_body_masked" in silver_df.columns
+    assert "sender_name" not in gold_df.columns
+    assert "sender_phone" not in gold_df.columns
+    assert "message_body" not in gold_df.columns
 
 
 def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, monkeypatch) -> None:
