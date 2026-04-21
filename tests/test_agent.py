@@ -7,6 +7,7 @@ from pipeline.agent import (
     diagnose_exception,
     diagnose_validation_failures,
 )
+from pipeline.compiler import get_default_compiled_plan
 from pipeline.transforms import build_gold, build_silver
 
 
@@ -66,12 +67,14 @@ def test_diagnose_validation_failures_maps_known_check() -> None:
                 "status": "failed",
                 "detail": {"duplicate_rows": 2},
             }
-        ]
+        ],
+        get_default_compiled_plan(),
     )
 
     assert len(diagnoses) == 1
     assert diagnoses[0].kind == "silver_deduplication_failure"
     assert diagnoses[0].auto_remediable is True
+    assert diagnoses[0].playbook_id == "rebuild_silver_from_bronze"
 
 
 def test_attempt_auto_remediation_rebuilds_gold_when_gold_check_fails() -> None:
@@ -94,10 +97,12 @@ def test_attempt_auto_remediation_rebuilds_gold_when_gold_check_fails() -> None:
                 "detail": {"distinct_buckets": ["quebrado"]},
             }
         ],
+        compiled_plan=get_default_compiled_plan(),
     )
 
     assert remediation["resolved"] is True
     assert "rebuild_gold_from_silver" in remediation["actions"]
+    assert remediation["decisions"][0]["playbook"]["playbook_id"] == "rebuild_gold_from_silver"
 
 
 def test_diagnose_exception_classifies_missing_source() -> None:

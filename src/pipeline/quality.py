@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
+
+from pipeline.compiler import get_default_compiled_plan
 
 
 @dataclass(frozen=True)
@@ -38,28 +40,14 @@ def _column_set_check(
     return _result(layer, "required_columns", not missing, missing=missing)
 
 
-def validate_bronze(df: pd.DataFrame) -> list[ValidationResult]:
+def validate_bronze(
+    df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+) -> list[ValidationResult]:
+    plan = compiled_plan or get_default_compiled_plan()
+    bronze_required_columns = cast(list[str], plan["bronze_required_columns"])
+    supported_channels = cast(set[str], plan["supported_channels"])
     results = [
-        _column_set_check(
-            df,
-            [
-                "message_id",
-                "conversation_id",
-                "timestamp",
-                "direction",
-                "sender_phone",
-                "sender_name",
-                "message_type",
-                "message_body",
-                "status",
-                "channel",
-                "campaign_id",
-                "agent_id",
-                "conversation_outcome",
-                "metadata",
-            ],
-            "bronze",
-        ),
+        _column_set_check(df, bronze_required_columns, "bronze"),
         _result(
             "bronze",
             "message_id_unique",
@@ -70,7 +58,7 @@ def validate_bronze(df: pd.DataFrame) -> list[ValidationResult]:
         _result(
             "bronze",
             "channel_whatsapp_only",
-            df["channel"].eq("whatsapp").all(),
+            df["channel"].isin(supported_channels).all(),
             distinct_channels=sorted(df["channel"].dropna().unique().tolist()),
         ),
         _result(
@@ -89,15 +77,12 @@ def validate_bronze(df: pd.DataFrame) -> list[ValidationResult]:
     return results
 
 
-def validate_silver(df: pd.DataFrame) -> list[ValidationResult]:
-    dedupe_keys = [
-        "conversation_id",
-        "timestamp",
-        "direction",
-        "sender_phone",
-        "message_type",
-        "message_body",
-    ]
+def validate_silver(
+    df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+) -> list[ValidationResult]:
+    plan = compiled_plan or get_default_compiled_plan()
+    dedupe_keys = cast(list[str], plan["dedupe_keys"])
+    silver_required_columns = cast(list[str], plan["silver_required_columns"])
     duplicate_rows = int(df.duplicated(subset=dedupe_keys).sum())
     pii_leak_count = int(
         (
@@ -108,19 +93,7 @@ def validate_silver(df: pd.DataFrame) -> list[ValidationResult]:
         ).sum()
     )
     results = [
-        _column_set_check(
-            df,
-            [
-                "message_body_masked",
-                "sender_name_masked",
-                "sender_phone_masked",
-                "dropped_duplicate_events",
-                "mentions_vehicle",
-                "mentions_competitor",
-                "mentions_sinistro",
-            ],
-            "silver",
-        ),
+        _column_set_check(df, silver_required_columns, "silver"),
         _result(
             "silver",
             "timestamp_not_null",
@@ -159,40 +132,17 @@ def validate_silver(df: pd.DataFrame) -> list[ValidationResult]:
     return results
 
 
-def validate_gold(df: pd.DataFrame) -> list[ValidationResult]:
-    valid_buckets = {"lead_frio", "curta", "media", "longa"}
-    valid_personas = {
-        "lead_frio",
-        "cliente_pos_sinistro",
-        "cotador_comparador",
-        "lead_engajado_com_dados",
-    }
-    valid_audiences = {
-        "nutricao_basica",
-        "retencao_pos_sinistro",
-        "oferta_competitiva",
-        "close_comercial",
-    }
-    valid_temperatures = {"frio", "morno", "quente"}
+def validate_gold(
+    df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+) -> list[ValidationResult]:
+    plan = compiled_plan or get_default_compiled_plan()
+    valid_buckets = cast(set[str], plan["gold_valid_buckets"])
+    valid_personas = cast(set[str], plan["gold_valid_personas"])
+    valid_audiences = cast(set[str], plan["gold_valid_audiences"])
+    valid_temperatures = cast(set[str], plan["gold_valid_temperatures"])
+    gold_required_columns = cast(list[str], plan["gold_required_columns"])
     results = [
-        _column_set_check(
-            df,
-            [
-                "conversation_id",
-                "total_messages",
-                "duplicate_events_removed",
-                "engagement_bucket",
-                "data_shared_score",
-                "persona_profile",
-                "audience_segment",
-                "lead_temperature",
-                "price_sensitivity",
-                "intent_stage",
-                "contact_readiness",
-                "risk_signal",
-            ],
-            "gold",
-        ),
+        _column_set_check(df, gold_required_columns, "gold"),
         _result(
             "gold",
             "conversation_id_unique",

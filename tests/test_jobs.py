@@ -92,10 +92,13 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     result = run_pipeline(paths, force=True)
 
     report = json.loads(Path(result.validation_report_path).read_text(encoding="utf-8"))
+    agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
     alert_report = json.loads(Path(result.alert_report_path).read_text(encoding="utf-8"))
     assert result.status == "success"
     assert report["status"] == "passed"
     assert report["row_counts"] == {"bronze": 2, "silver": 2, "gold": 1}
+    assert report["pipeline_spec_path"].endswith("pipeline_spec.json")
+    assert "planner_report" in agent_report
     assert alert_report["event"]["severity"] == "info"
     assert alert_report["event"]["should_alert"] is False
 
@@ -110,12 +113,12 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
     first = run_pipeline(paths, force=True)
     assert first.status == "success"
 
-    import pipeline.jobs as jobs_module
+    import pipeline.operator as operator_module
 
-    def explode(_silver: pd.DataFrame) -> pd.DataFrame:
+    def explode(_silver: pd.DataFrame, compiled_plan=None) -> pd.DataFrame:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(jobs_module, "build_gold", explode)
+    monkeypatch.setattr(operator_module, "build_gold", explode)
     second = run_pipeline(paths, force=True)
 
     agent_report = json.loads(Path(second.agent_report_path).read_text(encoding="utf-8"))
@@ -135,12 +138,12 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
 
     paths = build_paths(root)
 
-    import pipeline.jobs as jobs_module
+    import pipeline.operator as operator_module
 
-    original_validate_gold = jobs_module.validate_gold
+    original_validate_gold = operator_module.validate_gold
     calls = {"count": 0}
 
-    def flaky_validate_gold(df: pd.DataFrame) -> list[ValidationResult]:
+    def flaky_validate_gold(df: pd.DataFrame, compiled_plan=None) -> list[ValidationResult]:
         calls["count"] += 1
         if calls["count"] == 1:
             return [
@@ -151,9 +154,9 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
                     detail={"distinct_buckets": ["bad_bucket"]},
                 )
             ]
-        return original_validate_gold(df)
+        return original_validate_gold(df, compiled_plan=compiled_plan)
 
-    monkeypatch.setattr(jobs_module, "validate_gold", flaky_validate_gold)
+    monkeypatch.setattr(operator_module, "validate_gold", flaky_validate_gold)
     result = run_pipeline(paths, force=True)
 
     agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
@@ -161,4 +164,21 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
     assert result.status == "success_after_auto_remediation"
     assert agent_report["status"] == "auto_remediated"
     assert agent_report["auto_remediation"]["applied"] is True
+    assert agent_report["decisions"]
     assert alert_report["event"]["should_alert"] is False
+
+
+def test_run_pipeline_quarantines_invalid_rows(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.loc[1, "timestamp"] = "invalid timestamp"
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = build_paths(root)
+    result = run_pipeline(paths, force=True)
+
+    agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
+    quarantine_report = agent_report["quarantine_report"]
+    assert quarantine_report["applied"] is True
+    assert quarantine_report["quarantined_rows"] == 1

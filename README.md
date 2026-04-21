@@ -1,10 +1,10 @@
 # Pipeline Medalhão com Agente Operacional Determinístico
 
-Este repositório implementa uma entrega do teste técnico de Data & AI Engineering a partir da base transacional de conversas WhatsApp. A solução foi estruturada como um pipeline medalhão em Python com atualização incremental, validações de qualidade, relatórios operacionais e uma camada agêntica determinística para diagnóstico, remediação segura e fallback.
+Este repositório implementa uma entrega do teste técnico de Data & AI Engineering a partir da base transacional de conversas WhatsApp. A solução foi estruturada como um pipeline medalhão em Python com atualização incremental, validações de qualidade, relatórios operacionais e uma camada agêntica determinística para planejamento, diagnóstico, remediação segura e fallback.
 
-O projeto não usa LLM. O termo `agente` aqui significa um supervisor operacional baseado em regras explícitas, responsável por classificar falhas, sugerir ação corretiva, tentar reconstruções seguras de Silver e Gold e preservar o último estado íntegro quando ocorre erro inesperado.
+O projeto não usa LLM na execução principal. O termo `agente` aqui significa um conjunto de módulos determinísticos e auditáveis que cria e mantém uma `pipeline_spec.json`, compila essa spec para o runtime, monitora a execução, aplica remediações seguras, isola registros inválidos em quarentena e preserva o último estado íntegro quando ocorre erro inesperado.
 
-Em termos de aderência ao teste, o projeto implementa um agente operacional determinístico que gerencia a execução do pipeline, diagnostica falhas, aplica auto-remediações seguras e preserva o último estado íntegro, mas não cria ou reconfigura o pipeline autonomamente.
+Em termos de aderência ao teste, o projeto agora trata a criação do pipeline como criação e evolução de especificação versionada, enquanto a execução continua determinística e controlada.
 
 ## Fontes
 
@@ -16,33 +16,49 @@ Em termos de aderência ao teste, o projeto implementa um agente operacional det
 
 ```text
 src/pipeline/
+  approval.py
   agent.py
   alerts.py
+  compiler.py
   config.py
   io.py
   jobs.py
+  llm_advisor.py
+  operator.py
+  planner.py
+  playbooks.py
   quality.py
+  quarantine.py
+  spec.py
   state.py
   transforms.py
 
 scripts/
+  plan_pipeline.py
   monitor_pipeline.py
   profile_bronze.py
   run_pipeline.py
   run_pipeline_daemon.py
 
+config/
+  pipeline_spec.json
+
 data/
   bronze/
   silver/
   gold/
+  quarantine/
 
 reports/
   alerts/
+  agent_decisions/
   bronze_profile.json
   monitoring/
 
 state/
+  approval_state.json
   pipeline_state.json
+  pipeline_spec_history.json
 ```
 
 ## Aderência ao teste
@@ -52,7 +68,7 @@ state/
 | Python puro | Pipeline, runner, validações e monitoramento implementados em Python |
 | Bronze, Silver e Gold | Materialização em parquet com transformações distintas por camada |
 | Pipeline vivo | Runner incremental por fingerprint e modo contínuo com polling |
-| Agente que gerencia o pipeline | Camada operacional determinística para diagnóstico, remediação e fallback |
+| Agente que cria e gerencia o pipeline | Planner gera e evolui `pipeline_spec.json`; operator executa, valida, remedia e faz fallback |
 | Mascaramento de dados sensíveis | Mascaramento de nome, telefone, CPF, CEP, e-mail e placa preservando formato |
 | Tabela analítica com classificações | Gold agora inclui segmentações, audiências e perfis de lead baseados em regras |
 
@@ -72,6 +88,14 @@ state/
   - tipo de sinistro
 - Gold agregada por `conversation_id`
 - segmentação analítica da Gold por persona, audiência, temperatura do lead, estágio de intenção, prontidão de contato, sensibilidade a preço e sinal de risco
+- `pipeline_spec.json` como contrato versionado do pipeline
+- compiler para traduzir spec em plano executável
+- operator explícito para gerenciar o ciclo de execução
+- playbooks auditáveis para remediação
+- quarentena de registros inválidos
+- planner para detectar drift e propor evolução da spec
+- aprovação humana para mudanças estruturais
+- interface opcional de LLM advisor, desligada por padrão
 - validações automatizadas para Bronze, Silver e Gold
 - atualização incremental por fingerprint da fonte
 - modo contínuo com polling para manter a Gold atualizada
@@ -152,6 +176,15 @@ Exemplos:
 
 ## Qualidade e agente operacional
 
+O pipeline passou a ser dirigido por spec:
+
+- `config/pipeline_spec.json` descreve colunas obrigatórias, deduplicação, validações, segmentações e playbooks seguros
+- `compiler.py` compila a spec para um plano executável
+- `planner.py` inspeciona a Bronze, detecta drift e propõe mudanças na spec
+- `approval.py` controla aprovação humana para mudanças estruturais
+- `operator.py` executa o ciclo operacional
+- `llm_advisor.py` existe apenas como interface opcional e desabilitada por padrão
+
 As validações atuais cobrem:
 
 - Bronze:
@@ -173,9 +206,13 @@ As validações atuais cobrem:
 
 A camada agêntica:
 
+- cria e mantém uma spec versionada do pipeline
+- compila a spec para o runtime
 - classifica falhas por tipo
 - sugere ação corretiva
+- seleciona playbooks auditáveis
 - tenta auto-remediação segura quando a falha é reconstruível
+- isola registros inválidos em quarentena
 - registra relatório operacional separado do relatório de validação
 - aplica fallback para o último estado íntegro em falhas inesperadas
 
@@ -194,6 +231,7 @@ Com o ambiente virtual criado e as dependências instaladas:
 
 ```bash
 venv/bin/python scripts/profile_bronze.py
+venv/bin/python scripts/plan_pipeline.py
 venv/bin/python scripts/run_pipeline.py
 venv/bin/python scripts/run_pipeline.py --force
 venv/bin/python scripts/monitor_pipeline.py
@@ -230,19 +268,26 @@ venv/bin/python scripts/run_pipeline_daemon.py \
 - Bronze: `data/bronze/conversations.parquet`
 - Silver: `data/silver/conversations_silver.parquet`
 - Gold: `data/gold/conversations_gold.parquet`
+- Quarentena: `data/quarantine/quarantined_bronze_rows.parquet`
+- Spec do pipeline: `config/pipeline_spec.json`
 - Profiling: `reports/bronze_profile.json`
 - Monitoramento: `reports/monitoring/latest_run_report.json`
+- Relatório de planejamento: `reports/monitoring/latest_plan_report.json`
 - Relatório agêntico: `reports/monitoring/latest_agent_report.json`
 - Relatório de alerta: `reports/monitoring/latest_alert_report.json`
+- Decisão agêntica: `reports/agent_decisions/latest_agent_decision.json`
 - Incidentes persistidos: `reports/alerts/*.json`
 - Histórico de alertas: `reports/alerts/alert_history.json`
 - Estado: `state/pipeline_state.json`
+- Aprovações: `state/approval_state.json`
+- Histórico de mudanças da spec: `state/pipeline_spec_history.json`
 
 ## Limitações atuais
 
-- o agente atual é determinístico e baseado em regras, não em LLM
+- o agente atual é determinístico e baseado em regras; o LLM advisor é apenas opcional e está desligado
 - a operação contínua é por polling local, não por orquestrador externo como Databricks Jobs, Airflow ou systemd
 - a segmentação da Gold é explicável e reproduzível, mas ainda pode evoluir com mais sinais do domínio
+- o planner atual evolui a spec com foco em drift estrutural e metadata, não reescreve código Python livremente
 
 ## Testes automatizados
 
@@ -253,6 +298,8 @@ A suíte atual cobre:
 - contexto de conversa
 - segmentação da Gold
 - validações de qualidade
+- spec, planner e aprovação
+- quarentena de registros inválidos
 - execução incremental
 - fallback em erro inesperado
 - runner contínuo com polling e ciclos controlados

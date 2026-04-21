@@ -4,8 +4,11 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterable
+from typing import Any, cast
 
 import pandas as pd
+
+from pipeline.compiler import get_default_compiled_plan
 
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 PHONE_PATTERN = re.compile(r"(?:\+55\s?)?(?:\(?\d{2}\)?\s?)?(?:9?\d{4})-?\d{4}")
@@ -244,15 +247,11 @@ def _extract_price(text: str) -> float | None:
         return None
 
 
-def deduplicate_events(df: pd.DataFrame) -> pd.DataFrame:
-    dedupe_keys = [
-        "conversation_id",
-        "timestamp",
-        "direction",
-        "sender_phone",
-        "message_type",
-        "message_body",
-    ]
+def deduplicate_events(
+    df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+) -> pd.DataFrame:
+    plan = compiled_plan or get_default_compiled_plan()
+    dedupe_keys = cast(list[str], plan["dedupe_keys"])
     ranked = df.copy()
     ranked["status_priority"] = ranked["status"].map(STATUS_PRIORITY).fillna(-1).astype(int)
     ranked["duplicate_event_group_size"] = ranked.groupby(dedupe_keys, dropna=False)[
@@ -326,92 +325,116 @@ def add_message_signals(df: pd.DataFrame) -> pd.DataFrame:
     return enriched
 
 
-def build_silver(df: pd.DataFrame) -> pd.DataFrame:
+def build_silver(df: pd.DataFrame, compiled_plan: dict[str, object] | None = None) -> pd.DataFrame:
     silver = parse_metadata(df)
     silver = add_conversation_context(silver)
-    silver = deduplicate_events(silver)
+    silver = deduplicate_events(silver, compiled_plan=compiled_plan)
     silver = add_message_signals(silver)
     silver["is_inbound"] = silver["direction"].eq("inbound")
     silver["is_outbound"] = silver["direction"].eq("outbound")
     return silver.sort_values(["conversation_id", "timestamp", "message_id"]).reset_index(drop=True)
 
 
-def add_gold_segments(gold: pd.DataFrame) -> pd.DataFrame:
-    segmented = gold.copy()
-    segmented["lead_temperature"] = "morno"
-    segmented.loc[
-        segmented["engagement_bucket"].eq("lead_frio") & segmented["data_shared_score"].eq(0),
-        "lead_temperature",
-    ] = "frio"
-    segmented.loc[
-        segmented["engagement_bucket"].isin(["media", "longa"])
-        | segmented["data_shared_score"].ge(2),
-        "lead_temperature",
-    ] = "quente"
+def add_gold_segments(
+    gold: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+) -> pd.DataFrame:
+    plan = compiled_plan or get_default_compiled_plan()
+    segmentation = cast(dict[str, Any], plan["gold_segmentation"])
+    temperature_cfg = cast(dict[str, Any], segmentation["lead_temperature"])
+    price_cfg = cast(dict[str, Any], segmentation["price_sensitivity"])
+    readiness_cfg = cast(dict[str, Any], segmentation["contact_readiness"])
+    intent_cfg = cast(dict[str, Any], segmentation["intent_stage"])
+    risk_cfg = cast(dict[str, Any], segmentation["risk_signal"])
+    persona_cfg = cast(dict[str, Any], segmentation["personas"])
+    audience_cfg = cast(dict[str, Any], segmentation["audiences"])
 
-    segmented["price_sensitivity"] = "baixa"
+    segmented = gold.copy()
+    segmented["lead_temperature"] = str(temperature_cfg["default"])
+    segmented.loc[
+        segmented["engagement_bucket"].eq(str(temperature_cfg["cold_bucket"]))
+        & segmented["data_shared_score"].eq(int(temperature_cfg["cold_data_shared_score"])),
+        "lead_temperature",
+    ] = str(temperature_cfg["cold_label"])
+    segmented.loc[
+        segmented["engagement_bucket"].isin(list(temperature_cfg["hot_buckets"]))
+        | segmented["data_shared_score"].ge(int(temperature_cfg["hot_min_data_shared_score"])),
+        "lead_temperature",
+    ] = str(temperature_cfg["hot_label"])
+
+    segmented["price_sensitivity"] = str(price_cfg["default"])
     segmented.loc[
         segmented["mentioned_competitor"] | segmented["avg_quoted_price"].notna(),
         "price_sensitivity",
-    ] = "alta"
+    ] = str(price_cfg["high_label"])
 
-    segmented["contact_readiness"] = "baixa"
-    segmented.loc[segmented["data_shared_score"].eq(1), "contact_readiness"] = "media"
-    segmented.loc[segmented["data_shared_score"].ge(2), "contact_readiness"] = "alta"
+    segmented["contact_readiness"] = str(readiness_cfg["default"])
+    segmented.loc[
+        segmented["data_shared_score"].eq(int(readiness_cfg["medium_score"])),
+        "contact_readiness",
+    ] = str(readiness_cfg["medium_label"])
+    segmented.loc[
+        segmented["data_shared_score"].ge(int(readiness_cfg["high_min_score"])),
+        "contact_readiness",
+    ] = str(readiness_cfg["high_label"])
 
-    segmented["intent_stage"] = "descoberta_inicial"
-    segmented.loc[segmented["mentioned_sinistro"], "intent_stage"] = "pos_sinistro"
+    segmented["intent_stage"] = str(intent_cfg["default"])
+    segmented.loc[segmented["mentioned_sinistro"], "intent_stage"] = str(
+        intent_cfg["sinistro_label"]
+    )
     segmented.loc[
         segmented["mentioned_competitor"] & ~segmented["mentioned_sinistro"],
         "intent_stage",
-    ] = "pesquisa_mercado"
+    ] = str(intent_cfg["competitor_label"])
     segmented.loc[
         segmented["avg_quoted_price"].notna() & ~segmented["mentioned_sinistro"],
         "intent_stage",
-    ] = "cotacao_ativa"
+    ] = str(intent_cfg["quoted_price_label"])
 
-    segmented["risk_signal"] = "baixo"
+    segmented["risk_signal"] = str(risk_cfg["default"])
     segmented.loc[
         segmented["mentioned_sinistro"] | segmented["duplicate_events_removed"].gt(0),
         "risk_signal",
-    ] = "medio"
+    ] = str(risk_cfg["medium_label"])
     segmented.loc[
         segmented["mentioned_sinistro"] & segmented["contains_cpf"],
         "risk_signal",
-    ] = "alto"
+    ] = str(risk_cfg["high_label"])
 
-    segmented["persona_profile"] = "lead_frio"
+    segmented["persona_profile"] = str(persona_cfg["default"])
     segmented.loc[
         segmented["mentioned_sinistro"],
         "persona_profile",
-    ] = "cliente_pos_sinistro"
+    ] = str(persona_cfg["sinistro"])
     segmented.loc[
         segmented["mentioned_competitor"] & segmented["avg_quoted_price"].notna(),
         "persona_profile",
-    ] = "cotador_comparador"
+    ] = str(persona_cfg["comparator"])
     segmented.loc[
-        segmented["lead_temperature"].eq("quente") & segmented["contact_readiness"].eq("alta"),
+        segmented["lead_temperature"].eq(str(temperature_cfg["hot_label"]))
+        & segmented["contact_readiness"].eq(str(readiness_cfg["high_label"])),
         "persona_profile",
-    ] = "lead_engajado_com_dados"
+    ] = str(persona_cfg["engaged"])
 
-    segmented["audience_segment"] = "nutricao_basica"
+    segmented["audience_segment"] = str(audience_cfg["default"])
     segmented.loc[
-        segmented["persona_profile"].eq("cliente_pos_sinistro"),
+        segmented["persona_profile"].eq(str(persona_cfg["sinistro"])),
         "audience_segment",
-    ] = "retencao_pos_sinistro"
+    ] = str(audience_cfg["sinistro"])
     segmented.loc[
-        segmented["persona_profile"].eq("cotador_comparador"),
+        segmented["persona_profile"].eq(str(persona_cfg["comparator"])),
         "audience_segment",
-    ] = "oferta_competitiva"
+    ] = str(audience_cfg["comparator"])
     segmented.loc[
-        segmented["persona_profile"].eq("lead_engajado_com_dados"),
+        segmented["persona_profile"].eq(str(persona_cfg["engaged"])),
         "audience_segment",
-    ] = "close_comercial"
+    ] = str(audience_cfg["engaged"])
 
     return segmented
 
 
-def build_gold(silver: pd.DataFrame) -> pd.DataFrame:
+def build_gold(
+    silver: pd.DataFrame, compiled_plan: dict[str, object] | None = None
+) -> pd.DataFrame:
     grouped = silver.groupby("conversation_id", dropna=False)
     gold = grouped.agg(
         started_at=("timestamp", "min"),
@@ -488,5 +511,5 @@ def build_gold(silver: pd.DataFrame) -> pd.DataFrame:
         .astype(int)
         .sum(axis=1)
     )
-    gold = add_gold_segments(gold)
+    gold = add_gold_segments(gold, compiled_plan=compiled_plan)
     return gold.sort_values("conversation_id").reset_index(drop=True)

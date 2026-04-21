@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import pandas as pd
 
+from pipeline.playbooks import get_playbook, safe_auto_apply_playbooks
 from pipeline.quality import summarize_validation_results, validate_gold, validate_silver
 from pipeline.transforms import build_gold, build_silver
 
@@ -16,6 +17,9 @@ class AgentDiagnosis:
     summary: str
     auto_remediable: bool
     suggested_action: str
+    playbook_id: str | None
+    decision_reason: str
+    considered_playbooks: list[str]
     source: dict[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
@@ -25,116 +29,144 @@ class AgentDiagnosis:
             "summary": self.summary,
             "auto_remediable": self.auto_remediable,
             "suggested_action": self.suggested_action,
+            "playbook_id": self.playbook_id,
+            "decision_reason": self.decision_reason,
+            "considered_playbooks": self.considered_playbooks,
             "source": self.source,
         }
 
 
+class ValidationCheckConfig(TypedDict):
+    kind: str
+    severity: str
+    playbook_id: str | None
+    suggested_action: str
+
+
 VALIDATION_CHECK_MAP = {
-    ("bronze", "required_columns"): (
-        "source_schema_drift",
-        "high",
-        False,
-        "Verificar schema da Bronze e adaptar o parser ou bloquear "
-        "a ingestão até alinhar o contrato.",
-    ),
-    ("bronze", "message_id_unique"): (
-        "source_duplication",
-        "high",
-        False,
-        "Investigar duplicidade na fonte e introduzir chave de "
-        "deduplicação estável antes da Bronze.",
-    ),
-    ("bronze", "channel_whatsapp_only"): (
-        "unexpected_channel",
-        "medium",
-        False,
-        "Filtrar canais não suportados ou expandir o pipeline para múltiplos canais.",
-    ),
-    ("silver", "required_columns"): (
-        "silver_schema_break",
-        "high",
-        True,
-        "Reconstruir a Silver a partir da Bronze com as transformações atuais.",
-    ),
-    ("silver", "timestamp_not_null"): (
-        "silver_timestamp_parse_failure",
-        "high",
-        True,
-        "Reconstruir a Silver e descartar ou isolar registros com timestamp inválido.",
-    ),
-    ("silver", "dedupe_keys_unique"): (
-        "silver_deduplication_failure",
-        "medium",
-        True,
-        "Reaplicar deduplicação semântica na Silver e recalcular a Gold.",
-    ),
-    ("silver", "masked_cpf_not_leaking"): (
-        "pii_masking_leak",
-        "high",
-        True,
-        "Reconstruir a Silver reaplicando mascaramento e bloquear "
-        "publicação até remover vazamento.",
-    ),
-    ("silver", "vehicle_mentions_consistent"): (
-        "silver_feature_inconsistency",
-        "medium",
-        True,
-        "Recalcular features derivadas da Silver a partir da Bronze.",
-    ),
-    ("gold", "required_columns"): (
-        "gold_schema_break",
-        "high",
-        True,
-        "Reconstruir a Gold a partir da Silver válida.",
-    ),
-    ("gold", "conversation_id_unique"): (
-        "gold_aggregation_duplication",
-        "high",
-        True,
-        "Reexecutar agregação da Gold a partir da Silver.",
-    ),
-    ("gold", "message_totals_non_negative"): (
-        "gold_metric_corruption",
-        "high",
-        True,
-        "Recalcular métricas agregadas da Gold a partir da Silver.",
-    ),
-    ("gold", "engagement_bucket_valid"): (
-        "gold_bucket_invalid",
-        "medium",
-        True,
-        "Recalcular buckets analíticos da Gold a partir da Silver.",
-    ),
-    ("gold", "duplicate_events_removed_non_negative"): (
-        "gold_metric_corruption",
-        "high",
-        True,
-        "Recalcular métricas agregadas da Gold a partir da Silver.",
-    ),
+    ("bronze", "required_columns"): {
+        "kind": "source_schema_drift",
+        "severity": "high",
+        "playbook_id": "update_pipeline_spec",
+        "suggested_action": "Verificar schema da Bronze e adaptar a spec ou bloquear a ingestão.",
+    },
+    ("bronze", "message_id_unique"): {
+        "kind": "source_duplication",
+        "severity": "high",
+        "playbook_id": None,
+        "suggested_action": "Investigar duplicidade na fonte e introduzir chave estável na Bronze.",
+    },
+    ("bronze", "channel_whatsapp_only"): {
+        "kind": "unexpected_channel",
+        "severity": "medium",
+        "playbook_id": None,
+        "suggested_action": (
+            "Filtrar canais não suportados ou expandir o pipeline para múltiplos canais."
+        ),
+    },
+    ("silver", "required_columns"): {
+        "kind": "silver_schema_break",
+        "severity": "high",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Reconstruir a Silver a partir da Bronze com a spec atual.",
+    },
+    ("silver", "timestamp_not_null"): {
+        "kind": "silver_timestamp_parse_failure",
+        "severity": "high",
+        "playbook_id": "quarantine_invalid_records",
+        "suggested_action": "Isolar registros inválidos e reconstruir Silver e Gold.",
+    },
+    ("silver", "dedupe_keys_unique"): {
+        "kind": "silver_deduplication_failure",
+        "severity": "medium",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Reaplicar deduplicação semântica na Silver e recalcular a Gold.",
+    },
+    ("silver", "masked_cpf_not_leaking"): {
+        "kind": "pii_masking_leak",
+        "severity": "high",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Reconstruir a Silver reaplicando mascaramento antes de publicar.",
+    },
+    ("silver", "vehicle_mentions_consistent"): {
+        "kind": "silver_feature_inconsistency",
+        "severity": "medium",
+        "playbook_id": "rebuild_silver_from_bronze",
+        "suggested_action": "Recalcular features derivadas da Silver a partir da Bronze.",
+    },
+    ("gold", "required_columns"): {
+        "kind": "gold_schema_break",
+        "severity": "high",
+        "playbook_id": "rebuild_gold_from_silver",
+        "suggested_action": "Reconstruir a Gold a partir da Silver válida.",
+    },
+    ("gold", "conversation_id_unique"): {
+        "kind": "gold_aggregation_duplication",
+        "severity": "high",
+        "playbook_id": "rebuild_gold_from_silver",
+        "suggested_action": "Reexecutar agregação da Gold a partir da Silver.",
+    },
+    ("gold", "message_totals_non_negative"): {
+        "kind": "gold_metric_corruption",
+        "severity": "high",
+        "playbook_id": "rebuild_gold_from_silver",
+        "suggested_action": "Recalcular métricas agregadas da Gold a partir da Silver.",
+    },
+    ("gold", "engagement_bucket_valid"): {
+        "kind": "gold_bucket_invalid",
+        "severity": "medium",
+        "playbook_id": "rebuild_gold_from_silver",
+        "suggested_action": "Recalcular buckets analíticos da Gold a partir da Silver.",
+    },
+    ("gold", "duplicate_events_removed_non_negative"): {
+        "kind": "gold_metric_corruption",
+        "severity": "high",
+        "playbook_id": "rebuild_gold_from_silver",
+        "suggested_action": "Recalcular métricas agregadas da Gold a partir da Silver.",
+    },
 }
 
 
-def diagnose_validation_failures(failed_checks: list[dict[str, Any]]) -> list[AgentDiagnosis]:
+def diagnose_validation_failures(
+    failed_checks: list[dict[str, Any]], compiled_plan: dict[str, Any]
+) -> list[AgentDiagnosis]:
     diagnoses: list[AgentDiagnosis] = []
+    safe_playbooks = safe_auto_apply_playbooks(compiled_plan)
     for failed in failed_checks:
         layer = str(failed.get("layer", "unknown"))
         check = str(failed.get("check", "unknown"))
-        kind, severity, auto_remediable, suggested_action = VALIDATION_CHECK_MAP.get(
-            (layer, check),
-            (
-                "unknown_validation_failure",
-                "high",
-                False,
-                "Inspecionar a falha manualmente e revisar o contrato da camada afetada.",
+        mapped = cast(
+            ValidationCheckConfig,
+            VALIDATION_CHECK_MAP.get(
+                (layer, check),
+                {
+                    "kind": "unknown_validation_failure",
+                    "severity": "high",
+                    "playbook_id": None,
+                    "suggested_action": (
+                        "Inspecionar a falha manualmente e revisar o contrato da camada afetada."
+                    ),
+                },
             ),
+        )
+        playbook_id = mapped["playbook_id"]
+        auto_remediable = bool(playbook_id and playbook_id in safe_playbooks)
+        considered_playbooks = [playbook_id] if playbook_id else []
+        decision_reason = (
+            f"Falha {layer}.{check} mapeada para playbook {playbook_id}."
+            if playbook_id
+            else f"Falha {layer}.{check} sem playbook seguro configurado."
         )
         diagnoses.append(
             AgentDiagnosis(
-                kind=kind,
-                severity=severity,
+                kind=str(mapped["kind"]),
+                severity=str(mapped["severity"]),
                 summary=f"Falha de validação em {layer}.{check}",
                 auto_remediable=auto_remediable,
-                suggested_action=suggested_action,
+                suggested_action=str(mapped["suggested_action"]),
+                playbook_id=str(playbook_id) if playbook_id else None,
+                decision_reason=decision_reason,
+                considered_playbooks=considered_playbooks,
                 source=failed,
             )
         )
@@ -151,6 +183,9 @@ def diagnose_exception(exc: Exception) -> AgentDiagnosis:
             summary="Arquivo de origem indisponível para leitura.",
             auto_remediable=False,
             suggested_action="Verificar presença do arquivo Bronze esperado antes da execução.",
+            playbook_id=None,
+            decision_reason="Erro indica ausência da fonte; não há remediação automática segura.",
+            considered_playbooks=[],
             source={"exception": text},
         )
     if "json" in lowered:
@@ -161,6 +196,11 @@ def diagnose_exception(exc: Exception) -> AgentDiagnosis:
             auto_remediable=False,
             suggested_action="Inspecionar registros com metadata inválido "
             "e adicionar tratamento defensivo.",
+            playbook_id="quarantine_invalid_records",
+            decision_reason=(
+                "Erro sugere metadata inválido; a quarentena pode isolar registros ruins."
+            ),
+            considered_playbooks=["quarantine_invalid_records"],
             source={"exception": text},
         )
     return AgentDiagnosis(
@@ -170,6 +210,9 @@ def diagnose_exception(exc: Exception) -> AgentDiagnosis:
         auto_remediable=False,
         suggested_action="Inspecionar stacktrace e preservar último estado "
         "bem-sucedido até correção.",
+        playbook_id="fallback_to_last_successful_artifacts",
+        decision_reason="Erro inesperado em runtime; o fallback é a ação operacional mais segura.",
+        considered_playbooks=["fallback_to_last_successful_artifacts"],
         source={"exception": text},
     )
 
@@ -179,46 +222,59 @@ def attempt_auto_remediation(
     silver_df: pd.DataFrame,
     gold_df: pd.DataFrame,
     failed_checks: list[dict[str, Any]],
+    compiled_plan: dict[str, Any],
 ) -> dict[str, Any]:
     repaired_silver = silver_df
     repaired_gold = gold_df
     actions: list[str] = []
     touched_silver = False
     touched_gold = False
+    decisions: list[dict[str, Any]] = []
+    safe_playbooks = safe_auto_apply_playbooks(compiled_plan)
 
     for failed in failed_checks:
         layer = failed.get("layer")
         check = failed.get("check")
-        if layer == "silver" and check in {
-            "required_columns",
-            "timestamp_not_null",
-            "dedupe_keys_unique",
-            "masked_cpf_not_leaking",
-            "vehicle_mentions_consistent",
-        }:
-            repaired_silver = build_silver(bronze_df)
+        mapped = cast(
+            ValidationCheckConfig | None, VALIDATION_CHECK_MAP.get((str(layer), str(check)))
+        )
+        playbook_id = mapped["playbook_id"] if mapped else None
+        if not playbook_id:
+            continue
+        playbook = get_playbook(playbook_id)
+        decisions.append(
+            {
+                "playbook": playbook.as_dict(),
+                "failed_check": failed,
+                "selected": playbook_id in safe_playbooks,
+            }
+        )
+        if playbook_id not in safe_playbooks:
+            continue
+        if playbook_id == "rebuild_silver_from_bronze":
+            repaired_silver = build_silver(bronze_df, compiled_plan=compiled_plan)
             actions.append(f"rebuild_silver_for_{check}")
             touched_silver = True
-        if layer == "gold" and check in {
-            "required_columns",
-            "conversation_id_unique",
-            "message_totals_non_negative",
-            "engagement_bucket_valid",
-            "duplicate_events_removed_non_negative",
-        }:
+        if playbook_id == "quarantine_invalid_records":
+            repaired_silver = build_silver(bronze_df, compiled_plan=compiled_plan)
+            actions.append(f"rebuild_silver_after_quarantine_for_{check}")
+            touched_silver = True
+        if playbook_id == "rebuild_gold_from_silver":
             touched_gold = True
 
     if touched_silver or touched_gold:
-        repaired_gold = build_gold(repaired_silver)
+        repaired_gold = build_gold(repaired_silver, compiled_plan=compiled_plan)
         actions.append("rebuild_gold_from_silver")
 
     validation_summary = summarize_validation_results(
-        validate_silver(repaired_silver) + validate_gold(repaired_gold)
+        validate_silver(repaired_silver, compiled_plan=compiled_plan)
+        + validate_gold(repaired_gold, compiled_plan=compiled_plan)
     )
     return {
         "silver_df": repaired_silver,
         "gold_df": repaired_gold,
         "actions": actions,
+        "decisions": decisions,
         "validation_summary": validation_summary,
         "resolved": validation_summary["status"] == "passed",
     }
