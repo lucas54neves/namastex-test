@@ -11,6 +11,7 @@ if str(ROOT / "src") not in sys.path:
 
 from pipeline.config import build_paths  # noqa: E402
 from pipeline.orchestration.jobs import artifacts_as_dict, run_pipeline  # noqa: E402
+from pipeline.runtime.terminal_logging import configure_terminal_logging  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +26,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    configure_terminal_logging()
     artifacts = run_pipeline(build_paths(ROOT), force=args.force)
     print(json.dumps(artifacts_as_dict(artifacts), indent=2, ensure_ascii=False))
 

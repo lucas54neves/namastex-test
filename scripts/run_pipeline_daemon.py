@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -13,6 +14,10 @@ if str(ROOT / "src") not in sys.path:
 
 from pipeline.config import build_paths  # noqa: E402
 from pipeline.orchestration.jobs import artifacts_as_dict, run_pipeline  # noqa: E402
+from pipeline.runtime.terminal_logging import (  # noqa: E402
+    configure_terminal_logging,
+    log_event,
+)
 
 DEFAULT_POLL_INTERVAL_SECONDS = 60
 
@@ -42,16 +47,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_daemon(args: argparse.Namespace) -> None:
+    configure_terminal_logging()
     cycle = 0
     while True:
         cycle += 1
         force = bool(args.force_first_run and cycle == 1)
+        log_event(
+            logging.INFO,
+            "daemon_cycle_started",
+            cycle=cycle,
+            force=force,
+            poll_interval_seconds=args.poll_interval_seconds,
+        )
         artifacts = run_pipeline(build_paths(ROOT), force=force)
         output = {"cycle": cycle, "poll_interval_seconds": args.poll_interval_seconds}
         output.update(artifacts_as_dict(artifacts))
         print(json.dumps(output, indent=2, ensure_ascii=False), flush=True)
 
         if args.max_cycles and cycle >= args.max_cycles:
+            log_event(logging.INFO, "daemon_stopped", cycle=cycle, reason="max_cycles_reached")
             break
 
         time.sleep(max(args.poll_interval_seconds, 1))

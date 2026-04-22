@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ from pipeline.runtime.state import (
     load_pipeline_state,
     save_pipeline_state,
 )
+from pipeline.runtime.terminal_logging import log_event
 from pipeline.transforms.bronze import load_bronze_frame
 from pipeline.transforms.conversation_enrichment import build_conversation_enrichment
 from pipeline.transforms.gold import build_gold
@@ -209,6 +211,7 @@ def _build_alert_report(
 
 
 def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
+    current_stage = "initialization"
     ensure_directories(paths)
     spec = ensure_pipeline_spec(paths.pipeline_spec)
     compiled_plan = compile_pipeline_spec(spec)
@@ -223,8 +226,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
     current_fingerprint = current_fingerprint_obj.as_dict()
     state = load_pipeline_state(state_path)
     previous_fingerprint = state.get("last_source_fingerprint")
+    changed = has_source_changed(current_fingerprint_obj, previous_fingerprint)
 
-    if not force and not has_source_changed(current_fingerprint_obj, previous_fingerprint):
+    log_event(logging.INFO, "run_started", force=force)
+    log_event(logging.INFO, "source_change_evaluated", changed=changed, force=force)
+
+    if not force and not changed:
         agent_report = _build_agent_report(
             incident_id=_incident_id(),
             status="idle_no_source_change",
@@ -267,6 +274,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
         state.setdefault("runs", []).append(run_record)
         state["last_seen_at_utc"] = _utc_now_iso()
         save_pipeline_state(state_path, state)
+        log_event(logging.INFO, "reports_persisted", status="skipped_no_source_change")
+        log_event(
+            logging.WARNING,
+            "run_skipped",
+            reason="source_fingerprint_unchanged",
+        )
         return _skip_artifacts(paths)
 
     bronze_path = paths.bronze / "conversations.parquet"
@@ -276,11 +289,25 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
     gold_path = paths.gold / "conversations_gold.parquet"
 
     try:
+        current_stage = "bronze_load"
         bronze_df = load_bronze_frame(str(paths.raw_bronze_source))
+        log_event(logging.INFO, "bronze_loaded", rows=int(len(bronze_df)))
+
+        current_stage = "quarantine_processing"
         quarantine = quarantine_bronze_records(bronze_df, paths.quarantine, compiled_plan)
         bronze_df = cast(Any, quarantine["clean_df"])
+        quarantine_report = cast(dict[str, Any], quarantine["report"])
+        log_event(
+            logging.INFO,
+            "quarantine_completed",
+            quarantined_rows=quarantine_report.get("quarantined_rows", 0),
+            clean_rows=int(len(bronze_df)),
+        )
+
+        current_stage = "bronze_persist"
         write_parquet(bronze_df, bronze_path)
 
+        current_stage = "silver_build"
         silver_messages_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
         silver_runtime_df = build_silver_leads(silver_messages_runtime_df)
         silver_df = sanitize_for_publication(silver_runtime_df, "silver")
@@ -288,6 +315,14 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             silver_messages_runtime_df,
             "silver_messages",
         )
+        log_event(
+            logging.INFO,
+            "silver_completed",
+            silver_rows=int(len(silver_df)),
+            silver_messages_rows=int(len(silver_messages_df)),
+        )
+
+        current_stage = "enrichment_build"
         existing_enrichment = (
             read_parquet(silver_conversations_llm_path)
             if silver_conversations_llm_path.exists()
@@ -302,10 +337,18 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             silver_conversations_llm_runtime_df,
             "silver_conversations_llm",
         )
+        log_event(
+            logging.INFO,
+            "enrichment_completed",
+            silver_conversations_llm_rows=int(len(silver_conversations_llm_df)),
+        )
+
+        current_stage = "silver_persist"
         write_parquet(silver_df, silver_path)
         write_parquet(silver_messages_df, silver_messages_path)
         write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
 
+        current_stage = "gold_build"
         gold_runtime_df = build_gold(
             silver_runtime_df,
             silver_messages_runtime_df,
@@ -313,8 +356,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             compiled_plan=compiled_plan,
         )
         gold_df = sanitize_for_publication(gold_runtime_df, "gold")
-        write_parquet(gold_df, gold_path)
 
+        current_stage = "gold_persist"
+        write_parquet(gold_df, gold_path)
+        log_event(logging.INFO, "gold_completed", gold_rows=int(len(gold_df)))
+
+        current_stage = "validation"
         validation_results = (
             validate_bronze(bronze_df, compiled_plan=compiled_plan)
             + validate_silver(silver_df, compiled_plan=compiled_plan)
@@ -345,6 +392,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
 
         failed_checks = cast(list[dict[str, Any]], validation_summary["failed_checks"])
         row_counts = cast(dict[str, Any], validation_summary["row_counts"])
+        log_event(
+            logging.INFO,
+            "validation_completed",
+            status=validation_summary["status"],
+            failed_check_count=len(failed_checks),
+        )
 
         agent_status = "healthy"
         agent_report = _build_agent_report(
@@ -414,6 +467,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 validation_summary["pipeline_spec_path"] = str(paths.pipeline_spec)
                 failed_checks = cast(list[dict[str, Any]], validation_summary["failed_checks"])
                 row_counts = cast(dict[str, Any], validation_summary["row_counts"])
+                log_event(
+                    logging.INFO,
+                    "validation_completed",
+                    status=validation_summary["status"],
+                    failed_check_count=len(failed_checks),
+                )
                 agent_status = "auto_remediated"
                 run_status = "success_after_auto_remediation"
                 remediation_classification = "auto_remediated"
@@ -454,6 +513,13 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 quarantine_report=cast(dict[str, Any], quarantine["report"]),
             )
             agent_report["planner_report"]["related_incident_id"] = agent_report["incident_id"]
+            log_event(
+                logging.WARNING,
+                "validation_requires_attention",
+                status=validation_summary["status"],
+                failed_check_count=len(failed_checks),
+                agent_status=agent_status,
+            )
 
         run_record = _run_record(
             source_fingerprint=current_fingerprint,
@@ -489,6 +555,12 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             alert_report_path,
             paths.agent_decisions,
         )
+        log_event(
+            logging.INFO,
+            "reports_persisted",
+            status=run_status,
+            incident_id=agent_report["incident_id"],
+        )
         state.setdefault("runs", []).append(run_record)
         state["last_source_fingerprint"] = current_fingerprint
         if run_status in {"success", "success_after_auto_remediation"}:
@@ -505,9 +577,22 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
             }
         state["last_seen_at_utc"] = _utc_now_iso()
         save_pipeline_state(state_path, state)
+        log_event(
+            logging.INFO,
+            "run_succeeded",
+            status=run_status,
+            gold_rows=row_counts.get("gold"),
+            incident_id=agent_report["incident_id"],
+        )
         return _success_artifacts(paths, run_status)
 
     except Exception as exc:
+        log_event(
+            logging.ERROR,
+            "run_failed",
+            stage=current_stage,
+            error=type(exc).__name__,
+        )
         diagnosis = diagnose_exception(exc).as_dict()
         last_successful_artifacts = state.get("last_successful_artifacts", {})
         fallback_applied = bool(last_successful_artifacts)
@@ -593,6 +678,18 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
         state.setdefault("runs", []).append(run_record)
         state["last_seen_at_utc"] = _utc_now_iso()
         save_pipeline_state(state_path, state)
+        log_event(
+            logging.INFO if fallback_applied else logging.ERROR,
+            "reports_persisted",
+            status=run_status,
+            incident_id=agent_report["incident_id"],
+        )
+        if fallback_applied:
+            log_event(
+                logging.WARNING,
+                "fallback_applied",
+                incident_id=agent_report["incident_id"],
+            )
         return _success_artifacts(paths, run_status)
 
 

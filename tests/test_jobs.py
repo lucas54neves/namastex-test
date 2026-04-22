@@ -8,6 +8,7 @@ import pandas as pd
 from pipeline.config import PipelinePaths, build_paths
 from pipeline.orchestration.jobs import run_pipeline
 from pipeline.quality.quality import ValidationResult
+from pipeline.runtime.terminal_logging import configure_terminal_logging
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,6 +83,52 @@ def test_run_pipeline_skips_when_source_is_unchanged(tmp_path: Path) -> None:
     assert first.executed is True
     assert second.executed is False
     assert second.status == "skipped_no_source_change"
+
+
+def test_run_pipeline_emits_terminal_logs_for_success(tmp_path: Path, capsys) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    configure_terminal_logging()
+    paths = build_paths(root)
+    result = run_pipeline(paths, force=True)
+
+    captured = capsys.readouterr()
+
+    assert result.status == "success"
+    assert "INFO pipeline.runtime run_started force=true" in captured.err
+    assert "INFO pipeline.runtime bronze_loaded rows=2" in captured.err
+    assert (
+        "INFO pipeline.runtime validation_completed status=passed failed_check_count=0"
+        in captured.err
+    )
+    assert "INFO pipeline.runtime run_succeeded status=success gold_rows=1" in captured.err
+    assert "Diego Pereira" not in captured.err
+    assert "Ana Paula" not in captured.err
+    assert "123.456.789-00" not in captured.err
+
+
+def test_run_pipeline_emits_terminal_log_for_skip(tmp_path: Path, capsys) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    configure_terminal_logging()
+    paths = build_paths(root)
+    first = run_pipeline(paths, force=False)
+    second = run_pipeline(paths, force=False)
+
+    captured = capsys.readouterr()
+
+    assert first.status == "success"
+    assert second.status == "skipped_no_source_change"
+    assert "INFO pipeline.runtime source_change_evaluated changed=false force=false" in captured.err
+    assert (
+        "WARNING pipeline.runtime run_skipped reason=source_fingerprint_unchanged" in captured.err
+    )
 
 
 def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
@@ -165,6 +212,38 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
     assert second.status == "fallback_to_last_successful"
     assert agent_report["fallback"]["applied"] is True
     assert alert_report["event"]["should_alert"] is True
+
+
+def test_run_pipeline_emits_terminal_log_for_failure_stage(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = build_paths(root)
+    first = run_pipeline(paths, force=True)
+    assert first.status == "success"
+
+    import pipeline.orchestration.operator as operator_module
+
+    def explode(
+        _silver: pd.DataFrame,
+        _silver_messages: pd.DataFrame,
+        _silver_conversations_llm: pd.DataFrame | None = None,
+        compiled_plan=None,
+    ) -> pd.DataFrame:
+        raise RuntimeError("boom")
+
+    configure_terminal_logging()
+    monkeypatch.setattr(operator_module, "build_gold", explode)
+    second = run_pipeline(paths, force=True)
+    captured = capsys.readouterr()
+
+    assert second.status == "fallback_to_last_successful"
+    assert "ERROR pipeline.runtime run_failed stage=gold_build error=RuntimeError" in captured.err
+    assert "WARNING pipeline.runtime fallback_applied incident_id=" in captured.err
 
 
 def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(

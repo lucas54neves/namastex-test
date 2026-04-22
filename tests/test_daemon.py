@@ -62,3 +62,12 @@ def test_run_daemon_respects_max_cycles(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert '"cycle": 1' in captured.out
     assert '"cycle": 2' in captured.out
+    assert (
+        "INFO pipeline.runtime daemon_cycle_started cycle=1 force=true poll_interval_seconds=1"
+        in captured.err
+    )
+    assert (
+        "INFO pipeline.runtime daemon_cycle_started cycle=2 force=false poll_interval_seconds=1"
+        in captured.err
+    )
+    assert "INFO pipeline.runtime daemon_stopped cycle=2 reason=max_cycles_reached" in captured.err
