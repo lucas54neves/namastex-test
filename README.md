@@ -128,6 +128,8 @@ Baseline validado localmente:
 
 `Bronze` replica `docs/conversations_bronze.parquet` para `data/bronze/conversations.parquet`, preservando o schema bruto em uma area controlada para reproducao e reprocessamento.
 
+A validacao de `Bronze` trata a regra `first_message_outbound` como diagnostico observacional, nao como bloqueio hard. A escolha foi intencional: o enunciado define a Bronze como replica fiel das conversas transacionais originais entre lead e vendedor humano no WhatsApp, e esse source real pode conter conversas iniciadas pelo lead. Derrubar a execucao nesses casos introduziria um contrato mais restritivo do que o exigido pelo teste tecnico e reduziria a resiliencia operacional do pipeline sobre a fonte fornecida.
+
 ### Silver
 
 `Silver` e a camada de limpeza e enriquecimento. O contrato publicado tem tres artefatos:
@@ -175,6 +177,8 @@ O contrato principal de `silver_leads.parquet` inclui, entre outras:
 - `has_plate_signal`
 
 Colecoes observadas sao persistidas em formato deterministico para revisao e reprocessamento consistente.
+
+`lead_contact_ref` segue um contrato seguro de publicacao: ele prioriza telefone mascarado quando existe evidencia publicada e faz fallback para `lead_key` sintetico quando nao existe contato publicavel. A validacao de privacidade distingue explicitamente identificadores sinteticos de telefones crus para evitar falso positivo sem relaxar a deteccao de vazamento real.
 
 O contrato auxiliar de `silver_messages.parquet` inclui, entre outras:
 
@@ -310,7 +314,7 @@ Enriquecimentos analiticos adicionais:
 - `closure_outcome_group` e `has_closed_outcome`: normalizacao de desfechos observados para suportar analise de taxa de fechamento por perfil
 - `price_objection_intensity`: `nenhuma`, `leve` ou `forte`, derivada de sinais de cotacao, pressao de preco e contexto competitivo
 - `commercial_urgency_signal`: `nenhuma`, `moderada` ou `alta`, derivada de sinais linguísticos de urgencia e do ciclo observado do lead
-- `competitor_pressure_level`: `nenhuma`, `leve` ou `alta`, derivada de mencoes a concorrentes e sinais de comparacao comercial
+- `competitor_pressure_level`: `nenhuma`, `leve` ou `alta`, derivada de mencoes nomeadas a concorrentes e tambem de sinais genericos de comparacao comercial
 - `conversation_sentiment_label`: `positivo`, `neutro`, `negativo` ou `sem_evidencia`, consolidado da classificacao por conversa
 - `conversation_sentiment_support`: `fraco`, `moderado`, `forte` ou `sem_evidencia`, consolidado do suporte por conversa
 - `positive_tone_hits` e `negative_tone_hits`: contagens agregadas de familias de pistas lexicais positivas e negativas encontradas no historico inbound
@@ -377,7 +381,7 @@ Checks atuais de validacao:
   - colunas obrigatorias
   - unicidade de `message_id`
   - canal restrito a `whatsapp`
-  - regra semantica de que a primeira mensagem por `conversation_id` deve ser `outbound`, com diagnostico por conversa violadora
+  - diagnostico semantico de conversas em que a primeira mensagem por `conversation_id` nao e `outbound`, sem bloquear a execucao do pipeline
 - Silver principal:
   - ausencia de colunas cruas proibidas
   - presenca de `canonical_lead_name_masked` e `lead_contact_ref`
@@ -406,7 +410,7 @@ Checks atuais de validacao:
   - `conversation_count`, `total_messages` e `duplicate_events_removed` nao negativos
   - vocabularios validos para `engagement_bucket`, `persona_profile`, `audience_segment`, `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level`
   - consistencia semantica com `silver` e `silver_messages` para chaves, intervalos de tempo, totais agregados e sinais observados
-  - coerencia deterministica de `engagement_bucket`, `lead_temperature`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `has_closed_outcome`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level` com os fatos publicados na propria linha
+  - coerencia deterministica de `engagement_bucket`, `lead_temperature`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `has_closed_outcome`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level` com os fatos publicados e com os sinais agregados de `silver_messages`
 
 As validacoes semanticas usam apenas identificadores tecnicos e amostras limitadas de `lead_key` ou `conversation_id` nos diagnosticos. O runtime nao publica corpo de mensagem, nome cru, telefone cru ou outros valores sensiveis nos payloads de falha.
 

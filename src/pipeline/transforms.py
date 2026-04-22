@@ -12,7 +12,9 @@ import pandas as pd
 from pipeline.compiler import get_default_compiled_plan
 
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
-PHONE_PATTERN = re.compile(r"(?:\+55\s?)?(?:\(?\d{2}\)?\s?)?(?:9?\d{4})-?\d{4}")
+PHONE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:\+55\s?)?(?:\(?\d{2}\)?\s?)?(?:9?\d{4})-?\d{4}(?![A-Za-z0-9_])"
+)
 CPF_PATTERN = re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
 CEP_PATTERN = re.compile(r"\b\d{5}-?\d{3}\b")
 PLATE_PATTERN = re.compile(r"\b[A-Z]{3}[0-9][A-Z0-9][0-9]{2}\b", re.IGNORECASE)

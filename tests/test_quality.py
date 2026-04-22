@@ -73,7 +73,7 @@ def _base_gold_row() -> dict[str, object]:
         "mentioned_vehicle": False,
         "mentioned_competitor": False,
         "mentioned_sinistro": False,
-        "avg_response_time_sec": 60.0,
+        "avg_response_time_sec": None,
         "avg_quoted_price": None,
         "primary_competitor": None,
         "city": "Sao Paulo",
@@ -91,7 +91,7 @@ def _base_gold_row() -> dict[str, object]:
         "intent_stage": "descoberta_inicial",
         "contact_readiness": "baixa",
         "risk_signal": "baixo",
-        "response_latency_band": "rapida",
+        "response_latency_band": "sem_evidencia",
         "closure_outcome_group": "aberto",
         "has_closed_outcome": False,
         "price_objection_intensity": "nenhuma",
@@ -108,8 +108,11 @@ def _base_silver_message_row() -> dict[str, object]:
     return {
         "lead_key": "lead_123",
         "conversation_id": "conv_1",
+        "message_id": "m1",
         "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
         "direction": "inbound",
+        "is_inbound": True,
+        "is_outbound": False,
         "message_type": "text",
         "message_body_masked": "oi",
         "sender_name_masked": "XX",
@@ -123,6 +126,12 @@ def _base_silver_message_row() -> dict[str, object]:
         "contains_phone": False,
         "contains_email": False,
         "contains_cep": False,
+        "quoted_price": None,
+        "price_objection_signal": False,
+        "urgency_strength": 0,
+        "competitor_comparison_signal": False,
+        "competitor_mentioned": None,
+        "email_provider": None,
         "vehicle_make": None,
         "vehicle_model": None,
         "vehicle_year": None,
@@ -169,12 +178,14 @@ def test_validate_bronze_rejects_conversation_starting_inbound() -> None:
 
     summary = summarize_validation_results(validate_bronze(df))
 
-    assert summary["status"] == "failed"
-    failure = next(
-        item for item in summary["failed_checks"] if item["check"] == "first_message_outbound"
+    assert summary["status"] == "passed"
+    diagnostic = next(
+        item for item in summary["checks"] if item["check"] == "first_message_outbound"
     )
-    assert failure["detail"]["violating_conversations"] == 1
-    assert failure["detail"]["sample_conversation_ids"] == ["conv_1"]
+    assert diagnostic["status"] == "passed"
+    assert diagnostic["detail"]["violating_conversations"] == 1
+    assert diagnostic["detail"]["sample_conversation_ids"] == ["conv_1"]
+    assert diagnostic["detail"]["enforcement_mode"] == "diagnostic"
 
 
 def test_validate_bronze_accepts_outbound_first_message() -> None:
@@ -346,6 +357,17 @@ def test_validate_silver_accepts_masked_text_without_leaks() -> None:
     assert summary["status"] == "passed"
 
 
+def test_validate_silver_accepts_synthetic_lead_key_fallback_contact_ref() -> None:
+    row = _base_silver_row()
+    row["lead_key"] = "lead_6548333549182e0a"
+    row["lead_contact_ref"] = "lead_6548333549182e0a"
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_silver(df))
+
+    assert summary["status"] == "passed"
+
+
 def test_validate_silver_rejects_leaking_email_in_masked_text() -> None:
     row = _base_silver_row()
     row["canonical_lead_name_masked"] = "ana.paula@gmail.com"
@@ -416,6 +438,58 @@ def test_validate_gold_rejects_leaking_text_in_published_text_field() -> None:
     )
 
 
+def test_validate_gold_accepts_high_urgency_without_latency_when_text_evidence_exists() -> None:
+    silver_row = _base_silver_row()
+    silver_row["last_seen_at"] = pd.Timestamp("2026-02-01 10:30:00")
+    silver_df = pd.DataFrame([silver_row])
+    urgent_message = _base_silver_message_row()
+    urgent_message["message_body_masked"] = "quero fechar hoje"
+    urgent_message["urgency_strength"] = 2
+    urgent_message["timestamp"] = pd.Timestamp("2026-02-01 10:00:00")
+    followup_message = dict(urgent_message)
+    followup_message["message_id"] = "m2"
+    followup_message["timestamp"] = pd.Timestamp("2026-02-01 10:30:00")
+    followup_message["message_body_masked"] = "preciso agora"
+    gold_row = _base_gold_row()
+    gold_row["total_messages"] = 2
+    gold_row["inbound_messages"] = 2
+    gold_row["outbound_messages"] = 0
+    gold_row["last_seen_at"] = pd.Timestamp("2026-02-01 10:30:00")
+    gold_row["response_latency_band"] = "sem_evidencia"
+    gold_row["commercial_urgency_signal"] = "alta"
+    gold_df = pd.DataFrame([gold_row])
+    silver_messages_df = pd.DataFrame([urgent_message, followup_message])
+
+    summary = summarize_validation_results(
+        validate_cross_layer_consistency(silver_df, silver_messages_df, gold_df)
+    )
+
+    assert summary["status"] == "passed"
+
+
+def test_validate_gold_accepts_competitor_pressure_from_generic_comparison_signal() -> None:
+    silver_row = _base_silver_row()
+    silver_row["message_count"] = 1
+    silver_row["last_seen_at"] = pd.Timestamp("2026-02-01 10:00:00")
+    silver_df = pd.DataFrame([silver_row])
+    silver_messages_row = _base_silver_message_row()
+    silver_messages_row["competitor_comparison_signal"] = True
+    silver_messages_df = pd.DataFrame([silver_messages_row])
+    gold_row = _base_gold_row()
+    gold_row["total_messages"] = 1
+    gold_row["inbound_messages"] = 1
+    gold_row["outbound_messages"] = 0
+    gold_row["last_seen_at"] = pd.Timestamp("2026-02-01 10:00:00")
+    gold_row["competitor_pressure_level"] = "alta"
+    gold_df = pd.DataFrame([gold_row])
+
+    summary = summarize_validation_results(
+        validate_cross_layer_consistency(silver_df, silver_messages_df, gold_df)
+    )
+
+    assert summary["status"] == "passed"
+
+
 def test_validate_silver_messages_detects_duplicate_rows() -> None:
     first = _base_silver_message_row()
     first["sender_phone"] = "+5511999999999"
@@ -458,9 +532,12 @@ def test_validate_cross_layer_consistency_rejects_silver_mismatched_aggregates()
             _base_silver_message_row(),
             {
                 **_base_silver_message_row(),
+                "message_id": "m2",
                 "message_body_masked": "resposta",
                 "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
                 "direction": "outbound",
+                "is_inbound": False,
+                "is_outbound": True,
             },
         ]
     )

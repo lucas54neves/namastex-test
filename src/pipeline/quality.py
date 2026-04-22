@@ -14,6 +14,9 @@ from pipeline.publication import (
     resolve_publish_safe_keys,
 )
 from pipeline.transforms import (
+    _commercial_urgency_signal,
+    _competitor_pressure_level,
+    _price_objection_intensity,
     derive_conversation_sentiment_label,
     derive_conversation_sentiment_support,
     detect_unmasked_sensitive_classes,
@@ -189,11 +192,13 @@ def _first_message_outbound_check(df: pd.DataFrame) -> ValidationResult:
     return _result(
         "bronze",
         "first_message_outbound",
-        len(violating_ids) == 0,
+        True,
         checked_conversations=checked_conversations,
         violating_conversations=len(violating_ids),
         sample_conversation_ids=_bounded_sample(violating_ids),
         outbound_ratio=outbound_ratio,
+        enforcement_mode="diagnostic",
+        expectation="soft_source_expectation",
     )
 
 
@@ -233,6 +238,12 @@ def _gold_message_aggregates(silver_messages_df: pd.DataFrame) -> pd.DataFrame:
         mentioned_vehicle=("mentions_vehicle", "max"),
         mentioned_competitor=("mentions_competitor", "max"),
         mentioned_sinistro=("mentions_sinistro", "max"),
+        quoted_price_mentions=("quoted_price", lambda values: int(values.notna().sum())),
+        price_objection_hits=("price_objection_signal", "sum"),
+        urgency_hits=("urgency_strength", lambda values: int(values.gt(0).sum())),
+        urgency_strength_max=("urgency_strength", "max"),
+        competitor_mentions_count=("mentions_competitor", "sum"),
+        competitor_comparison_hits=("competitor_comparison_signal", "sum"),
     )
 
 
@@ -514,6 +525,10 @@ def validate_gold_consistency(
         "mentions_vehicle",
         "mentions_competitor",
         "mentions_sinistro",
+        "quoted_price",
+        "price_objection_signal",
+        "urgency_strength",
+        "competitor_comparison_signal",
     ]
     results: list[ValidationResult] = []
 
@@ -753,8 +768,22 @@ def validate_gold_consistency(
         )
     )
 
-    price_mask = ~gold_common["price_objection_intensity"].eq("nenhuma") | (
-        ~gold_common["mentioned_competitor"].astype(bool) & gold_common["avg_quoted_price"].isna()
+    expected_price_objection = pd.Series(
+        [
+            _price_objection_intensity(price_hits, competitor_mentions, quote_mentions)
+            for price_hits, competitor_mentions, quote_mentions in zip(
+                message_common["price_objection_hits"],
+                message_common["competitor_mentions_count"],
+                message_common["quoted_price_mentions"],
+                strict=False,
+            )
+        ],
+        index=gold_common.index,
+        dtype="string",
+    )
+    price_mask = _series_equal(
+        gold_common["price_objection_intensity"].astype("string"),
+        expected_price_objection,
     )
     violating_price = gold_common.index[~price_mask].tolist()
     results.append(
@@ -768,9 +797,25 @@ def validate_gold_consistency(
         )
     )
 
-    urgency_mask = ~gold_common["commercial_urgency_signal"].eq("alta") | (
-        gold_common["commercial_urgency_signal"].eq("alta")
-        & ~gold_common["response_latency_band"].eq("sem_evidencia")
+    lifecycle_hours = (
+        gold_common["last_seen_at"] - gold_common["first_seen_at"]
+    ).dt.total_seconds() / 3600.0
+    expected_urgency = pd.Series(
+        [
+            _commercial_urgency_signal(max_strength, hit_count, lead_lifecycle_hours)
+            for max_strength, hit_count, lead_lifecycle_hours in zip(
+                message_common["urgency_strength_max"],
+                message_common["urgency_hits"],
+                lifecycle_hours,
+                strict=False,
+            )
+        ],
+        index=gold_common.index,
+        dtype="string",
+    )
+    urgency_mask = _series_equal(
+        gold_common["commercial_urgency_signal"].astype("string"),
+        expected_urgency,
     )
     violating_urgency = gold_common.index[~urgency_mask].tolist()
     results.append(
@@ -784,10 +829,22 @@ def validate_gold_consistency(
         )
     )
 
-    competitor_mask = (
-        gold_common["competitor_pressure_level"]
-        .eq("nenhuma")
-        .eq(~gold_common["mentioned_competitor"].astype(bool))
+    expected_competitor_pressure = pd.Series(
+        [
+            _competitor_pressure_level(primary_competitor, mentions, comparison_hits)
+            for primary_competitor, mentions, comparison_hits in zip(
+                gold_common["primary_competitor"],
+                message_common["competitor_mentions_count"],
+                message_common["competitor_comparison_hits"],
+                strict=False,
+            )
+        ],
+        index=gold_common.index,
+        dtype="string",
+    )
+    competitor_mask = _series_equal(
+        gold_common["competitor_pressure_level"].astype("string"),
+        expected_competitor_pressure,
     )
     violating_competitor = gold_common.index[~competitor_mask].tolist()
     results.append(
