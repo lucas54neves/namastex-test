@@ -5,15 +5,16 @@ from typing import Any, TypedDict, cast
 
 import pandas as pd
 
-from pipeline.playbooks import get_playbook, safe_auto_apply_playbooks
-from pipeline.publication import sanitize_for_publication
-from pipeline.quality import (
+from pipeline.agent.playbooks import get_playbook, safe_auto_apply_playbooks
+from pipeline.quality.publication import sanitize_for_publication
+from pipeline.quality.quality import (
     summarize_validation_results,
     validate_gold,
     validate_silver,
     validate_silver_messages,
 )
-from pipeline.transforms import build_gold, build_silver, build_silver_leads
+from pipeline.transforms.gold import build_gold
+from pipeline.transforms.silver import build_silver, build_silver_leads
 
 
 @dataclass(frozen=True)

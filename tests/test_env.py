@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pipeline.env import load_dotenv_file
+from pipeline.runtime.env import load_dotenv_file
 
 
 def test_load_dotenv_file_populates_missing_values(tmp_path: Path, monkeypatch) -> None:

@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import pandas as pd
 
-import pipeline.conversation_enrichment as conversation_enrichment
-from pipeline.compiler import get_default_compiled_plan
-from pipeline.conversation_enrichment import (
+import pipeline.transforms.conversation_enrichment as conversation_enrichment
+from pipeline.orchestration.compiler import get_default_compiled_plan
+from pipeline.transforms.conversation_enrichment import (
     build_conversation_enrichment,
     consolidate_gold_semantics,
 )
-from pipeline.transforms import (
+from pipeline.transforms.gold import build_gold
+from pipeline.transforms.silver import (
     add_conversation_context,
     add_gold_segments,
-    build_gold,
     build_silver,
     build_silver_leads,
     deduplicate_events,

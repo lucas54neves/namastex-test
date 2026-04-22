@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from pipeline.config import PipelinePaths
-from pipeline.operator import (
+from pipeline.orchestration.operator import (
     PipelineArtifacts,
     run_cycle,
 )
-from pipeline.operator import (
+from pipeline.orchestration.operator import (
     build_monitor_snapshot as _build_monitor_snapshot,
 )
 

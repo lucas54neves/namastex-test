@@ -6,8 +6,8 @@ from pathlib import Path
 import pandas as pd
 
 from pipeline.config import PipelinePaths, build_paths
-from pipeline.jobs import run_pipeline
-from pipeline.quality import ValidationResult
+from pipeline.orchestration.jobs import run_pipeline
+from pipeline.quality.quality import ValidationResult
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -147,7 +147,7 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
     first = run_pipeline(paths, force=True)
     assert first.status == "success"
 
-    import pipeline.operator as operator_module
+    import pipeline.orchestration.operator as operator_module
 
     def explode(
         _silver: pd.DataFrame,
@@ -177,7 +177,7 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
 
     paths = build_paths(root)
 
-    import pipeline.operator as operator_module
+    import pipeline.orchestration.operator as operator_module
 
     original_validate_gold = operator_module.validate_gold
     calls = {"count": 0}
@@ -233,7 +233,7 @@ def test_build_monitor_snapshot_separates_operational_and_structural_fields(tmp_
     paths = build_paths(root)
     run_pipeline(paths, force=True)
 
-    from pipeline.jobs import build_monitor_snapshot
+    from pipeline.orchestration.jobs import build_monitor_snapshot
 
     snapshot = build_monitor_snapshot(paths)
 

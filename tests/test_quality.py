@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from pipeline.quality import (
+from pipeline.quality.quality import (
     summarize_validation_results,
     validate_bronze,
     validate_cross_layer_consistency,

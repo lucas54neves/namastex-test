@@ -11,7 +11,7 @@ if str(ROOT / "src") not in sys.path:
 import pandas as pd  # noqa: E402
 
 from pipeline.config import build_paths, ensure_directories  # noqa: E402
-from pipeline.io import write_json  # noqa: E402
+from pipeline.io.parquet_io import write_json  # noqa: E402
 
 
 def top_values(series: pd.Series, limit: int = 10) -> dict[str, int]:

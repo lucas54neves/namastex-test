@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline.env import env_flag
+from pipeline.runtime.env import env_flag
 
 
 def get_llm_advice(context: dict[str, Any], compiled_plan: dict[str, Any]) -> dict[str, Any]:

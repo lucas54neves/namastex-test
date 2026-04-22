@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from pipeline.io import read_json, write_json
+from pipeline.io.parquet_io import read_json, write_json
 
 
 @dataclass(frozen=True)

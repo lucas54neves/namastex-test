@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pipeline.compiler import get_default_compiled_plan
-from pipeline.llm_advisor import get_llm_advice
+from pipeline.agent.llm_advisor import get_llm_advice
+from pipeline.orchestration.compiler import get_default_compiled_plan
 
 
 def test_llm_advice_defaults_to_disabled() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from pipeline.config import PipelinePaths
-from pipeline.io import read_json, write_json
+from pipeline.io.parquet_io import read_json, write_json
 
 APPROVAL_STATUS_APPROVED = "approved"
 APPROVAL_STATUS_REJECTED = "rejected"

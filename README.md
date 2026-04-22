@@ -34,26 +34,38 @@ O pipeline responde a quatro perguntas centrais do teste:
 
 ## Arquitetura
 
+O codigo agora esta organizado por responsabilidade tecnica. `agent/` concentra diagnostico, alertas, aprovacao e playbooks; `orchestration/` concentra compilacao da spec, jobs publicos e execucao do ciclo; `runtime/` concentra ambiente, spec, estado e runtime opcional de providers; `quality/` concentra regras de publicacao, validacao e quarentena; `transforms/` separa carga Bronze, derivacao Silver, consolidacao Gold e enrichment semantico por conversa; `io/` concentra persistencia parquet/json.
+
 ```text
 src/pipeline/
-  approval.py
-  agent.py
-  alerts.py
-  compiler.py
-  conversation_enrichment.py
   config.py
-  io.py
-  jobs.py
-  llm_advisor.py
-  operator.py
-  planner.py
-  playbooks.py
-  publication.py
-  quality.py
-  quarantine.py
-  spec.py
-  state.py
-  transforms.py
+  agent/
+    agent.py
+    alerts.py
+    approval.py
+    llm_advisor.py
+    planner.py
+    playbooks.py
+  io/
+    parquet_io.py
+  orchestration/
+    compiler.py
+    jobs.py
+    operator.py
+  quality/
+    publication.py
+    quality.py
+    quarantine.py
+  runtime/
+    env.py
+    llm_runtime.py
+    spec.py
+    state.py
+  transforms/
+    bronze.py
+    conversation_enrichment.py
+    gold.py
+    silver.py
 
 scripts/
   profile_bronze.py
@@ -87,13 +99,13 @@ state/
 
 | Requisito do teste | Evidencia principal | Implementacao |
 |---|---|---|
-| Pipeline em Python | scripts de execucao e modulos em `src/pipeline/` | `scripts/run_pipeline.py`, `scripts/run_pipeline_daemon.py`, `src/pipeline/jobs.py` |
+| Pipeline em Python | scripts de execucao e modulos em `src/pipeline/` | `scripts/run_pipeline.py`, `scripts/run_pipeline_daemon.py`, `src/pipeline/orchestration/jobs.py` |
 | Bronze, Silver e Gold | artefatos parquet distintos por camada | `data/bronze/conversations.parquet`, `data/silver/silver_leads.parquet`, `data/silver/silver_messages.parquet`, `data/silver/silver_conversations_llm.parquet`, `data/gold/conversations_gold.parquet` |
-| Atualizacao automatica da Gold | reexecucao por fingerprint e modo continuo com polling | `src/pipeline/state.py`, `src/pipeline/operator.py`, `scripts/run_pipeline_daemon.py` |
-| Silver organizada por lead | tabela principal com uma linha por `lead_key` e tabela auxiliar de rastreabilidade | `src/pipeline/transforms.py`, `src/pipeline/publication.py`, `tests/test_jobs.py` |
-| Gold analitica util | agregacao por lead com segmentacoes reproduziveis | `src/pipeline/transforms.py`, `src/pipeline/quality.py` |
-| Protecao de dados sensiveis | policy de publicacao sem PII e checks anti-vazamento | `src/pipeline/publication.py`, `src/pipeline/quality.py`, `tests/test_quality.py` |
-| Agente operacional | planejamento, diagnostico, playbooks seguros, fallback e aprovacao humana para mudancas estruturais | `src/pipeline/planner.py`, `src/pipeline/agent.py`, `src/pipeline/approval.py`, `src/pipeline/operator.py` |
+| Atualizacao automatica da Gold | reexecucao por fingerprint e modo continuo com polling | `src/pipeline/runtime/state.py`, `src/pipeline/orchestration/operator.py`, `scripts/run_pipeline_daemon.py` |
+| Silver organizada por lead | tabela principal com uma linha por `lead_key` e tabela auxiliar de rastreabilidade | `src/pipeline/transforms/silver.py`, `src/pipeline/quality/publication.py`, `tests/test_jobs.py` |
+| Gold analitica util | agregacao por lead com segmentacoes reproduziveis | `src/pipeline/transforms/gold.py`, `src/pipeline/quality/quality.py` |
+| Protecao de dados sensiveis | policy de publicacao sem PII e checks anti-vazamento | `src/pipeline/quality/publication.py`, `src/pipeline/quality/quality.py`, `tests/test_quality.py` |
+| Agente operacional | planejamento, diagnostico, playbooks seguros, fallback e aprovacao humana para mudancas estruturais | `src/pipeline/agent/planner.py`, `src/pipeline/agent/agent.py`, `src/pipeline/agent/approval.py`, `src/pipeline/orchestration/operator.py` |
 
 ## Suite de aderencia
 
@@ -345,7 +357,7 @@ Exemplos de grouped analysis habilitados diretamente pela `Gold`:
 Observacoes sobre enrichment semantico:
 
 - o enrichment por conversa e opcional e fica fora do caminho de controle operacional do agente
-- quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1`, o pipeline monta um runtime dedicado em `src/pipeline/llm_runtime.py` para executar OpenAI como provider primario e Anthropic como fallback por conversa
+- quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1`, o pipeline monta um runtime dedicado em `src/pipeline/runtime/llm_runtime.py` para executar OpenAI como provider primario e Anthropic como fallback por conversa
 - o runtime registra `provider_name`, `provider_attempt_count` e `provider_error_summary` para auditoria sem expor payload cru nem credenciais
 - sem credenciais, com erro de provider ou com output invalido fora do vocabulario controlado, o pipeline persiste fallback deterministico e continua a publicacao
 - o cache evita recomputar conversas quando `llm_input_hash`, `prompt_version` e a identidade efetiva de modelos do runtime (`llm_model`) nao mudam
@@ -380,14 +392,14 @@ Dados que nao sao publicados em artefatos `Silver` e `Gold`:
 O pipeline e dirigido por spec:
 
 - `config/pipeline_spec.json` descreve colunas obrigatorias, deduplicacao, validacoes, segmentacoes e playbooks seguros
-- `src/pipeline/compiler.py` compila a spec para um plano executavel
-- `src/pipeline/planner.py` inspeciona a Bronze e propoe evolucoes estruturadas da spec em modo recomendacao por padrao
-- `src/pipeline/approval.py` controla aprovacao humana explicita para qualquer aplicacao estrutural na spec
-- `src/pipeline/operator.py` executa o ciclo operacional completo
-- `src/pipeline/agent.py` diagnostica falhas de validacao e escolhe playbooks seguros
-- `src/pipeline/llm_advisor.py` existe apenas como interface opcional do agente operacional; ele nao participa do caminho principal e pode estar desabilitado sem afetar a execucao
-- `src/pipeline/conversation_enrichment.py` monta payloads sanitizados por conversa, controla cache por hash, integra o runtime de providers, valida outputs estruturados e persiste fallback seguro
-- `src/pipeline/llm_runtime.py` concentra resolucao de configuracao, roteamento OpenAI -> Anthropic, metadata de tentativas e integracao opcional com LangChain/LangGraph
+- `src/pipeline/orchestration/compiler.py` compila a spec para um plano executavel
+- `src/pipeline/agent/planner.py` inspeciona a Bronze e propoe evolucoes estruturadas da spec em modo recomendacao por padrao
+- `src/pipeline/agent/approval.py` controla aprovacao humana explicita para qualquer aplicacao estrutural na spec
+- `src/pipeline/orchestration/operator.py` executa o ciclo operacional completo
+- `src/pipeline/agent/agent.py` diagnostica falhas de validacao e escolhe playbooks seguros
+- `src/pipeline/agent/llm_advisor.py` existe apenas como interface opcional do agente operacional; ele nao participa do caminho principal e pode estar desabilitado sem afetar a execucao
+- `src/pipeline/transforms/conversation_enrichment.py` monta payloads sanitizados por conversa, controla cache por hash, integra o runtime de providers, valida outputs estruturados e persiste fallback seguro
+- `src/pipeline/runtime/llm_runtime.py` concentra resolucao de configuracao, roteamento OpenAI -> Anthropic, metadata de tentativas e integracao opcional com LangChain/LangGraph
 
 Checks atuais de validacao:
 

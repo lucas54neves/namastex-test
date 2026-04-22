@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pipeline.approval import (
+from pipeline.agent.approval import (
     APPROVAL_STATUS_REJECTED,
     approve_proposal,
     get_proposal_approval_status,

@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from pipeline.io import write_json, write_parquet
+from pipeline.io.parquet_io import write_json, write_parquet
 
 
 def _valid_metadata(value: object) -> bool:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pipeline.alerts import build_alert_event, handle_alerting
+from pipeline.agent.alerts import build_alert_event, handle_alerting
 
 
 def _run_record(

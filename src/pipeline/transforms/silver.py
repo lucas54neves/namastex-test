@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pandas as pd
 
-from pipeline.compiler import get_default_compiled_plan
+from pipeline.orchestration.compiler import get_default_compiled_plan
 
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 PHONE_PATTERN = re.compile(
@@ -987,7 +987,7 @@ def build_gold(
     compiled_plan: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     if silver_conversations_llm is not None:
-        from pipeline.conversation_enrichment import consolidate_gold_semantics
+        from pipeline.transforms.conversation_enrichment import consolidate_gold_semantics
 
     ordered_messages = silver_messages.sort_values(
         ["lead_key", "timestamp", "conversation_id", "message_id"]

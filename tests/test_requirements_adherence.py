@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from pipeline.config import build_paths
-from pipeline.jobs import run_pipeline
+from pipeline.orchestration.jobs import run_pipeline
 
 
 def _bronze_rows() -> list[dict[str, object]]:
@@ -196,7 +196,7 @@ def test_adherence_simulated_failure_generates_alert_and_diagnosis(
     first = run_pipeline(paths, force=True)
     assert first.status == "success"
 
-    import pipeline.operator as operator_module
+    import pipeline.orchestration.operator as operator_module
 
     def explode(
         _silver: pd.DataFrame,

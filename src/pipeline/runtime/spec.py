@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pipeline.io import write_json
+from pipeline.io.parquet_io import write_json
 
 DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
     "version": 1,

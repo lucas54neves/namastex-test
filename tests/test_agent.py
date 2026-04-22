@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from pipeline.agent import (
+from pipeline.agent.agent import (
     attempt_auto_remediation,
     diagnose_exception,
     diagnose_validation_failures,
 )
-from pipeline.compiler import get_default_compiled_plan
-from pipeline.transforms import build_gold, build_silver, build_silver_leads
+from pipeline.orchestration.compiler import get_default_compiled_plan
+from pipeline.transforms.gold import build_gold
+from pipeline.transforms.silver import build_silver, build_silver_leads
 
 
 def _sample_bronze_frame() -> pd.DataFrame:

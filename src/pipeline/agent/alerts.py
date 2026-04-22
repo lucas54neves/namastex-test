@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib import error, request
 
-from pipeline.io import read_json, write_json
+from pipeline.io.parquet_io import read_json, write_json
 
 ALERTABLE_AGENT_STATUSES = {
     "degraded_validation_failed",

@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from pipeline.spec import default_pipeline_spec, validate_pipeline_spec
+from pipeline.runtime.spec import default_pipeline_spec, validate_pipeline_spec
 
 
 def compile_pipeline_spec(spec: dict[str, Any]) -> dict[str, Any]:

@@ -9,7 +9,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from pipeline.config import build_paths  # noqa: E402
-from pipeline.jobs import build_monitor_snapshot  # noqa: E402
+from pipeline.orchestration.jobs import build_monitor_snapshot  # noqa: E402
 
 
 def main() -> None:

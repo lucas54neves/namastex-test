@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 from typing import Any, TypedDict, cast
 
-from pipeline.env import env_flag
+from pipeline.runtime.env import env_flag
 
 try:
     from langgraph.graph import END, START, StateGraph

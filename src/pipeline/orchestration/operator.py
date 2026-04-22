@@ -5,19 +5,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from pipeline.agent import (
+from pipeline.agent.agent import (
     attempt_auto_remediation,
     diagnose_exception,
     diagnose_validation_failures,
 )
-from pipeline.alerts import handle_alerting
-from pipeline.compiler import compile_pipeline_spec
+from pipeline.agent.alerts import handle_alerting
+from pipeline.agent.planner import plan_pipeline_spec
 from pipeline.config import PipelinePaths, ensure_directories
-from pipeline.conversation_enrichment import build_conversation_enrichment
-from pipeline.io import read_json, read_parquet, write_json, write_parquet
-from pipeline.planner import plan_pipeline_spec
-from pipeline.publication import sanitize_for_publication
-from pipeline.quality import (
+from pipeline.io.parquet_io import read_json, read_parquet, write_json, write_parquet
+from pipeline.orchestration.compiler import compile_pipeline_spec
+from pipeline.quality.publication import sanitize_for_publication
+from pipeline.quality.quality import (
     summarize_validation_results,
     validate_bronze,
     validate_cross_layer_consistency,
@@ -26,15 +25,18 @@ from pipeline.quality import (
     validate_silver_conversations_llm,
     validate_silver_messages,
 )
-from pipeline.quarantine import quarantine_bronze_records
-from pipeline.spec import ensure_pipeline_spec
-from pipeline.state import (
+from pipeline.quality.quarantine import quarantine_bronze_records
+from pipeline.runtime.spec import ensure_pipeline_spec
+from pipeline.runtime.state import (
     build_source_fingerprint,
     has_source_changed,
     load_pipeline_state,
     save_pipeline_state,
 )
-from pipeline.transforms import build_gold, build_silver, build_silver_leads, load_bronze_frame
+from pipeline.transforms.bronze import load_bronze_frame
+from pipeline.transforms.conversation_enrichment import build_conversation_enrichment
+from pipeline.transforms.gold import build_gold
+from pipeline.transforms.silver import build_silver, build_silver_leads
 
 
 @dataclass(frozen=True)

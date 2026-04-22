@@ -9,17 +9,17 @@ from typing import Any
 
 import pandas as pd
 
-from pipeline.approval import (
+from pipeline.agent.approval import (
     APPROVAL_STATUS_APPROVED,
     APPROVAL_STATUS_PENDING,
     APPROVAL_STATUS_REJECTED,
     get_proposal_approval_status,
 )
-from pipeline.compiler import compile_pipeline_spec
+from pipeline.agent.llm_advisor import get_llm_advice
 from pipeline.config import PipelinePaths
-from pipeline.io import read_json, write_json
-from pipeline.llm_advisor import get_llm_advice
-from pipeline.spec import load_pipeline_spec, save_pipeline_spec
+from pipeline.io.parquet_io import read_json, write_json
+from pipeline.orchestration.compiler import compile_pipeline_spec
+from pipeline.runtime.spec import load_pipeline_spec, save_pipeline_spec
 
 PROPOSAL_FAMILY_SCHEMA_UPDATE = "schema_update"
 PROPOSAL_FAMILY_VALIDATION = "validation_enhancement"

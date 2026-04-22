@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from pipeline.publication import sanitize_for_publication
+from pipeline.quality.publication import sanitize_for_publication
 
 
 def test_sanitize_for_publication_drops_raw_and_identity_columns_from_silver() -> None:

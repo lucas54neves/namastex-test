@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline.compiler import get_default_compiled_plan
-from pipeline.conversation_enrichment import _validate_llm_response, normalize_llm_output
-from pipeline.llm_runtime import (
+from pipeline.orchestration.compiler import get_default_compiled_plan
+from pipeline.runtime.llm_runtime import (
     _build_prompt,
     resolve_runtime_config,
     run_conversation_enrichment_graph,
+)
+from pipeline.transforms.conversation_enrichment import (
+    _validate_llm_response,
+    normalize_llm_output,
 )
 
 
@@ -109,7 +112,7 @@ def test_run_conversation_enrichment_graph_falls_back_to_anthropic(monkeypatch) 
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
 
-    import pipeline.llm_runtime as llm_runtime
+    import pipeline.runtime.llm_runtime as llm_runtime
 
     def fake_openai(payload, config, compiled_plan):
         del payload
@@ -154,7 +157,7 @@ def test_run_conversation_enrichment_graph_accepts_normalized_openai_output(monk
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
 
-    import pipeline.llm_runtime as llm_runtime
+    import pipeline.runtime.llm_runtime as llm_runtime
 
     def fake_openai(payload, config, compiled_plan):
         del payload

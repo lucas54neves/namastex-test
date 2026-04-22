@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from pipeline.compiler import get_default_compiled_plan
-from pipeline.quarantine import quarantine_bronze_records
+from pipeline.orchestration.compiler import get_default_compiled_plan
+from pipeline.quality.quarantine import quarantine_bronze_records
 
 
 def test_quarantine_bronze_records_isolates_invalid_timestamp_and_metadata(tmp_path) -> None:

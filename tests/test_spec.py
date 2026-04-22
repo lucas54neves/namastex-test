@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pipeline.spec import default_pipeline_spec, validate_pipeline_spec
+from pipeline.runtime.spec import default_pipeline_spec, validate_pipeline_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 

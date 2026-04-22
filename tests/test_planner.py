@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from pipeline.approval import approve_proposal
+from pipeline.agent.approval import approve_proposal
+from pipeline.agent.planner import plan_pipeline_spec
 from pipeline.config import build_paths
-from pipeline.planner import plan_pipeline_spec
 
 
 def _write_bronze(root: Path, rows: list[dict[str, object]]) -> None:
