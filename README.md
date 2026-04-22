@@ -133,6 +133,7 @@ Baseline validado localmente:
 - o caminho minimo suportado para validacao do repositorio desabilita o enrichment LLM com `PIPELINE_ENABLE_LLM_ENRICHMENT=0`
 - esse modo nao depende de rede nem de credenciais externas e e o mesmo caminho coberto pelos testes de paridade de runtime
 - a execucao com providers habilitados continua opcional e deve ser tratada como modo de integracao, nao como requisito do baseline local
+- os scripts de runtime agora emitem logs operacionais no terminal durante a execucao via modulo padrao `logging`, sem criar arquivos `.log`; o resumo JSON final continua sendo impresso separadamente ao fim de cada execucao
 
 ## Camadas do pipeline
 
@@ -401,6 +402,8 @@ O pipeline e dirigido por spec:
 - `src/pipeline/transforms/conversation_enrichment.py` monta payloads sanitizados por conversa, controla cache por hash, integra o runtime de providers, valida outputs estruturados e persiste fallback seguro
 - `src/pipeline/runtime/llm_runtime.py` concentra resolucao de configuracao, roteamento OpenAI -> Anthropic, metadata de tentativas e integracao opcional com LangChain/LangGraph
 
+A exigencia de aprovacao humana para mudancas estruturais foi uma decisao arquitetural deliberada. O objetivo foi manter o pipeline auditavel, reproduzivel e seguro para um teste tecnico com contratos publicados, permitindo autonomia operacional apenas onde o risco e controlado e deixando evolucoes de schema, segmentacao e spec sob governanca explicita.
+
 Checks atuais de validacao:
 
 - Bronze:
@@ -450,7 +453,7 @@ Status operacionais observaveis nos relatorios:
 - `idle_no_source_change` no relatorio agencial quando nao ha mudanca na fonte
 - `auto_remediated`, `not_auto_remediable`, `manual_intervention_required` e `fallback_applied` no `latest_agent_report.json` para classificar o tratamento operacional
 
-Importante: o agente e deterministico e limitado ao escopo implementado no repositorio. Ele nao reescreve o codigo Python livremente, nao trata toda falha como auto-remediavel e nao executa evolucao estrutural autonoma sem aprovacao.
+Importante: o agente e deterministico e limitado ao escopo implementado no repositorio. Ele nao reescreve o codigo Python livremente, nao trata toda falha como auto-remediavel e nao executa evolucao estrutural autonoma sem aprovacao. Isso nao e uma restricao acidental: foi uma decisao arquitetural para separar remediacao operacional segura de mudanca estrutural com impacto de contrato.
 
 ## Execucao
 
@@ -555,7 +558,7 @@ Observacao: arquivos legados, como `data/silver/conversations_silver.parquet`, p
 - Persistencia sem PII crua
   Reduz o risco de exposicao e alinha documentacao e artefatos. O trade-off e que investigacao detalhada depende das versoes mascaradas e dos sinais derivados, nao de texto livre cru.
 - Agente deterministico e limitado
-  O comportamento e mais auditavel e seguro para o teste tecnico. O trade-off e menor flexibilidade do que um sistema autonomo irrestrito.
+  O comportamento e mais auditavel e seguro para o teste tecnico. O trade-off e menor flexibilidade do que um sistema autonomo irrestrito. A exigencia de aprovacao humana para mudancas estruturais foi mantida de forma intencional como parte dessa arquitetura.
 
 ## Limitacoes atuais
 
