@@ -137,7 +137,7 @@ Baseline validado localmente:
 - `data/silver/silver_messages.parquet`
   Artefato auxiliar por mensagem deduplicada para preservar a rastreabilidade `lead_key -> conversation_id -> message_id`.
 - `data/silver/silver_conversations_llm.parquet`
-  Artefato intermediario por `conversation_id`, com classificacoes semanticas estruturadas, metadata de inferencia, cache por hash de entrada e fallback deterministico quando o enrichment LLM esta desabilitado, indisponivel ou invalido.
+  Artefato intermediario por `conversation_id`, com classificacoes semanticas estruturadas, metadata de inferencia, cache por hash de entrada, normalizacao canonica de drift lexical do provider antes da validacao estrita e fallback deterministico quando o enrichment LLM esta desabilitado, indisponivel ou invalido.
 
 O runtime pode usar colunas cruas em memoria para deduplicacao, extracao e agregacao, mas os artefatos publicados removem colunas proibidas como:
 
@@ -231,6 +231,8 @@ O contrato de `silver_conversations_llm.parquet` inclui, entre outras:
 - `explanation_short`
 - `fallback_reason`
 - `validation_error`
+
+No caminho opcional de provider, o runtime aplica uma etapa deterministica de normalizacao antes da validacao estrita do vocabulario controlado. Isso permite aceitar drift lexical seguro, como `negative -> negativo`, `high -> forte` e `strong -> forte`, sem relaxar o contrato publicado nem aceitar termos ambiguos como `skeptical`.
 
 ### Gold
 

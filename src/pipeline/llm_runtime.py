@@ -128,12 +128,43 @@ def _provider_ready(config: RuntimeConfig, provider: str) -> str | None:
     return None
 
 
-def _build_prompt(payload: dict[str, Any]) -> str:
+def _allowed_values_text(compiled_plan: dict[str, Any]) -> str:
+    allowed_values = {
+        "sentiment_label": sorted(compiled_plan["gold_valid_conversation_sentiment_labels"]),
+        "sentiment_confidence_band": sorted(
+            compiled_plan["gold_valid_conversation_sentiment_supports"]
+        ),
+        "intent_stage": sorted(compiled_plan["gold_valid_intent_stages"]),
+        "persona_profile": sorted(compiled_plan["gold_valid_personas"]),
+        "audience_segment": sorted(compiled_plan["gold_valid_audiences"]),
+        "price_objection_intensity": sorted(
+            compiled_plan["gold_valid_price_objection_intensities"]
+        ),
+        "competitor_pressure_level": sorted(compiled_plan["gold_valid_competitor_pressure_levels"]),
+        "commercial_urgency_signal": sorted(compiled_plan["gold_valid_commercial_urgency_signals"]),
+        "recommended_next_action": sorted(
+            [
+                "acionar_fluxo_pos_sinistro",
+                "avancar_coleta_de_contexto",
+                "enviar_cotacao_objetiva",
+                "priorizar_contato_imediato",
+                "reforcar_diferenciais_e_retirar_objecao_preco",
+                "seguir_nutricao_basica",
+            ]
+        ),
+    }
+    return json.dumps(allowed_values, ensure_ascii=True, sort_keys=True)
+
+
+def _build_prompt(payload: dict[str, Any], compiled_plan: dict[str, Any]) -> str:
     return (
         "Return valid JSON only with these fields: "
         "sentiment_label, sentiment_confidence_band, intent_stage, persona_profile, "
         "audience_segment, price_objection_intensity, competitor_pressure_level, "
         "commercial_urgency_signal, recommended_next_action, explanation_short. "
+        "For every categorical field, you must choose exactly one value from this allowed set and "
+        "must not invent synonyms, English labels, or intermediate stages: "
+        f"{_allowed_values_text(compiled_plan)}. "
         "Keep explanation_short privacy-safe and under 280 characters. "
         f"Payload: {json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
     )
@@ -148,7 +179,11 @@ def _response_text(response: Any) -> str:
     return _safe_string(content)
 
 
-def _invoke_openai(payload: dict[str, Any], config: RuntimeConfig) -> dict[str, Any]:
+def _invoke_openai(
+    payload: dict[str, Any],
+    config: RuntimeConfig,
+    compiled_plan: dict[str, Any],
+) -> dict[str, Any]:
     if ChatOpenAI is None:
         raise RuntimeError("langchain_openai_unavailable")
     provider_cfg = config["providers"]["openai"]
@@ -156,11 +191,15 @@ def _invoke_openai(payload: dict[str, Any], config: RuntimeConfig) -> dict[str, 
         model=provider_cfg["model"],
         timeout=provider_cfg["timeout_seconds"],
         max_retries=provider_cfg["max_retries"],
-    ).invoke(_build_prompt(payload))
+    ).invoke(_build_prompt(payload, compiled_plan))
     return cast(dict[str, Any], json.loads(_response_text(response)))
 
 
-def _invoke_anthropic(payload: dict[str, Any], config: RuntimeConfig) -> dict[str, Any]:
+def _invoke_anthropic(
+    payload: dict[str, Any],
+    config: RuntimeConfig,
+    compiled_plan: dict[str, Any],
+) -> dict[str, Any]:
     if ChatAnthropic is None:
         raise RuntimeError("langchain_anthropic_unavailable")
     provider_cfg = config["providers"]["anthropic"]
@@ -168,11 +207,16 @@ def _invoke_anthropic(payload: dict[str, Any], config: RuntimeConfig) -> dict[st
         model=provider_cfg["model"],
         timeout=provider_cfg["timeout_seconds"],
         max_retries=provider_cfg["max_retries"],
-    ).invoke(_build_prompt(payload))
+    ).invoke(_build_prompt(payload, compiled_plan))
     return cast(dict[str, Any], json.loads(_response_text(response)))
 
 
-def _call_provider(provider: str, state: GraphState, config: RuntimeConfig) -> GraphState:
+def _call_provider(
+    provider: str,
+    state: GraphState,
+    config: RuntimeConfig,
+    compiled_plan: dict[str, Any],
+) -> GraphState:
     readiness_error = _provider_ready(config, provider)
     if readiness_error is not None:
         return {
@@ -186,7 +230,7 @@ def _call_provider(provider: str, state: GraphState, config: RuntimeConfig) -> G
 
     invoke = _invoke_openai if provider == "openai" else _invoke_anthropic
     try:
-        provider_result = invoke(state["payload"], config)
+        provider_result = invoke(state["payload"], config, compiled_plan)
     except Exception as exc:
         return {
             **state,
@@ -262,10 +306,10 @@ def _run_linear_graph(
     validator: Callable[[dict[str, Any], dict[str, Any]], str | None] | None,
     compiled_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    state = _call_provider("openai", initial_state, config)
+    state = _call_provider("openai", initial_state, config, compiled_plan)
     state = _validate_provider_output(state, config, validator, compiled_plan)
     if state["final_status"] != "success" and state["pending_provider"] == "anthropic":
-        state = _call_provider("anthropic", state, config)
+        state = _call_provider("anthropic", state, config, compiled_plan)
         state = _validate_provider_output(state, config, validator, compiled_plan)
     if state["final_status"] is None:
         state["final_status"] = "fallback"
@@ -282,13 +326,13 @@ def _run_langgraph(
         return _run_linear_graph(initial_state, config, validator, compiled_plan)
 
     def call_openai(state: GraphState) -> GraphState:
-        return _call_provider("openai", state, config)
+        return _call_provider("openai", state, config, compiled_plan)
 
     def validate_openai(state: GraphState) -> GraphState:
         return _validate_provider_output(state, config, validator, compiled_plan)
 
     def call_anthropic(state: GraphState) -> GraphState:
-        return _call_provider("anthropic", state, config)
+        return _call_provider("anthropic", state, config, compiled_plan)
 
     def validate_anthropic(state: GraphState) -> GraphState:
         return _validate_provider_output(state, config, validator, compiled_plan)

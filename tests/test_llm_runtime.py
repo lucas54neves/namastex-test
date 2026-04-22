@@ -3,8 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from pipeline.compiler import get_default_compiled_plan
-from pipeline.conversation_enrichment import _validate_llm_response
-from pipeline.llm_runtime import resolve_runtime_config, run_conversation_enrichment_graph
+from pipeline.conversation_enrichment import _validate_llm_response, normalize_llm_output
+from pipeline.llm_runtime import (
+    _build_prompt,
+    resolve_runtime_config,
+    run_conversation_enrichment_graph,
+)
 
 
 def _payload() -> dict[str, Any]:
@@ -64,6 +68,42 @@ def test_resolve_runtime_config_supports_provider_structure(monkeypatch) -> None
     assert config["providers"]["anthropic"]["model"] == "claude-sonnet"
 
 
+def test_normalize_llm_output_maps_supported_synonyms() -> None:
+    normalized, decisions = normalize_llm_output(
+        {
+            **_valid_output(),
+            "sentiment_label": " Negative ",
+            "sentiment_confidence_band": "HIGH",
+        },
+        _compiled_plan(),
+    )
+
+    assert normalized["sentiment_label"] == "negativo"
+    assert normalized["sentiment_confidence_band"] == "forte"
+    assert decisions == [
+        {"field": "sentiment_label", "from": "Negative", "to": "negativo"},
+        {"field": "sentiment_confidence_band", "from": "HIGH", "to": "forte"},
+    ]
+
+
+def test_validate_llm_response_keeps_ambiguous_values_invalid() -> None:
+    payload = {**_valid_output(), "sentiment_label": "skeptical"}
+
+    assert _validate_llm_response(payload, _compiled_plan()) == "invalid_sentiment_label:skeptical"
+
+
+def test_build_prompt_includes_allowed_vocabularies() -> None:
+    prompt = _build_prompt(_payload(), _compiled_plan())
+    expected_intent_vocab = (
+        '"intent_stage": ["cotacao_ativa", "descoberta_inicial", '
+        '"pesquisa_mercado", "pos_sinistro"]'
+    )
+
+    assert expected_intent_vocab in prompt
+    assert '"sentiment_confidence_band": ["forte", "fraco", "moderado", "sem_evidencia"]' in prompt
+    assert "must not invent synonyms" in prompt
+
+
 def test_run_conversation_enrichment_graph_falls_back_to_anthropic(monkeypatch) -> None:
     monkeypatch.setenv("PIPELINE_ENABLE_LLM_ENRICHMENT", "1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
@@ -71,14 +111,16 @@ def test_run_conversation_enrichment_graph_falls_back_to_anthropic(monkeypatch) 
 
     import pipeline.llm_runtime as llm_runtime
 
-    def fake_openai(payload, config):
+    def fake_openai(payload, config, compiled_plan):
         del payload
         del config
+        del compiled_plan
         return {"intent_stage": ""}
 
-    def fake_anthropic(payload, config):
+    def fake_anthropic(payload, config, compiled_plan):
         del payload
         del config
+        del compiled_plan
         return _valid_output()
 
     monkeypatch.setattr(llm_runtime, "_invoke_openai", fake_openai)
@@ -105,6 +147,45 @@ def test_run_conversation_enrichment_graph_falls_back_to_anthropic(monkeypatch) 
             ),
         }
     ]
+
+
+def test_run_conversation_enrichment_graph_accepts_normalized_openai_output(monkeypatch) -> None:
+    monkeypatch.setenv("PIPELINE_ENABLE_LLM_ENRICHMENT", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+
+    import pipeline.llm_runtime as llm_runtime
+
+    def fake_openai(payload, config, compiled_plan):
+        del payload
+        del config
+        del compiled_plan
+        return {
+            **_valid_output(),
+            "sentiment_label": "negative",
+            "sentiment_confidence_band": "high",
+            "intent_stage": "quote_request",
+        }
+
+    def fake_anthropic(payload, config, compiled_plan):
+        del payload
+        del config
+        del compiled_plan
+        raise AssertionError("anthropic should not be called when normalization succeeds")
+
+    monkeypatch.setattr(llm_runtime, "_invoke_openai", fake_openai)
+    monkeypatch.setattr(llm_runtime, "_invoke_anthropic", fake_anthropic)
+
+    result = run_conversation_enrichment_graph(
+        _payload(),
+        _compiled_plan(),
+        validator=_validate_llm_response,
+    )
+
+    assert result["status"] == "success"
+    assert result["provider_name"] == "openai"
+    assert result["attempted_providers"] == ["openai"]
+    assert result["provider_errors"] == []
 
 
 def test_run_conversation_enrichment_graph_returns_fallback_when_credentials_missing(

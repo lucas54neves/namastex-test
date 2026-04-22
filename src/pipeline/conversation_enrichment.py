@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -65,6 +67,35 @@ SEVERITY_ORDER = {
     "forte": 3,
     "alta": 3,
 }
+LLM_NORMALIZABLE_FIELDS = (
+    "sentiment_label",
+    "sentiment_confidence_band",
+    "intent_stage",
+    "persona_profile",
+    "audience_segment",
+    "price_objection_intensity",
+    "competitor_pressure_level",
+    "commercial_urgency_signal",
+    "recommended_next_action",
+)
+LLM_FIELD_SYNONYMS = {
+    "sentiment_label": {
+        "negative": "negativo",
+        "neutral": "neutro",
+        "positive": "positivo",
+    },
+    "sentiment_confidence_band": {
+        "low": "fraco",
+        "moderate": "moderado",
+        "weak": "fraco",
+        "medium": "moderado",
+        "high": "forte",
+        "strong": "forte",
+    },
+    "intent_stage": {
+        "quote_request": "cotacao_ativa",
+    },
+}
 
 
 def _utc_now_iso() -> str:
@@ -74,6 +105,41 @@ def _utc_now_iso() -> str:
 def _stable_input_hash(payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _normalize_matching_token(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", _safe_string(value).strip().lower())
+    without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
+    stable_separators = re.sub(r"[\W_]+", "_", without_accents)
+    collapsed = re.sub(r"_+", "_", stable_separators)
+    return collapsed.strip("_")
+
+
+def normalize_llm_output(
+    response: dict[str, Any],
+    compiled_plan: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    del compiled_plan
+    normalized = dict(response)
+    decisions: list[dict[str, str]] = []
+
+    for field in LLM_NORMALIZABLE_FIELDS:
+        if field not in normalized:
+            continue
+        raw_value = _safe_string(normalized.get(field)).strip()
+        if not raw_value:
+            normalized[field] = raw_value
+            continue
+
+        canonical_value = LLM_FIELD_SYNONYMS.get(field, {}).get(
+            _normalize_matching_token(raw_value),
+            raw_value,
+        )
+        normalized[field] = canonical_value
+        if canonical_value != raw_value:
+            decisions.append({"field": field, "from": raw_value, "to": canonical_value})
+
+    return normalized, decisions
 
 
 def _llm_enabled(compiled_plan: dict[str, Any]) -> bool:
@@ -331,6 +397,7 @@ def _validate_llm_response(
     response: dict[str, Any],
     compiled_plan: dict[str, Any],
 ) -> str | None:
+    response, _ = normalize_llm_output(response, compiled_plan)
     gold_cfg = compiled_plan
     missing_fields = [field for field in LLM_OUTPUT_REQUIRED_FIELDS if field not in response]
     if missing_fields:
@@ -530,6 +597,7 @@ def build_conversation_enrichment(
             )
             continue
 
+        output_payload, _ = normalize_llm_output(output_payload, compiled_plan)
         validation_error = _validate_llm_response(output_payload, compiled_plan)
         if validation_error is not None:
             rows.append(
