@@ -234,6 +234,8 @@ O contrato de `silver_conversations_llm.parquet` inclui, entre outras:
 
 No caminho opcional de provider, o runtime aplica uma etapa deterministica de normalizacao antes da validacao estrita do vocabulario controlado. Isso permite aceitar drift lexical seguro, como `negative -> negativo`, `high -> forte` e `strong -> forte`, sem relaxar o contrato publicado nem aceitar termos ambiguos como `skeptical`.
 
+Essa escolha nao foi feita apenas no prompt do provider. O prompt agora tambem envia os vocabularios aceitos e instrui a LLM a nao inventar labels, mas isso sozinho nao e suficiente como contrato de runtime. Providers ainda podem retornar sinonimos, labels em ingles ou estagios intermediarios mesmo quando a instrucao e clara. Por isso a arquitetura usa tres camadas complementares: o prompt reduz drift na origem, a normalizacao corrige apenas drift lexical seguro de forma deterministica e testavel, e a validacao estrita continua rejeitando qualquer valor ambiguo ou fora do contrato final.
+
 ### Gold
 
 `Gold` e a camada analitica principal publicada em `data/gold/conversations_gold.parquet`. Cada linha representa um unico `lead_key` consolidando todas as conversas conhecidas do lead.
