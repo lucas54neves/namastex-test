@@ -567,6 +567,8 @@ def test_consolidate_gold_semantics_respects_dominance_and_recency() -> None:
                 "commercial_urgency_signal": "nenhuma",
                 "sentiment_label": "neutro",
                 "sentiment_confidence_band": "fraco",
+                "provider_name": None,
+                "inference_status": "disabled",
             },
             {
                 "conversation_id": "conv_2",
@@ -580,6 +582,8 @@ def test_consolidate_gold_semantics_respects_dominance_and_recency() -> None:
                 "commercial_urgency_signal": "moderada",
                 "sentiment_label": "neutro",
                 "sentiment_confidence_band": "moderado",
+                "provider_name": "openai",
+                "inference_status": "success",
             },
         ]
     )
@@ -588,9 +592,88 @@ def test_consolidate_gold_semantics_respects_dominance_and_recency() -> None:
 
     assert consolidated.iloc[0]["persona_profile"] == "cotador_comparador"
     assert consolidated.iloc[0]["audience_segment"] == "oferta_competitiva"
-    assert consolidated.iloc[0]["price_objection_intensity"] == "forte"
     assert consolidated.iloc[0]["conversation_sentiment_label"] == "neutro"
     assert consolidated.iloc[0]["conversation_sentiment_support"] == "moderado"
+    assert consolidated.iloc[0]["conversation_sentiment_source_family"] == "mixed"
+
+
+def test_consolidate_gold_semantics_keeps_audience_under_high_competitor_pressure() -> None:
+    enrichment = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": "lead_1",
+                "conversation_last_message_at": pd.Timestamp("2026-02-03 10:00:00"),
+                "intent_stage": "pesquisa_mercado",
+                "persona_profile": "lead_frio",
+                "audience_segment": "nutricao_basica",
+                "price_objection_intensity": "forte",
+                "competitor_pressure_level": "alta",
+                "commercial_urgency_signal": "moderada",
+                "sentiment_label": "neutro",
+                "sentiment_confidence_band": "moderado",
+                "provider_name": None,
+                "inference_status": "disabled",
+            }
+        ]
+    )
+
+    consolidated = consolidate_gold_semantics(enrichment)
+
+    assert consolidated.iloc[0]["persona_profile"] == "lead_frio"
+    assert consolidated.iloc[0]["audience_segment"] == "nutricao_basica"
+
+
+def test_build_gold_falls_back_persona_audience_pair_when_llm_pair_is_incomplete() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511981111111",
+                "sender_name": "Carlos",
+                "message_type": "text",
+                "message_body": "quero saber mais",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"device":"iphone","city":"Campinas","state":"SP"}',
+            }
+        ]
+    )
+
+    silver_messages = build_silver(bronze)
+    silver_leads = build_silver_leads(silver_messages)
+    silver_conversations_llm = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": silver_leads.iloc[0]["lead_key"],
+                "conversation_last_message_at": pd.Timestamp("2026-02-01 10:00:00"),
+                "intent_stage": "descoberta_inicial",
+                "persona_profile": "lead_frio",
+                "audience_segment": "",
+                "price_objection_intensity": "nenhuma",
+                "competitor_pressure_level": "alta",
+                "commercial_urgency_signal": "nenhuma",
+                "sentiment_label": "sem_evidencia",
+                "sentiment_confidence_band": "sem_evidencia",
+                "provider_name": "openai",
+                "inference_status": "success",
+            }
+        ]
+    )
+
+    gold = build_gold(silver_leads, silver_messages, silver_conversations_llm)
+
+    assert gold.iloc[0]["persona_profile"] == "lead_frio"
+    assert gold.iloc[0]["audience_segment"] == "nutricao_basica"
+    assert gold.iloc[0]["persona_profile_source_family"] == "deterministic_fallback"
+    assert gold.iloc[0]["audience_segment_source_family"] == "deterministic_fallback"
 
 
 def test_build_gold_derives_positive_sentiment_from_inbound_cues() -> None:
@@ -767,3 +850,121 @@ def test_build_gold_keeps_provider_null_and_sem_evidencia_without_supporting_dat
     assert gold.iloc[0]["competitor_pressure_level"] == "nenhuma"
     assert gold.iloc[0]["conversation_sentiment_label"] == "sem_evidencia"
     assert gold.iloc[0]["conversation_sentiment_support"] == "sem_evidencia"
+
+
+def test_build_gold_ignores_outbound_only_price_objection_and_urgency_language() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "outbound",
+                "sender_phone": "+5511991111111",
+                "sender_name": "Diego",
+                "message_type": "text",
+                "message_body": "posso montar a cotacao e preciso fechar hoje",
+                "status": "delivered",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"city":"Sao Paulo","state":"SP"}',
+            },
+            {
+                "message_id": "m2",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511982222222",
+                "sender_name": "Ana",
+                "message_type": "text",
+                "message_body": "obrigado",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":60}',
+            },
+        ]
+    )
+
+    silver_messages = build_silver(bronze)
+    silver_leads = build_silver_leads(silver_messages)
+    gold = build_gold(silver_leads, silver_messages)
+
+    assert bool(silver_messages.iloc[0]["price_objection_signal_outbound"]) is True
+    assert silver_messages["price_objection_signal_inbound"].sum() == 0
+    assert silver_messages["urgency_strength_inbound"].max() == 0
+    assert gold.iloc[0]["price_objection_intensity"] == "nenhuma"
+    assert gold.iloc[0]["commercial_urgency_signal"] == "nenhuma"
+
+
+def test_build_gold_keeps_commercial_severity_deterministic_when_llm_disagrees() -> None:
+    bronze = pd.DataFrame(
+        [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "direction": "outbound",
+                "sender_phone": "+5511991111111",
+                "sender_name": "Diego",
+                "message_type": "text",
+                "message_body": "podemos seguir com a cotacao?",
+                "status": "delivered",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"city":"Sao Paulo","state":"SP"}',
+            },
+            {
+                "message_id": "m2",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:05:00"),
+                "direction": "inbound",
+                "sender_phone": "+5511982222222",
+                "sender_name": "Ana",
+                "message_type": "text",
+                "message_body": "quero analisar e te respondo depois",
+                "status": "read",
+                "channel": "whatsapp",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "conversation_outcome": "em_negociacao",
+                "metadata": '{"city":"Sao Paulo","state":"SP","response_time_sec":300}',
+            },
+        ]
+    )
+
+    silver_messages = build_silver(bronze)
+    silver_leads = build_silver_leads(silver_messages)
+    silver_conversations_llm = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": silver_leads.iloc[0]["lead_key"],
+                "conversation_last_message_at": pd.Timestamp("2026-02-01 10:05:00"),
+                "intent_stage": "pesquisa_mercado",
+                "persona_profile": "cotador_comparador",
+                "audience_segment": "oferta_competitiva",
+                "price_objection_intensity": "forte",
+                "competitor_pressure_level": "alta",
+                "commercial_urgency_signal": "alta",
+                "sentiment_label": "neutro",
+                "sentiment_confidence_band": "moderado",
+                "provider_name": "openai",
+                "inference_status": "success",
+            }
+        ]
+    )
+
+    gold = build_gold(silver_leads, silver_messages, silver_conversations_llm)
+
+    assert gold.iloc[0]["intent_stage"] == "pesquisa_mercado"
+    assert gold.iloc[0]["intent_stage_source_family"] == "llm_provider"
+    assert gold.iloc[0]["price_objection_intensity"] == "nenhuma"
+    assert gold.iloc[0]["commercial_urgency_signal"] == "nenhuma"
+    assert gold.iloc[0]["competitor_pressure_level"] == "nenhuma"

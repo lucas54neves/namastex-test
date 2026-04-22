@@ -193,6 +193,19 @@ def _safe_int(value: object) -> int:
     return int(converted)
 
 
+def _canonical_audience_for_persona(persona_profile: object) -> str:
+    persona = _safe_string(persona_profile).strip()
+    if persona == "cliente_pos_sinistro":
+        return "retencao_pos_sinistro"
+    if persona == "cotador_comparador":
+        return "oferta_competitiva"
+    if persona == "lead_engajado_com_dados":
+        return "close_comercial"
+    if persona == "lead_frio":
+        return "nutricao_basica"
+    return ""
+
+
 def _stable_hash_token(*parts: object, prefix: str) -> str:
     normalized_parts = [_normalize_for_match(_safe_string(part)) for part in parts]
     joined = "|".join(part for part in normalized_parts if part)
@@ -233,6 +246,63 @@ def _last_non_null(values: pd.Series) -> object:
 
 def _max_or_false(values: pd.Series) -> bool:
     return bool(values.fillna(False).astype(bool).max())
+
+
+def _directional_bool_signal(signal: pd.Series, direction: pd.Series, expected: str) -> pd.Series:
+    return signal.fillna(False).astype(bool) & direction.eq(expected)
+
+
+def _directional_int_signal(signal: pd.Series, direction: pd.Series, expected: str) -> pd.Series:
+    values = pd.to_numeric(signal, errors="coerce").fillna(0).astype(int)
+    return values.where(direction.eq(expected), 0)
+
+
+def _directional_value_signal(signal: pd.Series, direction: pd.Series, expected: str) -> pd.Series:
+    return signal.where(direction.eq(expected))
+
+
+def _bool_series_or_default(
+    frame: pd.DataFrame,
+    column: str,
+    fallback_column: str | None = None,
+) -> pd.Series:
+    if column in frame.columns:
+        return frame[column].fillna(False).astype(bool)
+    if fallback_column and fallback_column in frame.columns:
+        fallback = frame[fallback_column].fillna(False).astype(bool)
+        if "direction" not in frame.columns:
+            return fallback
+        return fallback & frame["direction"].eq("inbound")
+    return pd.Series(False, index=frame.index, dtype=bool)
+
+
+def _int_series_or_default(
+    frame: pd.DataFrame,
+    column: str,
+    fallback_column: str | None = None,
+) -> pd.Series:
+    if column in frame.columns:
+        return pd.to_numeric(frame[column], errors="coerce").fillna(0).astype(int)
+    if fallback_column and fallback_column in frame.columns:
+        fallback = pd.to_numeric(frame[fallback_column], errors="coerce").fillna(0).astype(int)
+        if "direction" not in frame.columns:
+            return fallback
+        return fallback.where(frame["direction"].eq("inbound"), 0)
+    return pd.Series(0, index=frame.index, dtype=int)
+
+
+def _value_series_or_default(
+    frame: pd.DataFrame,
+    column: str,
+    fallback_column: str | None = None,
+) -> pd.Series:
+    if column in frame.columns:
+        return frame[column]
+    if fallback_column and fallback_column in frame.columns:
+        if "direction" not in frame.columns:
+            return frame[fallback_column]
+        return frame[fallback_column].where(frame["direction"].eq("inbound"))
+    return pd.Series([None] * len(frame), index=frame.index, dtype=object)
 
 
 def detect_sensitive_classes(value: object, classes: Iterable[str] | None = None) -> set[str]:
@@ -648,6 +718,7 @@ def add_lead_context(df: pd.DataFrame) -> pd.DataFrame:
 def add_message_signals(df: pd.DataFrame) -> pd.DataFrame:
     message_body = df["message_body"].fillna("")
     normalized_name = df["sender_name"].fillna("").map(_normalize_for_match)
+    direction = df["direction"].fillna("")
 
     enriched = df.copy()
     enriched["sender_name_normalized"] = normalized_name
@@ -685,6 +756,48 @@ def add_message_signals(df: pd.DataFrame) -> pd.DataFrame:
     )
     enriched["mentions_competitor"] = enriched["competitor_mentioned"].notna()
     enriched["mentions_sinistro"] = enriched["sinistro_type"].notna()
+    enriched["price_objection_signal_inbound"] = _directional_bool_signal(
+        enriched["price_objection_signal"],
+        direction,
+        "inbound",
+    )
+    enriched["price_objection_signal_outbound"] = _directional_bool_signal(
+        enriched["price_objection_signal"],
+        direction,
+        "outbound",
+    )
+    enriched["urgency_strength_inbound"] = _directional_int_signal(
+        enriched["urgency_strength"],
+        direction,
+        "inbound",
+    )
+    enriched["urgency_strength_outbound"] = _directional_int_signal(
+        enriched["urgency_strength"],
+        direction,
+        "outbound",
+    )
+    enriched["competitor_comparison_signal_inbound"] = _directional_bool_signal(
+        enriched["competitor_comparison_signal"],
+        direction,
+        "inbound",
+    )
+    enriched["competitor_comparison_signal_outbound"] = _directional_bool_signal(
+        enriched["competitor_comparison_signal"],
+        direction,
+        "outbound",
+    )
+    enriched["competitor_mentioned_inbound"] = _directional_value_signal(
+        enriched["competitor_mentioned"],
+        direction,
+        "inbound",
+    )
+    enriched["competitor_mentioned_outbound"] = _directional_value_signal(
+        enriched["competitor_mentioned"],
+        direction,
+        "outbound",
+    )
+    enriched["mentions_competitor_inbound"] = enriched["competitor_mentioned_inbound"].notna()
+    enriched["mentions_competitor_outbound"] = enriched["competitor_mentioned_outbound"].notna()
     return enriched
 
 
@@ -891,6 +1004,34 @@ def build_gold(
         ),
     )
     grouped = ordered_messages.groupby("lead_key", dropna=False)
+    inbound_price_objection = _bool_series_or_default(
+        ordered_messages,
+        "price_objection_signal_inbound",
+        "price_objection_signal",
+    )
+    inbound_urgency = _int_series_or_default(
+        ordered_messages,
+        "urgency_strength_inbound",
+        "urgency_strength",
+    )
+    inbound_competitor_comparison = _bool_series_or_default(
+        ordered_messages,
+        "competitor_comparison_signal_inbound",
+        "competitor_comparison_signal",
+    )
+    inbound_competitor_mentioned = _value_series_or_default(
+        ordered_messages,
+        "competitor_mentioned_inbound",
+        "competitor_mentioned",
+    )
+    inbound_competitor_mentions = inbound_competitor_mentioned.notna()
+    ordered_messages = ordered_messages.assign(
+        price_objection_signal_inbound=inbound_price_objection,
+        urgency_strength_inbound=inbound_urgency,
+        competitor_comparison_signal_inbound=inbound_competitor_comparison,
+        competitor_mentioned_inbound=inbound_competitor_mentioned,
+        mentions_competitor_inbound=inbound_competitor_mentions,
+    )
 
     message_aggregates = grouped.agg(
         total_messages=("message_id", "count"),
@@ -906,14 +1047,14 @@ def build_gold(
         mentioned_competitor=("mentions_competitor", _max_or_false),
         mentioned_sinistro=("mentions_sinistro", _max_or_false),
         avg_quoted_price=("quoted_price", "mean"),
-        primary_competitor=("competitor_mentioned", _last_non_null),
+        primary_competitor=("competitor_mentioned_inbound", _last_non_null),
         dominant_email_provider=("email_provider", _last_non_null),
         quoted_price_mentions=("quoted_price", lambda values: int(values.notna().sum())),
-        price_objection_hits=("price_objection_signal", "sum"),
-        urgency_hits=("urgency_strength", lambda values: int(values.gt(0).sum())),
-        urgency_strength_max=("urgency_strength", "max"),
-        competitor_mentions_count=("mentions_competitor", "sum"),
-        competitor_comparison_hits=("competitor_comparison_signal", "sum"),
+        price_objection_hits=("price_objection_signal_inbound", "sum"),
+        urgency_hits=("urgency_strength_inbound", lambda values: int(values.gt(0).sum())),
+        urgency_strength_max=("urgency_strength_inbound", "max"),
+        competitor_mentions_count=("mentions_competitor_inbound", "sum"),
+        competitor_comparison_hits=("competitor_comparison_signal_inbound", "sum"),
         positive_tone_hits=("positive_tone_hits_message", "sum"),
         negative_tone_hits=("negative_tone_hits_message", "sum"),
     ).reset_index()
@@ -1026,15 +1167,25 @@ def build_gold(
         "intent_stage",
         "persona_profile",
         "audience_segment",
-        "price_objection_intensity",
-        "competitor_pressure_level",
-        "commercial_urgency_signal",
         "conversation_sentiment_label",
         "conversation_sentiment_support",
     ]
+    provenance_columns = [
+        "intent_stage_source_family",
+        "persona_profile_source_family",
+        "audience_segment_source_family",
+        "conversation_sentiment_source_family",
+    ]
     gold = gold.drop(columns=semantic_columns, errors="ignore")
+    gold = gold.drop(columns=provenance_columns, errors="ignore")
     if silver_conversations_llm is None:
-        semantic_gold = deterministic_semantics.copy()
+        semantic_gold = deterministic_semantics[["lead_key", *semantic_columns]].copy()
+        semantic_gold = semantic_gold.assign(
+            intent_stage_source_family="deterministic_fallback",
+            persona_profile_source_family="deterministic_fallback",
+            audience_segment_source_family="deterministic_fallback",
+            conversation_sentiment_source_family="deterministic_fallback",
+        )
     else:
         fallback_semantics = deterministic_semantics.rename(
             columns={column: f"{column}_fallback" for column in semantic_columns}
@@ -1043,6 +1194,20 @@ def build_gold(
             consolidate_gold_semantics(silver_conversations_llm),
             on="lead_key",
             how="left",
+        )
+        raw_persona = semantic_gold.get(
+            "persona_profile", pd.Series("", index=semantic_gold.index)
+        ).astype("string")
+        raw_audience = semantic_gold.get(
+            "audience_segment", pd.Series("", index=semantic_gold.index)
+        ).astype("string")
+        pair_invalid = (
+            raw_persona.str.strip().eq("")
+            | raw_audience.str.strip().eq("")
+            | (
+                raw_persona.map(lambda value: _canonical_audience_for_persona(value))
+                != raw_audience
+            )
         )
         for column in semantic_columns:
             fallback_column = f"{column}_fallback"
@@ -1057,8 +1222,27 @@ def build_gold(
                 & semantic_gold[column].astype("string").str.strip().ne(""),
                 semantic_gold[fallback_column],
             )
-        semantic_gold = semantic_gold[["lead_key", *semantic_columns]]
+        for column in provenance_columns:
+            if column not in semantic_gold.columns:
+                semantic_gold[column] = "deterministic_fallback"
+            semantic_gold[column] = semantic_gold[column].where(
+                semantic_gold[column].notna()
+                & semantic_gold[column].astype("string").str.strip().ne(""),
+                "deterministic_fallback",
+            )
+        semantic_gold.loc[pair_invalid, "persona_profile"] = semantic_gold.loc[
+            pair_invalid, "persona_profile_fallback"
+        ]
+        semantic_gold.loc[pair_invalid, "audience_segment"] = semantic_gold.loc[
+            pair_invalid, "audience_segment_fallback"
+        ]
+        semantic_gold.loc[pair_invalid, "persona_profile_source_family"] = "deterministic_fallback"
+        semantic_gold.loc[pair_invalid, "audience_segment_source_family"] = "deterministic_fallback"
+        semantic_gold = semantic_gold[["lead_key", *semantic_columns, *provenance_columns]]
     gold = gold.merge(semantic_gold, on="lead_key", how="left")
+    gold["price_objection_intensity"] = deterministic_semantics["price_objection_intensity"]
+    gold["commercial_urgency_signal"] = deterministic_semantics["commercial_urgency_signal"]
+    gold["competitor_pressure_level"] = deterministic_semantics["competitor_pressure_level"]
     gold["dominant_email_provider"] = gold["dominant_email_provider"].where(
         gold["contains_email"],
         None,

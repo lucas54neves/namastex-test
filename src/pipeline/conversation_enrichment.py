@@ -57,6 +57,9 @@ RECOMMENDED_NEXT_ACTIONS = frozenset(
         "seguir_nutricao_basica",
     }
 )
+PROVIDER_SOURCE_FAMILY = "llm_provider"
+FALLBACK_SOURCE_FAMILY = "deterministic_fallback"
+MIXED_SOURCE_FAMILY = "mixed"
 SEVERITY_ORDER = {
     "nenhuma": 0,
     "baixa": 0,
@@ -190,6 +193,100 @@ def _latest_non_null(frame: pd.DataFrame, value_column: str, recency_column: str
     return _safe_string(non_null.iloc[0][value_column])
 
 
+def _most_frequent_pair_with_recency(
+    frame: pd.DataFrame,
+    left_column: str,
+    right_column: str,
+    recency_column: str,
+) -> tuple[str, str]:
+    paired = frame.copy()
+    paired[left_column] = paired[left_column].astype("string").str.strip()
+    paired[right_column] = paired[right_column].astype("string").str.strip()
+    paired = paired.loc[
+        paired[left_column].notna()
+        & paired[right_column].notna()
+        & paired[left_column].ne("")
+        & paired[right_column].ne("")
+    ]
+    if paired.empty:
+        return "", ""
+    counts = (
+        paired.groupby([left_column, right_column], dropna=False)
+        .agg(
+            item_count=(left_column, "size"),
+            latest_seen=(recency_column, "max"),
+        )
+        .reset_index()
+        .sort_values(
+            ["item_count", "latest_seen", left_column, right_column],
+            ascending=[False, False, True, True],
+        )
+    )
+    best = counts.iloc[0]
+    return _safe_string(best[left_column]), _safe_string(best[right_column])
+
+
+def _bool_series(
+    frame: pd.DataFrame,
+    column: str,
+    fallback_column: str | None = None,
+) -> pd.Series:
+    if column in frame.columns:
+        return frame[column].fillna(False).astype(bool)
+    if fallback_column and fallback_column in frame.columns:
+        fallback = frame[fallback_column].fillna(False).astype(bool)
+        if "direction" not in frame.columns:
+            return fallback
+        return fallback & frame["direction"].eq("inbound")
+    return pd.Series(False, index=frame.index, dtype=bool)
+
+
+def _int_series(
+    frame: pd.DataFrame,
+    column: str,
+    fallback_column: str | None = None,
+) -> pd.Series:
+    if column in frame.columns:
+        return pd.to_numeric(frame[column], errors="coerce").fillna(0).astype(int)
+    if fallback_column and fallback_column in frame.columns:
+        fallback = pd.to_numeric(frame[fallback_column], errors="coerce").fillna(0).astype(int)
+        if "direction" not in frame.columns:
+            return fallback
+        return fallback.where(frame["direction"].eq("inbound"), 0)
+    return pd.Series(0, index=frame.index, dtype=int)
+
+
+def _value_series(
+    frame: pd.DataFrame,
+    column: str,
+    fallback_column: str | None = None,
+) -> pd.Series:
+    if column in frame.columns:
+        return frame[column]
+    if fallback_column and fallback_column in frame.columns:
+        if "direction" not in frame.columns:
+            return frame[fallback_column]
+        return frame[fallback_column].where(frame["direction"].eq("inbound"))
+    return pd.Series([None] * len(frame), index=frame.index, dtype=object)
+
+
+def _semantic_source_family_for_row(row: pd.Series) -> str:
+    provider_name = _safe_string(row.get("provider_name")).strip()
+    inference_status = _safe_string(row.get("inference_status")).strip()
+    if provider_name and inference_status in {"success", "skipped_cache_hit"}:
+        return PROVIDER_SOURCE_FAMILY
+    return FALLBACK_SOURCE_FAMILY
+
+
+def _lead_source_family(lead_conversations: pd.DataFrame) -> str:
+    families = {_semantic_source_family_for_row(row) for _, row in lead_conversations.iterrows()}
+    if not families:
+        return FALLBACK_SOURCE_FAMILY
+    if len(families) == 1:
+        return families.pop()
+    return MIXED_SOURCE_FAMILY
+
+
 def _build_llm_request_payload(
     conversation_messages: pd.DataFrame,
     compiled_plan: dict[str, Any],
@@ -289,11 +386,22 @@ def build_deterministic_conversation_fallback(
         int(_count_tone_hits(value, NEGATIVE_TONE_PATTERNS)) for value in inbound_text.tolist()
     )
     quoted_price_mentions = int(ordered["quoted_price"].notna().sum())
-    competitor_mentions_count = int(ordered["mentions_competitor"].astype(bool).sum())
-    competitor_comparison_hits = int(ordered["competitor_comparison_signal"].astype(bool).sum())
-    price_objection_hits = int(ordered["price_objection_signal"].astype(bool).sum())
-    urgency_hits = int(ordered["urgency_strength"].fillna(0).gt(0).sum())
-    urgency_strength_max = int(ordered["urgency_strength"].fillna(0).max())
+    competitor_mentions_count = int(
+        _bool_series(ordered, "mentions_competitor_inbound", "mentions_competitor").sum()
+    )
+    competitor_comparison_hits = int(
+        _bool_series(
+            ordered,
+            "competitor_comparison_signal_inbound",
+            "competitor_comparison_signal",
+        ).sum()
+    )
+    price_objection_hits = int(
+        _bool_series(ordered, "price_objection_signal_inbound", "price_objection_signal").sum()
+    )
+    urgency_strength = _int_series(ordered, "urgency_strength_inbound", "urgency_strength")
+    urgency_hits = int(urgency_strength.gt(0).sum())
+    urgency_strength_max = int(urgency_strength.max())
     contains_fields = [
         "contains_email",
         "contains_phone",
@@ -331,8 +439,12 @@ def build_deterministic_conversation_fallback(
         quoted_price_mentions,
     )
     competitor_pressure_level = _competitor_pressure_level(
-        ordered["competitor_mentioned"].dropna().iloc[-1]
-        if ordered["competitor_mentioned"].notna().any()
+        _value_series(ordered, "competitor_mentioned_inbound", "competitor_mentioned")
+        .dropna()
+        .iloc[-1]
+        if _value_series(ordered, "competitor_mentioned_inbound", "competitor_mentioned")
+        .notna()
+        .any()
         else None,
         competitor_mentions_count,
         competitor_comparison_hits,
@@ -658,11 +770,12 @@ def consolidate_gold_semantics(conversation_enrichment: pd.DataFrame) -> pd.Data
                 "intent_stage",
                 "persona_profile",
                 "audience_segment",
-                "price_objection_intensity",
-                "competitor_pressure_level",
-                "commercial_urgency_signal",
                 "conversation_sentiment_label",
                 "conversation_sentiment_support",
+                "intent_stage_source_family",
+                "persona_profile_source_family",
+                "audience_segment_source_family",
+                "conversation_sentiment_source_family",
             ]
         )
 
@@ -672,9 +785,19 @@ def consolidate_gold_semantics(conversation_enrichment: pd.DataFrame) -> pd.Data
             ["conversation_last_message_at", "conversation_id"],
             ascending=[True, True],
         ).reset_index(drop=True)
-        dominant_persona = _most_frequent_with_recency(
-            ordered, "persona_profile", "conversation_last_message_at"
+        dominant_persona, audience_segment = _most_frequent_pair_with_recency(
+            ordered,
+            "persona_profile",
+            "audience_segment",
+            "conversation_last_message_at",
         )
+        if (
+            not dominant_persona
+            or not audience_segment
+            or _audience_from_persona(dominant_persona) != audience_segment
+        ):
+            dominant_persona = ""
+            audience_segment = ""
         dominant_sentiment = _most_frequent_with_recency(
             ordered, "sentiment_label", "conversation_last_message_at"
         )
@@ -684,12 +807,7 @@ def consolidate_gold_semantics(conversation_enrichment: pd.DataFrame) -> pd.Data
                 "sentiment_confidence_band",
             ]
         )
-        audience_segment = _audience_from_persona(dominant_persona)
-        if (
-            audience_segment == "nutricao_basica"
-            and _max_by_severity(ordered["competitor_pressure_level"]) == "alta"
-        ):
-            audience_segment = "oferta_competitiva"
+        source_family = _lead_source_family(ordered)
         rows.append(
             {
                 "lead_key": _safe_string(lead_key),
@@ -698,14 +816,12 @@ def consolidate_gold_semantics(conversation_enrichment: pd.DataFrame) -> pd.Data
                 ),
                 "persona_profile": dominant_persona,
                 "audience_segment": audience_segment,
-                "price_objection_intensity": _max_by_severity(ordered["price_objection_intensity"]),
-                "competitor_pressure_level": _max_by_severity(ordered["competitor_pressure_level"]),
-                "commercial_urgency_signal": _latest_non_null(
-                    ordered, "commercial_urgency_signal", "conversation_last_message_at"
-                )
-                or _max_by_severity(ordered["commercial_urgency_signal"]),
                 "conversation_sentiment_label": dominant_sentiment,
                 "conversation_sentiment_support": support_for_dominant,
+                "intent_stage_source_family": source_family,
+                "persona_profile_source_family": source_family,
+                "audience_segment_source_family": source_family,
+                "conversation_sentiment_source_family": source_family,
             }
         )
     return pd.DataFrame(rows).sort_values("lead_key").reset_index(drop=True)

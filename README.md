@@ -248,7 +248,16 @@ O build da `Gold` consome explicitamente:
 
 - `silver_leads.parquet` como resumo primario por lead
 - `silver_messages.parquet` como historico auxiliar para metricas dependentes do nivel de mensagem
-- `silver_conversations_llm.parquet` como fonte principal dos campos semanticos por conversa, consolidada deterministicamente em nivel de lead
+- `silver_conversations_llm.parquet` como contrato interpretativo por conversa para consolidacao semantica em nivel de lead
+
+Contrato semantico da `Gold`:
+
+- campos deterministas continuam sendo derivados apenas de evidencia reproduzivel em `silver_messages`
+- campos interpretativos continuam vindo da consolidacao por conversa de `silver_conversations_llm`
+- severidades comerciais (`price_objection_intensity`, `commercial_urgency_signal`, `competitor_pressure_level`) permanecem no contrato determinista da `Gold`
+- segmentacao e sentimento publicados em `Gold` carregam colunas de proveniencia (`*_source_family`) para distinguir `llm_provider`, `deterministic_fallback` e `mixed`
+- `audience_segment` e preservado como saida interpretativa consolidada de `silver_conversations_llm`; alta pressao competitiva nao pode sobrescrever esse campo em `Gold`
+- quando a entrada interpretativa chegar incompleta ou contraditoria para o par `persona_profile` + `audience_segment`, a publicacao faz fallback explicito do par inteiro para o contrato deterministico, mantendo a proveniencia coerente
 
 Regras centrais de agregacao:
 
@@ -298,6 +307,10 @@ Principais colunas analiticas:
 - `competitor_pressure_level`
 - `conversation_sentiment_label`
 - `conversation_sentiment_support`
+- `intent_stage_source_family`
+- `persona_profile_source_family`
+- `audience_segment_source_family`
+- `conversation_sentiment_source_family`
 - `positive_tone_hits`
 - `negative_tone_hits`
 
@@ -317,6 +330,7 @@ Enriquecimentos analiticos adicionais:
 - `competitor_pressure_level`: `nenhuma`, `leve` ou `alta`, derivada de mencoes nomeadas a concorrentes e tambem de sinais genericos de comparacao comercial
 - `conversation_sentiment_label`: `positivo`, `neutro`, `negativo` ou `sem_evidencia`, consolidado da classificacao por conversa
 - `conversation_sentiment_support`: `fraco`, `moderado`, `forte` ou `sem_evidencia`, consolidado do suporte por conversa
+- `*_source_family`: proveniencia das familias interpretativas publicadas em `Gold`
 - `positive_tone_hits` e `negative_tone_hits`: contagens agregadas de familias de pistas lexicais positivas e negativas encontradas no historico inbound
 
 Exemplos de grouped analysis habilitados diretamente pela `Gold`:
@@ -335,7 +349,7 @@ Observacoes sobre enrichment semantico:
 - o runtime registra `provider_name`, `provider_attempt_count` e `provider_error_summary` para auditoria sem expor payload cru nem credenciais
 - sem credenciais, com erro de provider ou com output invalido fora do vocabulario controlado, o pipeline persiste fallback deterministico e continua a publicacao
 - o cache evita recomputar conversas quando `llm_input_hash`, `prompt_version` e a identidade efetiva de modelos do runtime (`llm_model`) nao mudam
-- sinais de preco, urgencia e concorrencia continuam auditaveis e o `Gold` sempre permanece publicavel mesmo sem LLM
+- sinais de preco, urgencia e concorrencia continuam auditaveis, direction-aware em `silver_messages` e o `Gold` sempre permanece publicavel mesmo sem LLM
 
 ## Politica de protecao de dados
 
@@ -411,6 +425,7 @@ Checks atuais de validacao:
   - vocabularios validos para `engagement_bucket`, `persona_profile`, `audience_segment`, `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level`
   - consistencia semantica com `silver` e `silver_messages` para chaves, intervalos de tempo, totais agregados e sinais observados
   - coerencia deterministica de `engagement_bucket`, `lead_temperature`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `has_closed_outcome`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level` com os fatos publicados e com os sinais agregados de `silver_messages`
+  - validacao separada para campos interpretativos, com checagem de vocabulario, alinhamento `persona_profile` x `audience_segment`, proveniencia `*_source_family` e compatibilidade grosseira com evidencia publicada, sem exigir igualdade exata com heuristicas lexicais
 
 As validacoes semanticas usam apenas identificadores tecnicos e amostras limitadas de `lead_key` ou `conversation_id` nos diagnosticos. O runtime nao publica corpo de mensagem, nome cru, telefone cru ou outros valores sensiveis nos payloads de falha.
 

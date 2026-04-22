@@ -63,6 +63,14 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "mentions_vehicle",
             "mentions_competitor",
             "mentions_sinistro",
+            "price_objection_signal_inbound",
+            "price_objection_signal_outbound",
+            "urgency_strength_inbound",
+            "urgency_strength_outbound",
+            "competitor_comparison_signal_inbound",
+            "competitor_comparison_signal_outbound",
+            "competitor_mentioned_inbound",
+            "competitor_mentioned_outbound",
         ],
         "dedupe_keys": [
             "conversation_id",
@@ -94,6 +102,14 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "vehicle_year",
             "quoted_price",
             "sinistro_type",
+            "price_objection_signal_inbound",
+            "price_objection_signal_outbound",
+            "urgency_strength_inbound",
+            "urgency_strength_outbound",
+            "competitor_comparison_signal_inbound",
+            "competitor_comparison_signal_outbound",
+            "competitor_mentioned_inbound",
+            "competitor_mentioned_outbound",
         ],
     },
     "gold": {
@@ -138,6 +154,10 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "competitor_pressure_level",
             "conversation_sentiment_label",
             "conversation_sentiment_support",
+            "intent_stage_source_family",
+            "persona_profile_source_family",
+            "audience_segment_source_family",
+            "conversation_sentiment_source_family",
             "positive_tone_hits",
             "negative_tone_hits",
         ],
@@ -191,6 +211,59 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "forte",
             "sem_evidencia",
         ],
+        "valid_semantic_source_families": [
+            "deterministic",
+            "llm_provider",
+            "deterministic_fallback",
+            "mixed",
+        ],
+        "semantic_contracts": {
+            "deterministic_fields": [
+                "engagement_bucket",
+                "lead_temperature",
+                "price_sensitivity",
+                "contact_readiness",
+                "risk_signal",
+                "dominant_email_provider",
+                "response_latency_band",
+                "closure_outcome_group",
+                "has_closed_outcome",
+                "price_objection_intensity",
+                "commercial_urgency_signal",
+                "competitor_pressure_level",
+                "positive_tone_hits",
+                "negative_tone_hits",
+                "contains_email",
+                "contains_phone",
+                "contains_cpf",
+                "contains_cep",
+                "contains_plate",
+                "mentioned_vehicle",
+                "mentioned_competitor",
+                "mentioned_sinistro",
+                "primary_competitor",
+            ],
+            "interpretive_fields": [
+                "intent_stage",
+                "persona_profile",
+                "audience_segment",
+                "conversation_sentiment_label",
+                "conversation_sentiment_support",
+            ],
+            "interpretive_provenance_columns": {
+                "intent_stage": "intent_stage_source_family",
+                "persona_profile": "persona_profile_source_family",
+                "audience_segment": "audience_segment_source_family",
+                "conversation_sentiment_label": "conversation_sentiment_source_family",
+                "conversation_sentiment_support": "conversation_sentiment_source_family",
+            },
+            "deterministic_source_family_values": ["deterministic"],
+            "interpretive_source_family_values": [
+                "llm_provider",
+                "deterministic_fallback",
+                "mixed",
+            ],
+        },
         "segmentation": {
             "lead_temperature": {
                 "default": "morno",
@@ -306,9 +379,10 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "price_objection_intensity_coherent",
             "commercial_urgency_signal_coherent",
             "competitor_pressure_level_coherent",
-            "conversation_sentiment_sem_evidencia_coherent",
-            "conversation_sentiment_support_coherent",
-            "conversation_sentiment_support_strength_coherent",
+            "semantic_source_family_valid",
+            "persona_audience_semantic_alignment",
+            "conversation_sentiment_support_alignment",
+            "conversation_sentiment_evidence_compatibility",
         ],
         "validation_rules": {
             "bronze": ["required_columns", "metadata_json_valid"],
@@ -392,6 +466,7 @@ def validate_pipeline_spec(spec: dict[str, Any]) -> None:
         ("gold", "valid_competitor_pressure_levels"),
         ("gold", "valid_conversation_sentiment_labels"),
         ("gold", "valid_conversation_sentiment_supports"),
+        ("gold", "valid_semantic_source_families"),
     ]
     for section, key in list_paths:
         value = spec.get(section, {}).get(key)
@@ -414,6 +489,39 @@ def validate_pipeline_spec(spec: dict[str, Any]) -> None:
     proposal_defaults = planner_config.get("proposal_defaults")
     if not isinstance(proposal_defaults, dict):
         raise ValueError("Spec field agent.planner.proposal_defaults must be an object")
+
+    semantic_contracts = spec.get("gold", {}).get("semantic_contracts")
+    if not isinstance(semantic_contracts, dict):
+        raise ValueError("Spec field gold.semantic_contracts must be an object")
+    required_semantic_contract_keys = {
+        "deterministic_fields",
+        "interpretive_fields",
+        "interpretive_provenance_columns",
+        "deterministic_source_family_values",
+        "interpretive_source_family_values",
+    }
+    missing_semantic_contract_keys = sorted(
+        required_semantic_contract_keys - set(semantic_contracts)
+    )
+    if missing_semantic_contract_keys:
+        raise ValueError(
+            f"Spec field gold.semantic_contracts is missing keys: {missing_semantic_contract_keys}"
+        )
+    for key in (
+        "deterministic_fields",
+        "interpretive_fields",
+        "deterministic_source_family_values",
+        "interpretive_source_family_values",
+    ):
+        value = semantic_contracts.get(key)
+        if not isinstance(value, list) or not value:
+            raise ValueError(f"Spec field gold.semantic_contracts.{key} must be a non-empty list")
+    provenance_columns = semantic_contracts.get("interpretive_provenance_columns")
+    if not isinstance(provenance_columns, dict) or not provenance_columns:
+        raise ValueError(
+            "Spec field gold.semantic_contracts.interpretive_provenance_columns "
+            "must be a non-empty object"
+        )
 
 
 def load_pipeline_spec(path: Path) -> dict[str, Any]:

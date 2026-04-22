@@ -17,8 +17,6 @@ from pipeline.transforms import (
     _commercial_urgency_signal,
     _competitor_pressure_level,
     _price_objection_intensity,
-    derive_conversation_sentiment_label,
-    derive_conversation_sentiment_support,
     detect_unmasked_sensitive_classes,
 )
 
@@ -48,6 +46,12 @@ GOLD_TEXT_SCAN_EXCLUDED_COLUMNS = frozenset(
         "conversation_outcome",
     }
 )
+PERSONA_AUDIENCE_COMPATIBILITY = {
+    "lead_frio": "nutricao_basica",
+    "cliente_pos_sinistro": "retencao_pos_sinistro",
+    "cotador_comparador": "oferta_competitiva",
+    "lead_engajado_com_dados": "close_comercial",
+}
 
 
 @dataclass(frozen=True)
@@ -221,7 +225,24 @@ def _silver_message_aggregates(silver_messages_df: pd.DataFrame) -> pd.DataFrame
 
 
 def _gold_message_aggregates(silver_messages_df: pd.DataFrame) -> pd.DataFrame:
-    grouped = silver_messages_df.groupby("lead_key", dropna=False)
+    enriched = silver_messages_df.copy()
+    if "price_objection_signal_inbound" not in enriched.columns:
+        enriched["price_objection_signal_inbound"] = enriched["price_objection_signal"].fillna(
+            False
+        ).astype(bool) & enriched["direction"].eq("inbound")
+    if "urgency_strength_inbound" not in enriched.columns:
+        enriched["urgency_strength_inbound"] = (
+            pd.to_numeric(enriched["urgency_strength"], errors="coerce").fillna(0).astype(int)
+        ).where(enriched["direction"].eq("inbound"), 0)
+    if "competitor_comparison_signal_inbound" not in enriched.columns:
+        enriched["competitor_comparison_signal_inbound"] = enriched[
+            "competitor_comparison_signal"
+        ].fillna(False).astype(bool) & enriched["direction"].eq("inbound")
+    if "mentions_competitor_inbound" not in enriched.columns:
+        enriched["mentions_competitor_inbound"] = enriched["mentions_competitor"].fillna(
+            False
+        ).astype(bool) & enriched["direction"].eq("inbound")
+    grouped = enriched.groupby("lead_key", dropna=False)
     return grouped.agg(
         first_seen_at=("timestamp", "min"),
         last_seen_at=("timestamp", "max"),
@@ -239,11 +260,11 @@ def _gold_message_aggregates(silver_messages_df: pd.DataFrame) -> pd.DataFrame:
         mentioned_competitor=("mentions_competitor", "max"),
         mentioned_sinistro=("mentions_sinistro", "max"),
         quoted_price_mentions=("quoted_price", lambda values: int(values.notna().sum())),
-        price_objection_hits=("price_objection_signal", "sum"),
-        urgency_hits=("urgency_strength", lambda values: int(values.gt(0).sum())),
-        urgency_strength_max=("urgency_strength", "max"),
-        competitor_mentions_count=("mentions_competitor", "sum"),
-        competitor_comparison_hits=("competitor_comparison_signal", "sum"),
+        price_objection_hits=("price_objection_signal_inbound", "sum"),
+        urgency_hits=("urgency_strength_inbound", lambda values: int(values.gt(0).sum())),
+        urgency_strength_max=("urgency_strength_inbound", "max"),
+        competitor_mentions_count=("mentions_competitor_inbound", "sum"),
+        competitor_comparison_hits=("competitor_comparison_signal_inbound", "sum"),
     )
 
 
@@ -302,6 +323,18 @@ def _expected_gold_classifications(
     ] = str(risk_cfg["high_label"])
 
     return expected
+
+
+def _semantic_contract(compiled_plan: dict[str, object] | None = None) -> dict[str, Any]:
+    plan = compiled_plan or get_default_compiled_plan()
+    return cast(dict[str, Any], plan["gold_semantic_contracts"])
+
+
+def _interpretive_provenance_columns(
+    compiled_plan: dict[str, object] | None = None,
+) -> dict[str, str]:
+    contract = _semantic_contract(compiled_plan)
+    return cast(dict[str, str], contract["interpretive_provenance_columns"])
 
 
 def validate_silver_consistency(
@@ -504,6 +537,10 @@ def validate_gold_consistency(
         "competitor_pressure_level",
         "conversation_sentiment_label",
         "conversation_sentiment_support",
+        "intent_stage_source_family",
+        "persona_profile_source_family",
+        "audience_segment_source_family",
+        "conversation_sentiment_source_family",
         "positive_tone_hits",
         "negative_tone_hits",
         "avg_response_time_sec",
@@ -858,70 +895,23 @@ def validate_gold_consistency(
         )
     )
 
-    expected_sentiment_label = [
-        derive_conversation_sentiment_label(positive_hits, negative_hits)
-        for positive_hits, negative_hits in zip(
-            gold_common["positive_tone_hits"],
-            gold_common["negative_tone_hits"],
-            strict=False,
-        )
-    ]
-    sentiment_label_mask = (
-        gold_common["conversation_sentiment_label"]
-        .astype("string")
-        .eq(pd.Series(expected_sentiment_label, index=gold_common.index, dtype="string"))
+    provenance_columns = list(_interpretive_provenance_columns(compiled_plan).values())
+    valid_source_families = cast(
+        set[str],
+        (compiled_plan or get_default_compiled_plan())["gold_valid_semantic_source_families"],
     )
-    violating_sentiment_label = gold_common.index[~sentiment_label_mask].tolist()
+    provenance_mask = pd.Series(True, index=gold_common.index)
+    for column in provenance_columns:
+        provenance_mask &= gold_common[column].astype("string").isin(valid_source_families)
+    violating_provenance = gold_common.index[~provenance_mask].tolist()
     results.append(
         _result(
             "gold",
-            "conversation_sentiment_sem_evidencia_coherent",
-            len(violating_sentiment_label) == 0,
+            "semantic_source_family_valid",
+            len(violating_provenance) == 0,
             checked_leads=int(len(comparable)),
-            violating_leads=len(violating_sentiment_label),
-            sample_lead_keys=_bounded_sample(violating_sentiment_label),
-        )
-    )
-
-    expected_sentiment_support = [
-        derive_conversation_sentiment_support(positive_hits, negative_hits)
-        for positive_hits, negative_hits in zip(
-            gold_common["positive_tone_hits"],
-            gold_common["negative_tone_hits"],
-            strict=False,
-        )
-    ]
-    sentiment_support_mask = (
-        gold_common["conversation_sentiment_support"]
-        .astype("string")
-        .eq(pd.Series(expected_sentiment_support, index=gold_common.index, dtype="string"))
-    )
-    violating_sentiment_support = gold_common.index[~sentiment_support_mask].tolist()
-    results.append(
-        _result(
-            "gold",
-            "conversation_sentiment_support_coherent",
-            len(violating_sentiment_support) == 0,
-            checked_leads=int(len(comparable)),
-            violating_leads=len(violating_sentiment_support),
-            sample_lead_keys=_bounded_sample(violating_sentiment_support),
-        )
-    )
-
-    sentiment_support_strength_mask = ~gold_common["conversation_sentiment_support"].eq("forte") | (
-        gold_common["positive_tone_hits"].ge(2) | gold_common["negative_tone_hits"].ge(2)
-    )
-    violating_sentiment_support_strength = gold_common.index[
-        ~sentiment_support_strength_mask
-    ].tolist()
-    results.append(
-        _result(
-            "gold",
-            "conversation_sentiment_support_strength_coherent",
-            len(violating_sentiment_support_strength) == 0,
-            checked_leads=int(len(comparable)),
-            violating_leads=len(violating_sentiment_support_strength),
-            sample_lead_keys=_bounded_sample(violating_sentiment_support_strength),
+            violating_leads=len(violating_provenance),
+            sample_lead_keys=_bounded_sample(violating_provenance),
         )
     )
     return results
@@ -1101,38 +1091,10 @@ def validate_gold(
     valid_conversation_sentiment_supports = cast(
         set[str], plan["gold_valid_conversation_sentiment_supports"]
     )
+    valid_semantic_source_families = cast(set[str], plan["gold_valid_semantic_source_families"])
+    interpretive_provenance_columns = _interpretive_provenance_columns(plan)
     gold_required_columns = cast(list[str], plan["gold_required_columns"])
     forbidden_columns = forbidden_columns_present(df, "gold")
-    expected_sentiment_label = pd.Series(
-        [
-            derive_conversation_sentiment_label(positive_hits, negative_hits)
-            for positive_hits, negative_hits in zip(
-                df["positive_tone_hits"],
-                df["negative_tone_hits"],
-                strict=False,
-            )
-        ],
-        index=df.index,
-        dtype="string",
-    )
-    expected_sentiment_support = pd.Series(
-        [
-            derive_conversation_sentiment_support(positive_hits, negative_hits)
-            for positive_hits, negative_hits in zip(
-                df["positive_tone_hits"],
-                df["negative_tone_hits"],
-                strict=False,
-            )
-        ],
-        index=df.index,
-        dtype="string",
-    )
-    sentiment_label_mask = (
-        df["conversation_sentiment_label"].astype("string").eq(expected_sentiment_label)
-    )
-    sentiment_support_mask = (
-        df["conversation_sentiment_support"].astype("string").eq(expected_sentiment_support)
-    )
     results = [
         _column_set_check(df, gold_required_columns, "gold"),
         _result(
@@ -1317,6 +1279,23 @@ def validate_gold(
         ),
         _result(
             "gold",
+            "semantic_source_family_valid",
+            all(
+                set(df[column].dropna().astype(str).unique()).issubset(
+                    valid_semantic_source_families
+                )
+                for column in interpretive_provenance_columns.values()
+            ),
+            distinct_source_families=sorted(
+                {
+                    value
+                    for column in interpretive_provenance_columns.values()
+                    for value in df[column].dropna().astype(str).unique().tolist()
+                }
+            ),
+        ),
+        _result(
+            "gold",
             "closure_outcome_flag_coherent",
             df["has_closed_outcome"]
             .astype(bool)
@@ -1339,29 +1318,81 @@ def validate_gold(
         ),
         _result(
             "gold",
-            "conversation_sentiment_sem_evidencia_coherent",
-            sentiment_label_mask.all(),
-            violating_rows=int((~sentiment_label_mask).sum()),
-        ),
-        _result(
-            "gold",
-            "conversation_sentiment_support_coherent",
-            sentiment_support_mask.all(),
-            violating_rows=int((~sentiment_support_mask).sum()),
-        ),
-        _result(
-            "gold",
-            "conversation_sentiment_support_strength_coherent",
+            "persona_audience_semantic_alignment",
             (
-                ~df["conversation_sentiment_support"].eq("forte")
-                | df["positive_tone_hits"].ge(2)
-                | df["negative_tone_hits"].ge(2)
+                df["persona_profile"].astype("string").map(PERSONA_AUDIENCE_COMPATIBILITY)
+                == df["audience_segment"].astype("string")
             ).all(),
             violating_rows=int(
                 (
-                    df["conversation_sentiment_support"].eq("forte")
-                    & df["positive_tone_hits"].lt(2)
-                    & df["negative_tone_hits"].lt(2)
+                    df["persona_profile"].astype("string").map(PERSONA_AUDIENCE_COMPATIBILITY)
+                    != df["audience_segment"].astype("string")
+                ).sum()
+            ),
+        ),
+        _result(
+            "gold",
+            "conversation_sentiment_support_alignment",
+            (
+                (
+                    df["conversation_sentiment_label"].eq("sem_evidencia")
+                    & df["conversation_sentiment_support"].eq("sem_evidencia")
+                )
+                | (
+                    ~df["conversation_sentiment_label"].eq("sem_evidencia")
+                    & ~df["conversation_sentiment_support"].eq("sem_evidencia")
+                )
+            ).all(),
+            violating_rows=int(
+                (
+                    ~(
+                        (
+                            df["conversation_sentiment_label"].eq("sem_evidencia")
+                            & df["conversation_sentiment_support"].eq("sem_evidencia")
+                        )
+                        | (
+                            ~df["conversation_sentiment_label"].eq("sem_evidencia")
+                            & ~df["conversation_sentiment_support"].eq("sem_evidencia")
+                        )
+                    )
+                ).sum()
+            ),
+        ),
+        _result(
+            "gold",
+            "conversation_sentiment_evidence_compatibility",
+            (
+                ~(
+                    df["conversation_sentiment_label"].eq("positivo")
+                    & df["negative_tone_hits"].ge(2)
+                    & df["positive_tone_hits"].eq(0)
+                )
+                & ~(
+                    df["conversation_sentiment_label"].eq("negativo")
+                    & df["positive_tone_hits"].ge(2)
+                    & df["negative_tone_hits"].eq(0)
+                )
+                & ~(
+                    df["conversation_sentiment_label"].eq("sem_evidencia")
+                    & (df["positive_tone_hits"].gt(0) | df["negative_tone_hits"].gt(0))
+                )
+            ).all(),
+            violating_rows=int(
+                (
+                    (
+                        df["conversation_sentiment_label"].eq("positivo")
+                        & df["negative_tone_hits"].ge(2)
+                        & df["positive_tone_hits"].eq(0)
+                    )
+                    | (
+                        df["conversation_sentiment_label"].eq("negativo")
+                        & df["positive_tone_hits"].ge(2)
+                        & df["negative_tone_hits"].eq(0)
+                    )
+                    | (
+                        df["conversation_sentiment_label"].eq("sem_evidencia")
+                        & (df["positive_tone_hits"].gt(0) | df["negative_tone_hits"].gt(0))
+                    )
                 ).sum()
             ),
         ),

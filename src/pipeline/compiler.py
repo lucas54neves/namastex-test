@@ -44,6 +44,8 @@ def compile_pipeline_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "gold_valid_conversation_sentiment_supports": set(
             spec["gold"]["valid_conversation_sentiment_supports"]
         ),
+        "gold_valid_semantic_source_families": set(spec["gold"]["valid_semantic_source_families"]),
+        "gold_semantic_contracts": dict(spec["gold"]["semantic_contracts"]),
         "gold_segmentation": dict(spec["gold"]["segmentation"]),
         "quality": dict(spec["quality"]),
         "quality_validation_rules": dict(spec["quality"].get("validation_rules", {})),

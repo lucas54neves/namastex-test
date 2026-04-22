@@ -55,7 +55,15 @@
       "dropped_duplicate_events",
       "mentions_vehicle",
       "mentions_competitor",
-      "mentions_sinistro"
+      "mentions_sinistro",
+      "price_objection_signal_inbound",
+      "price_objection_signal_outbound",
+      "urgency_strength_inbound",
+      "urgency_strength_outbound",
+      "competitor_comparison_signal_inbound",
+      "competitor_comparison_signal_outbound",
+      "competitor_mentioned_inbound",
+      "competitor_mentioned_outbound"
     ],
     "dedupe_keys": [
       "conversation_id",
@@ -86,7 +94,15 @@
       "vehicle_model",
       "vehicle_year",
       "quoted_price",
-      "sinistro_type"
+      "sinistro_type",
+      "price_objection_signal_inbound",
+      "price_objection_signal_outbound",
+      "urgency_strength_inbound",
+      "urgency_strength_outbound",
+      "competitor_comparison_signal_inbound",
+      "competitor_comparison_signal_outbound",
+      "competitor_mentioned_inbound",
+      "competitor_mentioned_outbound"
     ]
   },
   "gold": {
@@ -131,6 +147,10 @@
       "competitor_pressure_level",
       "conversation_sentiment_label",
       "conversation_sentiment_support",
+      "intent_stage_source_family",
+      "persona_profile_source_family",
+      "audience_segment_source_family",
+      "conversation_sentiment_source_family",
       "positive_tone_hits",
       "negative_tone_hits"
     ],
@@ -225,6 +245,61 @@
       "forte",
       "sem_evidencia"
     ],
+    "valid_semantic_source_families": [
+      "deterministic",
+      "llm_provider",
+      "deterministic_fallback",
+      "mixed"
+    ],
+    "semantic_contracts": {
+      "deterministic_fields": [
+        "engagement_bucket",
+        "lead_temperature",
+        "price_sensitivity",
+        "contact_readiness",
+        "risk_signal",
+        "dominant_email_provider",
+        "response_latency_band",
+        "closure_outcome_group",
+        "has_closed_outcome",
+        "price_objection_intensity",
+        "commercial_urgency_signal",
+        "competitor_pressure_level",
+        "positive_tone_hits",
+        "negative_tone_hits",
+        "contains_email",
+        "contains_phone",
+        "contains_cpf",
+        "contains_cep",
+        "contains_plate",
+        "mentioned_vehicle",
+        "mentioned_competitor",
+        "mentioned_sinistro",
+        "primary_competitor"
+      ],
+      "interpretive_fields": [
+        "intent_stage",
+        "persona_profile",
+        "audience_segment",
+        "conversation_sentiment_label",
+        "conversation_sentiment_support"
+      ],
+      "interpretive_provenance_columns": {
+        "intent_stage": "intent_stage_source_family",
+        "persona_profile": "persona_profile_source_family",
+        "audience_segment": "audience_segment_source_family",
+        "conversation_sentiment_label": "conversation_sentiment_source_family",
+        "conversation_sentiment_support": "conversation_sentiment_source_family"
+      },
+      "deterministic_source_family_values": [
+        "deterministic"
+      ],
+      "interpretive_source_family_values": [
+        "llm_provider",
+        "deterministic_fallback",
+        "mixed"
+      ]
+    },
     "segmentation": {
       "lead_temperature": {
         "default": "morno",
@@ -343,9 +418,10 @@
       "price_objection_intensity_coherent",
       "commercial_urgency_signal_coherent",
       "competitor_pressure_level_coherent",
-      "conversation_sentiment_sem_evidencia_coherent",
-      "conversation_sentiment_support_coherent",
-      "conversation_sentiment_support_strength_coherent"
+      "semantic_source_family_valid",
+      "persona_audience_semantic_alignment",
+      "conversation_sentiment_support_alignment",
+      "conversation_sentiment_evidence_compatibility"
     ],
     "validation_rules": {
       "bronze": [

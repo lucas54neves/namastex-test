@@ -15,6 +15,11 @@ def test_default_pipeline_spec_is_valid() -> None:
     assert "quoted_price" in spec["silver"]["derived_fields"]
     assert "conversation_sentiment_label" in spec["gold"]["required_columns"]
     assert "sem_evidencia" in spec["gold"]["valid_conversation_sentiment_labels"]
+    assert "llm_provider" in spec["gold"]["valid_semantic_source_families"]
+    assert (
+        spec["gold"]["semantic_contracts"]["interpretive_provenance_columns"]["intent_stage"]
+        == "intent_stage_source_family"
+    )
     assert spec["agent"]["planner"]["proposal_defaults"]["default_status"] == "proposed"
 
 
@@ -40,6 +45,7 @@ def test_versioned_pipeline_spec_matches_default_required_fields() -> None:
         ("gold", "valid_competitor_pressure_levels"),
         ("gold", "valid_conversation_sentiment_labels"),
         ("gold", "valid_conversation_sentiment_supports"),
+        ("gold", "valid_semantic_source_families"),
         ("quality", "bronze_checks"),
         ("quality", "silver_checks"),
         ("quality", "gold_checks"),
@@ -50,5 +56,8 @@ def test_versioned_pipeline_spec_matches_default_required_fields() -> None:
 
     assert (
         versioned_spec["quality"]["validation_rules"] == default_spec["quality"]["validation_rules"]
+    )
+    assert (
+        versioned_spec["gold"]["semantic_contracts"] == default_spec["gold"]["semantic_contracts"]
     )
     assert versioned_spec["agent"]["planner"] == default_spec["agent"]["planner"]

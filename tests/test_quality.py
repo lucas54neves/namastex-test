@@ -99,6 +99,10 @@ def _base_gold_row() -> dict[str, object]:
         "competitor_pressure_level": "nenhuma",
         "conversation_sentiment_label": "sem_evidencia",
         "conversation_sentiment_support": "sem_evidencia",
+        "intent_stage_source_family": "deterministic_fallback",
+        "persona_profile_source_family": "deterministic_fallback",
+        "audience_segment_source_family": "deterministic_fallback",
+        "conversation_sentiment_source_family": "deterministic_fallback",
         "positive_tone_hits": 0,
         "negative_tone_hits": 0,
     }
@@ -128,9 +132,17 @@ def _base_silver_message_row() -> dict[str, object]:
         "contains_cep": False,
         "quoted_price": None,
         "price_objection_signal": False,
+        "price_objection_signal_inbound": False,
+        "price_objection_signal_outbound": False,
         "urgency_strength": 0,
+        "urgency_strength_inbound": 0,
+        "urgency_strength_outbound": 0,
         "competitor_comparison_signal": False,
+        "competitor_comparison_signal_inbound": False,
+        "competitor_comparison_signal_outbound": False,
         "competitor_mentioned": None,
+        "competitor_mentioned_inbound": None,
+        "competitor_mentioned_outbound": None,
         "email_provider": None,
         "vehicle_make": None,
         "vehicle_model": None,
@@ -306,23 +318,35 @@ def test_validate_gold_rejects_non_sem_evidencia_support_without_evidence() -> N
 
     assert summary["status"] == "failed"
     assert any(
-        item["check"] == "conversation_sentiment_support_coherent"
+        item["check"] == "conversation_sentiment_support_alignment"
         for item in summary["failed_checks"]
     )
 
 
-def test_validate_gold_rejects_forte_support_without_repeated_evidence() -> None:
+def test_validate_gold_accepts_interpretive_sentiment_without_lexical_hits() -> None:
     row = _base_gold_row()
     row["conversation_sentiment_label"] = "positivo"
     row["conversation_sentiment_support"] = "forte"
-    row["positive_tone_hits"] = 1
+    row["conversation_sentiment_source_family"] = "llm_provider"
+    df = pd.DataFrame([row])
+
+    summary = summarize_validation_results(validate_gold(df))
+
+    assert summary["status"] == "passed"
+
+
+def test_validate_gold_rejects_sentiment_that_contradicts_deterministic_evidence() -> None:
+    row = _base_gold_row()
+    row["conversation_sentiment_label"] = "positivo"
+    row["conversation_sentiment_support"] = "moderado"
+    row["negative_tone_hits"] = 3
     df = pd.DataFrame([row])
 
     summary = summarize_validation_results(validate_gold(df))
 
     assert summary["status"] == "failed"
     assert any(
-        item["check"] == "conversation_sentiment_support_strength_coherent"
+        item["check"] == "conversation_sentiment_evidence_compatibility"
         for item in summary["failed_checks"]
     )
 
@@ -445,6 +469,7 @@ def test_validate_gold_accepts_high_urgency_without_latency_when_text_evidence_e
     urgent_message = _base_silver_message_row()
     urgent_message["message_body_masked"] = "quero fechar hoje"
     urgent_message["urgency_strength"] = 2
+    urgent_message["urgency_strength_inbound"] = 2
     urgent_message["timestamp"] = pd.Timestamp("2026-02-01 10:00:00")
     followup_message = dict(urgent_message)
     followup_message["message_id"] = "m2"
@@ -474,6 +499,7 @@ def test_validate_gold_accepts_competitor_pressure_from_generic_comparison_signa
     silver_df = pd.DataFrame([silver_row])
     silver_messages_row = _base_silver_message_row()
     silver_messages_row["competitor_comparison_signal"] = True
+    silver_messages_row["competitor_comparison_signal_inbound"] = True
     silver_messages_df = pd.DataFrame([silver_messages_row])
     gold_row = _base_gold_row()
     gold_row["total_messages"] = 1
