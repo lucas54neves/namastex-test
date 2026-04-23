@@ -196,22 +196,37 @@ def _api_call(
     args = ["databricks", "api", method, path]
     if payload is not None:
         args.extend(["--json", json.dumps(payload)])
-    completed = _run_command(args, env=_databricks_env(config))
+    try:
+        completed = _run_command(args, env=_databricks_env(config))
+    except subprocess.CalledProcessError as exc:
+        stdout = (exc.stdout or "").strip()
+        stderr = (exc.stderr or "").strip()
+        details = stderr or stdout or "no Databricks CLI output captured"
+        raise RuntimeError(f"Databricks API {method.upper()} {path} failed: {details}") from exc
     stdout = completed.stdout.strip()
     return json.loads(stdout) if stdout else {}
+
+
+def _looks_like_not_found(message: str, markers: tuple[str, ...]) -> bool:
+    normalized = message.upper()
+    return any(marker in normalized for marker in markers)
 
 
 def _resource_exists(
     config: DatabricksDeploymentConfig,
     path: str,
-    not_found_markers: tuple[str, ...] = ("RESOURCE_DOES_NOT_EXIST", "NOT_FOUND"),
+    not_found_markers: tuple[str, ...] = (
+        "RESOURCE_DOES_NOT_EXIST",
+        "NOT_FOUND",
+        "DOES NOT EXIST",
+        "404",
+    ),
 ) -> bool:
     try:
         _api_call(config, "get", path)
         return True
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr or ""
-        if any(marker in stderr for marker in not_found_markers):
+    except RuntimeError as exc:
+        if _looks_like_not_found(str(exc), not_found_markers):
             return False
         raise
 

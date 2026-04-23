@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from pipeline.config import build_paths
 from pipeline.infrastructure.databricks import (
+    _api_call,
+    _resource_exists,
     build_databricks_deployment_config,
     build_databricks_job_settings,
 )
@@ -136,6 +139,59 @@ def test_build_databricks_config_uses_defaults_when_workflow_vars_are_empty(
     assert config.node_type_id == "Standard_DS3_v2"
     assert config.num_workers == 1
     assert config.poll_seconds == 10
+
+
+def test_resource_exists_returns_false_for_databricks_not_found_errors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={"DATABRICKS_HOST": "https://dbc.example.com"},
+    )
+
+    def raise_not_found(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            ["databricks", "api", "get", "/api/2.1/unity-catalog/schemas/main.ops"],
+            output='{"error_code":"NOT_FOUND","message":"Schema main.ops does not exist"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("pipeline.infrastructure.databricks._run_command", raise_not_found)
+
+    assert _resource_exists(config, "/api/2.1/unity-catalog/schemas/main.ops") is False
+
+
+def test_api_call_raises_runtime_error_with_databricks_output(tmp_path: Path, monkeypatch) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={"DATABRICKS_HOST": "https://dbc.example.com"},
+    )
+
+    def raise_forbidden(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            ["databricks", "api", "get", "/api/2.1/unity-catalog/schemas/main.ops"],
+            output="",
+            stderr='{"error_code":"PERMISSION_DENIED","message":"Access denied"}',
+        )
+
+    monkeypatch.setattr("pipeline.infrastructure.databricks._run_command", raise_forbidden)
+
+    try:
+        _api_call(config, "get", "/api/2.1/unity-catalog/schemas/main.ops")
+    except RuntimeError as exc:
+        assert "Databricks API GET /api/2.1/unity-catalog/schemas/main.ops failed" in str(exc)
+        assert "PERMISSION_DENIED" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError")
 
 
 def test_workflow_exists_with_required_triggers_and_databricks_contract() -> None:
