@@ -99,6 +99,25 @@ def test_normalize_llm_output_maps_supported_synonyms() -> None:
     ]
 
 
+def test_normalize_llm_output_corrects_close_typo_against_allowed_vocab() -> None:
+    normalized, decisions = normalize_llm_output(
+        {
+            **_valid_output(),
+            "audience_segment": "oferta_competititiva",
+        },
+        _compiled_plan(),
+    )
+
+    assert normalized["audience_segment"] == "oferta_competitiva"
+    assert decisions == [
+        {
+            "field": "audience_segment",
+            "from": "oferta_competititiva",
+            "to": "oferta_competitiva",
+        }
+    ]
+
+
 def test_validate_llm_response_keeps_ambiguous_values_invalid() -> None:
     payload = {**_valid_output(), "sentiment_label": "skeptical"}
 

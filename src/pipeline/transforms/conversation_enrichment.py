@@ -5,6 +5,7 @@ import json
 import re
 import unicodedata
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from typing import Any, cast
 
 import pandas as pd
@@ -105,6 +106,17 @@ LLM_FIELD_SYNONYMS = {
         "quote_request": "cotacao_ativa",
     },
 }
+LLM_ALLOWED_VALUE_PATHS = {
+    "sentiment_label": "gold_valid_conversation_sentiment_labels",
+    "sentiment_confidence_band": "gold_valid_conversation_sentiment_supports",
+    "intent_stage": "gold_valid_intent_stages",
+    "persona_profile": "gold_valid_personas",
+    "audience_segment": "gold_valid_audiences",
+    "price_objection_intensity": "gold_valid_price_objection_intensities",
+    "competitor_pressure_level": "gold_valid_competitor_pressure_levels",
+    "commercial_urgency_signal": "gold_valid_commercial_urgency_signals",
+}
+LLM_TYPO_MATCH_MIN_RATIO = 0.9
 
 
 def _utc_now_iso() -> str:
@@ -124,11 +136,42 @@ def _normalize_matching_token(value: Any) -> str:
     return collapsed.strip("_")
 
 
+def _closest_allowed_value(
+    field: str,
+    raw_value: str,
+    compiled_plan: dict[str, Any],
+) -> str | None:
+    allowed_path = LLM_ALLOWED_VALUE_PATHS.get(field)
+    if allowed_path is None:
+        return None
+    allowed_values = compiled_plan.get(allowed_path) or []
+    normalized_raw = _normalize_matching_token(raw_value)
+    if not normalized_raw:
+        return None
+    candidates: list[tuple[str, float]] = []
+    for allowed_value in allowed_values:
+        allowed_text = _safe_string(allowed_value).strip()
+        normalized_allowed = _normalize_matching_token(allowed_text)
+        if not normalized_allowed:
+            continue
+        if normalized_allowed == normalized_raw:
+            return allowed_text
+        ratio = SequenceMatcher(None, normalized_raw, normalized_allowed).ratio()
+        if ratio >= LLM_TYPO_MATCH_MIN_RATIO:
+            candidates.append((allowed_text, ratio))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[1], item[0]))
+    best_value, best_ratio = candidates[0]
+    if len(candidates) > 1 and candidates[1][1] == best_ratio:
+        return None
+    return best_value
+
+
 def normalize_llm_output(
     response: dict[str, Any],
     compiled_plan: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    del compiled_plan
     normalized = dict(response)
     decisions: list[dict[str, str]] = []
 
@@ -144,6 +187,10 @@ def normalize_llm_output(
             _normalize_matching_token(raw_value),
             raw_value,
         )
+        if canonical_value == raw_value:
+            matched_allowed_value = _closest_allowed_value(field, raw_value, compiled_plan)
+            if matched_allowed_value is not None:
+                canonical_value = matched_allowed_value
         normalized[field] = canonical_value
         if canonical_value != raw_value:
             decisions.append({"field": field, "from": raw_value, "to": canonical_value})

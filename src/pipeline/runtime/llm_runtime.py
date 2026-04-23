@@ -36,12 +36,18 @@ except Exception:  # pragma: no cover
     ChatOpenAI = None
 
 try:
-    from langfuse import Langfuse, get_client
+    from langfuse import Langfuse as _Langfuse
+    from langfuse import get_client as _get_client
+
+    Langfuse = _Langfuse
+    get_client = _get_client
 except Exception:  # pragma: no cover
     pass
 
 try:
-    from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
+    from langfuse.langchain import CallbackHandler as _LangfuseCallbackHandler
+
+    LangfuseCallbackHandler = _LangfuseCallbackHandler
 except Exception:  # pragma: no cover
     pass
 
