@@ -1,649 +1,315 @@
-# Pipeline Medalhao com Agente Operacional Deterministico
+# Pipeline Medalhão com Agente Operacional Determinístico
 
-Este repositorio implementa a entrega do teste tecnico de Data & AI Engineering a partir de uma base transacional de conversas WhatsApp. A solucao foi estruturada como um pipeline medalhao em Python com execucao incremental, contratos de qualidade, artefatos operacionais persistidos, uma camada agentica deterministica para planejamento estrutural, diagnostico operacional, remediacao segura, alerta e fallback, e uma etapa opcional de enriquecimento semantico por conversa.
+Entrega final do teste técnico de Data & AI Engineering descrito em [docs/technical-test-data-ai-engineering.md](/home/lucas/projects/lucas54neves/namastex-test/docs/technical-test-data-ai-engineering.md). O projeto implementa um pipeline em Python para transformar conversas transacionais de WhatsApp em uma arquitetura Bronze -> Silver -> Gold, com atualização automática da camada analítica quando a fonte cresce e um agente operacional determinístico para diagnóstico, alerta, fallback e remediação segura.
 
-O projeto nao usa LLM para governar o pipeline. O termo `agente` aqui significa um conjunto de modulos auditaveis que:
+## Objetivo da entrega
 
-- mantem uma `pipeline_spec.json` versionada
-- compila essa spec para o runtime
-- executa validacoes por camada
-- classifica falhas conhecidas
-- tenta auto-remediacao segura apenas para playbooks operacionais aprovados
-- isola registros invalidos em quarentena
-- registra relatorios operacionais e de validacao
-- preserva o ultimo estado integro quando ocorre erro inesperado
+O enunciado pede mais do que uma análise pontual: pede uma infraestrutura persistente que permaneça "viva", gerencie o pipeline, monitore falhas e mantenha a camada Gold atualizada. A solução entregue atende esse objetivo com os seguintes blocos:
 
-## Fontes
+- Pipeline em Python puro, organizado em camadas claras.
+- Bronze como réplica controlada da fonte original.
+- Silver como camada de limpeza, normalização, deduplicação, mascaramento e organização por lead.
+- Gold como camada analítica para segmentação, personas, audiência, sinais comerciais e sentimento.
+- Agente operacional determinístico para planejar ajustes de contrato, classificar falhas, acionar playbooks seguros, registrar decisões e preservar o último estado íntegro.
+- Execução pontual e execução contínua com polling para reprocessar automaticamente quando a Bronze muda.
 
-- Enunciado: `docs/technical-test-data-ai-engineering.md`
-- Dicionario de dados: `docs/data-dictionary-data-ai-engineering.md`
-- Bronze de entrada: `docs/conversations_bronze.parquet`
+## Como a solução responde ao enunciado
 
-## Visao geral
+| Requisito do teste | Como foi atendido |
+| --- | --- |
+| Python puro | Implementação em `src/pipeline/` e `scripts/` |
+| Pipeline em 3 camadas | Publicação em `data/bronze/`, `data/silver/` e `data/gold/` |
+| Pipeline vivo | Fingerprint da fonte em `state/pipeline_state.json` e daemon em `scripts/run_pipeline_daemon.py` |
+| Agente que gerencia o pipeline | Diagnóstico, planejamento, alerta, fallback e playbooks em `src/pipeline/agent/` |
+| Limpeza, transformação e análise | Regras em `src/pipeline/transforms/` e validações em `src/pipeline/quality/` |
+| Mascaramento de dados sensíveis | Política de publicação segura e validações anti-vazamento em Silver e Gold |
 
-O pipeline responde a quatro perguntas centrais do teste:
+## Arquitetura do projeto
 
-1. O que o sistema faz?
-   Copia a Bronze para uma area controlada, normaliza e enriquece os eventos, publica uma `Silver` organizada por lead, um artefato intermediario de enriquecimento semantico por `conversation_id` e uma `Gold` analitica por lead, e mantem relatorios separados para execucao operacional, planejamento estrutural, diagnostico e alertas.
-2. O que e persistido em cada camada?
-   `Bronze` replica a fonte bruta controlada, `Silver` publica um artefato principal por `lead_key`, um artefato auxiliar por mensagem e um artefato de enrichment por conversa, e `Gold` publica uma visao analitica tambem por `lead_key`.
-3. Como os dados sensiveis sao protegidos?
-   O runtime pode usar colunas cruas apenas em memoria quando necessario para derivacao. Os artefatos publicados em `Silver` e `Gold` removem colunas proibidas e as validacoes varrem vazamento em campos textuais.
-4. Como isso atende ao teste?
-   Ha um pipeline medalhao em Python, atualizacao automatica da `Gold` por fingerprint e polling, `Silver` principal organizada por lead, enriquecimento semantico por conversa com fallback deterministico, `Gold` util com segmentacoes reproduziveis e um agente operacional limitado, auditavel e reproduzivel.
+### Visão em camadas
 
-## Arquitetura
+- `docs/conversations_bronze.parquet` é a fonte transacional de entrada usada como Bronze raw source.
+- `Bronze` replica a fonte para uma área controlada de processamento.
+- `Silver` gera três artefatos: uma visão principal por lead, uma visão auxiliar por mensagem e uma visão intermediária por conversa para enriquecimento semântico.
+- `Gold` consolida métricas e classificações analíticas por lead.
+- O agente operacional observa o ciclo, valida contratos, registra relatórios, aciona alertas e executa fallback quando necessário.
 
-O codigo agora esta organizado por responsabilidade tecnica. `agent/` concentra diagnostico, alertas, aprovacao e playbooks; `orchestration/` concentra compilacao da spec, jobs publicos e execucao do ciclo; `runtime/` concentra ambiente, spec, estado e runtime opcional de providers; `quality/` concentra regras de publicacao, validacao e quarentena; `transforms/` separa carga Bronze, derivacao Silver, consolidacao Gold e enrichment semantico por conversa; `io/` concentra persistencia parquet/json.
+### Diagrama mermaid
+
+```mermaid
+flowchart TD
+    A[docs/conversations_bronze.parquet] --> B[Bronze Ingestion]
+    B --> C[data/bronze/conversations.parquet]
+    C --> D[Silver Transform]
+    D --> E[data/silver/silver_messages.parquet]
+    D --> F[data/silver/silver_leads.parquet]
+    E --> G[Conversation Enrichment]
+    G --> H[data/silver/silver_conversations_llm.parquet]
+    F --> I[Gold Aggregation]
+    E --> I
+    H --> I
+    I --> J[data/gold/conversations_gold.parquet]
+
+    K[config/pipeline_spec.json] --> D
+    K --> G
+    K --> I
+
+    L[Agent Planner + Diagnostics] --> K
+    L --> M[reports/monitoring]
+    L --> N[reports/alerts]
+    L --> O[reports/agent_decisions]
+    L --> P[state/pipeline_state.json]
+    I --> L
+    D --> L
+    G --> L
+```
+
+### Organização do código
 
 ```text
 src/pipeline/
-  config.py
-  agent/
-    agent.py
-    alerts.py
-    approval.py
-    llm_advisor.py
-    planner.py
-    playbooks.py
-  io/
-    parquet_io.py
-  orchestration/
-    compiler.py
-    jobs.py
-    operator.py
-  quality/
-    publication.py
-    quality.py
-    quarantine.py
-  runtime/
-    env.py
-    langfuse_bootstrap.py
-    llm_runtime.py
-    spec.py
-    state.py
-  transforms/
-    bronze.py
-    conversation_enrichment.py
-    gold.py
-    silver.py
+  agent/          diagnostico, aprovacao, alertas, playbooks e planejamento
+  io/             leitura/escrita parquet e json
+  orchestration/  ciclo de execucao, jobs publicos e compilacao da spec
+  quality/        validacoes, politica de publicacao e quarentena
+  runtime/        ambiente, estado, spec, Langfuse e runtime opcional de LLM
+  transforms/     transformacoes Bronze, Silver, Gold e enrichment por conversa
 
 scripts/
-  bootstrap_langfuse_prompt.py
-  profile_bronze.py
-  plan_pipeline.py
-  monitor_pipeline.py
   run_pipeline.py
   run_pipeline_daemon.py
-
-config/
-  pipeline_spec.json
-
-data/
-  bronze/
-  silver/
-  gold/
-  quarantine/
-
-reports/
-  alerts/
-  agent_decisions/
-  bronze_profile.json
-  monitoring/
-
-state/
-  approval_state.json
-  pipeline_state.json
-  pipeline_spec_history.json
-
-docker-compose.yml
-Dockerfile
-.env.example
+  monitor_pipeline.py
+  plan_pipeline.py
+  bootstrap_langfuse_prompt.py
 ```
 
-## Aderencia ao teste
-
-| Requisito do teste | Evidencia principal | Implementacao |
-|---|---|---|
-| Pipeline em Python | scripts de execucao e modulos em `src/pipeline/` | `scripts/run_pipeline.py`, `scripts/run_pipeline_daemon.py`, `src/pipeline/orchestration/jobs.py` |
-| Bronze, Silver e Gold | artefatos parquet distintos por camada | `data/bronze/conversations.parquet`, `data/silver/silver_leads.parquet`, `data/silver/silver_messages.parquet`, `data/silver/silver_conversations_llm.parquet`, `data/gold/conversations_gold.parquet` |
-| Atualizacao automatica da Gold | reexecucao por fingerprint e modo continuo com polling | `src/pipeline/runtime/state.py`, `src/pipeline/orchestration/operator.py`, `scripts/run_pipeline_daemon.py` |
-| Silver organizada por lead | tabela principal com uma linha por `lead_key` e tabela auxiliar de rastreabilidade | `src/pipeline/transforms/silver.py`, `src/pipeline/quality/publication.py`, `tests/test_jobs.py` |
-| Gold analitica util | agregacao por lead com segmentacoes reproduziveis | `src/pipeline/transforms/gold.py`, `src/pipeline/quality/quality.py` |
-| Protecao de dados sensiveis | policy de publicacao sem PII e checks anti-vazamento | `src/pipeline/quality/publication.py`, `src/pipeline/quality/quality.py`, `tests/test_quality.py` |
-| Agente operacional | planejamento, diagnostico, playbooks seguros, fallback e aprovacao humana para mudancas estruturais | `src/pipeline/agent/planner.py`, `src/pipeline/agent/agent.py`, `src/pipeline/agent/approval.py`, `src/pipeline/orchestration/operator.py` |
-
-## Suite de aderencia
-
-Existe uma suite dedicada e avaliavel para os requisitos centrais do enunciado em `tests/test_requirements_adherence.py`.
-
-Ela funciona como a entrada principal para revisar, em poucos testes, as evidencias automatizadas de que o repositorio atende aos pontos mais cobrados do teste:
-
-- `Silver` principal com granularidade por lead e unicidade por `lead_key`
-- ausencia de campos crus de PII publicados em `Silver` e `Gold`
-- persistencia auditavel do enrichment semantico por `conversation_id`
-- atualizacao automatica de `Gold` quando a `Bronze` cresce
-- persistencia de estado operacional em artefato sob `state/`
-- geracao de diagnostico e alerta em falha simulada
-
-Execucao recomendada:
-
-```bash
-PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline.py --force
-venv/bin/python -m pytest -q
-venv/bin/python -m pytest tests/test_requirements_adherence.py -q
-```
-
-Baseline validado localmente:
-
-- o caminho minimo suportado para validacao do repositorio desabilita o enrichment LLM com `PIPELINE_ENABLE_LLM_ENRICHMENT=0`
-- esse modo nao depende de rede nem de credenciais externas e e o mesmo caminho coberto pelos testes de paridade de runtime
-- a execucao com providers habilitados continua opcional e deve ser tratada como modo de integracao, nao como requisito do baseline local
-- os scripts de runtime agora emitem logs operacionais no terminal durante a execucao via modulo padrao `logging`, sem criar arquivos `.log`; o resumo JSON final continua sendo impresso separadamente ao fim de cada execucao
-
-## Camadas do pipeline
+## Fluxo de dados
 
 ### Bronze
 
-`Bronze` replica `docs/conversations_bronze.parquet` para `data/bronze/conversations.parquet`, preservando o schema bruto em uma area controlada para reproducao e reprocessamento.
-
-A validacao de `Bronze` trata a regra `first_message_outbound` como diagnostico observacional, nao como bloqueio hard. A escolha foi intencional: o enunciado define a Bronze como replica fiel das conversas transacionais originais entre lead e vendedor humano no WhatsApp, e esse source real pode conter conversas iniciadas pelo lead. Derrubar a execucao nesses casos introduziria um contrato mais restritivo do que o exigido pelo teste tecnico e reduziria a resiliencia operacional do pipeline sobre a fonte fornecida.
+- Lê `docs/conversations_bronze.parquet`.
+- Replica a fonte para `data/bronze/conversations.parquet`.
+- Valida colunas obrigatórias, canal suportado e consistência básica.
+- Trata `first_message_outbound` como sinal diagnóstico, não como bloqueio hard, para preservar fidelidade da fonte real.
 
 ### Silver
 
-`Silver` e a camada de limpeza e enriquecimento. O contrato publicado tem tres artefatos:
+Publica três artefatos:
 
-- `data/silver/silver_leads.parquet`
-  Artefato principal da `Silver`, com uma linha por `lead_key`.
-- `data/silver/silver_messages.parquet`
-  Artefato auxiliar por mensagem deduplicada para preservar a rastreabilidade `lead_key -> conversation_id -> message_id`.
-- `data/silver/silver_conversations_llm.parquet`
-  Artefato intermediario por `conversation_id`, com classificacoes semanticas estruturadas, metadata de inferencia, cache por hash de entrada, normalizacao canonica de drift lexical do provider antes da validacao estrita e fallback deterministico quando o enrichment LLM esta desabilitado, indisponivel ou invalido.
+- `data/silver/silver_leads.parquet`: visão principal por `lead_key`.
+- `data/silver/silver_messages.parquet`: rastreabilidade por mensagem com deduplicação e campos mascarados.
+- `data/silver/silver_conversations_llm.parquet`: enriquecimento semântico por `conversation_id`.
 
-O runtime pode usar colunas cruas em memoria para deduplicacao, extracao e agregacao, mas os artefatos publicados removem colunas proibidas como:
+Principais responsabilidades:
 
-- `sender_name`
-- `sender_phone`
-- `message_body`
-- `conversation_lead_name`
-- `conversation_lead_phone`
-- `conversation_agent_name`
-- `sender_name_normalized`
-- `lead_name_raw`
-- `lead_phone_raw`
-
-O contrato principal de `silver_leads.parquet` inclui, entre outras:
-
-- `lead_key`
-- `canonical_lead_name_masked`
-- `lead_contact_ref`
-- `city`
-- `state`
-- `first_seen_at`
-- `last_seen_at`
-- `conversation_count`
-- `message_count`
-- `observed_campaign_ids`
-- `observed_lead_sources`
-- `observed_outcomes`
-- `has_vehicle_signal`
-- `has_competitor_signal`
-- `has_sinistro_signal`
-- `has_email_signal`
-- `has_phone_signal`
-- `has_cpf_signal`
-- `has_cep_signal`
-- `has_plate_signal`
-
-Colecoes observadas sao persistidas em formato deterministico para revisao e reprocessamento consistente.
-
-`lead_contact_ref` segue um contrato seguro de publicacao: ele prioriza telefone mascarado quando existe evidencia publicada e faz fallback para `lead_key` sintetico quando nao existe contato publicavel. A validacao de privacidade distingue explicitamente identificadores sinteticos de telefones crus para evitar falso positivo sem relaxar a deteccao de vazamento real.
-
-O contrato auxiliar de `silver_messages.parquet` inclui, entre outras:
-
-- `lead_key`
-- `conversation_id`
-- `message_id`
-- `timestamp`
-- `direction`
-- `message_type`
-- `sender_name_masked`
-- `sender_phone_masked`
-- `message_body_masked`
-- `duplicate_event_group_size`
-- `had_status_duplication`
-- `dropped_duplicate_events`
-- `mentions_vehicle`
-- `mentions_competitor`
-- `mentions_sinistro`
-- `contains_email`
-- `contains_phone`
-- `contains_cpf`
-- `contains_cep`
-- `contains_plate`
-- `vehicle_make`
-- `vehicle_model`
-- `vehicle_year`
-- `quoted_price`
-- `sinistro_type`
-- `metadata_*` expandido a partir do JSON de origem
-
-O contrato de `silver_conversations_llm.parquet` inclui, entre outras:
-
-- `conversation_id`
-- `lead_key`
-- `conversation_started_at`
-- `conversation_last_message_at`
-- `llm_input_hash`
-- `prompt_version`
-- `prompt_source`
-- `prompt_name`
-- `prompt_label`
-- `llm_model`
-- `provider_name`
-- `provider_attempt_count`
-- `provider_error_summary`
-- `inference_status`
-- `trace_id`
-- `processed_at_utc`
-- `sentiment_label`
-- `sentiment_confidence_band`
-- `intent_stage`
-- `persona_profile`
-- `audience_segment`
-- `price_objection_intensity`
-- `competitor_pressure_level`
-- `commercial_urgency_signal`
-- `recommended_next_action`
-- `explanation_short`
-- `fallback_reason`
-- `validation_error`
-
-No caminho opcional de provider, o runtime aplica uma etapa deterministica de normalizacao antes da validacao estrita do vocabulario controlado. Isso permite aceitar drift lexical seguro, como `negative -> negativo`, `high -> forte` e `strong -> forte`, sem relaxar o contrato publicado nem aceitar termos ambiguos como `skeptical`.
-
-Essa escolha nao foi feita apenas no prompt do provider. O prompt agora tambem envia os vocabularios aceitos e instrui a LLM a nao inventar labels, mas isso sozinho nao e suficiente como contrato de runtime. Providers ainda podem retornar sinonimos, labels em ingles ou estagios intermediarios mesmo quando a instrucao e clara. Por isso a arquitetura usa tres camadas complementares: o prompt reduz drift na origem, a normalizacao corrige apenas drift lexical seguro de forma deterministica e testavel, e a validacao estrita continua rejeitando qualquer valor ambiguo ou fora do contrato final.
+- organização por lead
+- parsing de `metadata`
+- deduplicação por chave semântica estável
+- extração de sinais de contato, veículo, concorrente e sinistro
+- mascaramento de PII mantendo dimensão do valor original
+- publicação apenas de colunas seguras
 
 ### Gold
 
-`Gold` e a camada analitica principal publicada em `data/gold/conversations_gold.parquet`. Cada linha representa um unico `lead_key` consolidando todas as conversas conhecidas do lead.
+Publica `data/gold/conversations_gold.parquet` com uma visão analítica por lead. Entre os atributos calculados estão:
 
-O build da `Gold` consome explicitamente:
+- volume e distribuição de mensagens
+- bucket de engajamento
+- persona e audiência
+- lead temperature
+- intent stage
+- price sensitivity
+- contact readiness
+- competitor pressure
+- commercial urgency
+- dominant email provider
+- closure outcome group
+- conversation sentiment
 
-- `silver_leads.parquet` como resumo primario por lead
-- `silver_messages.parquet` como historico auxiliar para metricas dependentes do nivel de mensagem
-- `silver_conversations_llm.parquet` como contrato interpretativo por conversa para consolidacao semantica em nivel de lead
+## Como rodar o projeto
 
-Contrato semantico da `Gold`:
+### Pré-requisitos
 
-- campos deterministas continuam sendo derivados apenas de evidencia reproduzivel em `silver_messages`
-- campos interpretativos continuam vindo da consolidacao por conversa de `silver_conversations_llm`
-- severidades comerciais (`price_objection_intensity`, `commercial_urgency_signal`, `competitor_pressure_level`) permanecem no contrato determinista da `Gold`
-- segmentacao e sentimento publicados em `Gold` carregam colunas de proveniencia (`*_source_family`) para distinguir `llm_provider`, `deterministic_fallback` e `mixed`
-- `audience_segment` e preservado como saida interpretativa consolidada de `silver_conversations_llm`; alta pressao competitiva nao pode sobrescrever esse campo em `Gold`
-- quando a entrada interpretativa chegar incompleta ou contraditoria para o par `persona_profile` + `audience_segment`, a publicacao faz fallback explicito do par inteiro para o contrato deterministico, mantendo a proveniencia coerente
+- Python 3.11
+- ambiente virtual local em `venv/`
+- dependências instaladas a partir de `requirements.txt`
 
-Regras centrais de agregacao:
-
-- `first_seen_at` e `last_seen_at` por minimo e maximo do historico do lead
-- `conversation_count` por contagem distinta de `conversation_id`
-- `total_messages`, `inbound_messages`, `outbound_messages` e `duplicate_events_removed` por soma no historico deduplicado
-- sinais booleanos como `contains_email`, `contains_phone`, `mentioned_vehicle`, `mentioned_competitor` e `mentioned_sinistro` por OR logico
-- contexto de preco, concorrente, veiculo e sinistro por selecao deterministica do ultimo valor nao nulo observado
-
-Principais colunas analiticas:
-
-- `lead_key`
-- `conversation_count`
-- `total_messages`
-- `inbound_messages`
-- `outbound_messages`
-- `duplicate_events_removed`
-- `contains_email`
-- `contains_phone`
-- `contains_cpf`
-- `contains_cep`
-- `contains_plate`
-- `mentioned_vehicle`
-- `mentioned_competitor`
-- `mentioned_sinistro`
-- `avg_response_time_sec`
-- `city`
-- `state`
-- `observed_lead_sources`
-- `observed_campaign_ids`
-- `observed_outcomes`
-- `dominant_email_provider`
-- `engagement_bucket`
-- `data_shared_score`
-- `persona_profile`
-- `audience_segment`
-- `lead_temperature`
-- `price_sensitivity`
-- `intent_stage`
-- `contact_readiness`
-- `risk_signal`
-- `response_latency_band`
-- `closure_outcome_group`
-- `has_closed_outcome`
-- `price_objection_intensity`
-- `commercial_urgency_signal`
-- `competitor_pressure_level`
-- `conversation_sentiment_label`
-- `conversation_sentiment_support`
-- `intent_stage_source_family`
-- `persona_profile_source_family`
-- `audience_segment_source_family`
-- `conversation_sentiment_source_family`
-- `positive_tone_hits`
-- `negative_tone_hits`
-
-Segmentacoes atuais:
-
-- `persona_profile`: `cotador_comparador`, `cliente_pos_sinistro`, `lead_engajado_com_dados`, `lead_frio`
-- `audience_segment`: `oferta_competitiva`, `retencao_pos_sinistro`, `close_comercial`, `nutricao_basica`
-- `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness` e `risk_signal` com vocabularios controlados validados em runtime
-
-Enriquecimentos analiticos adicionais:
-
-- `dominant_email_provider`: familia normalizada inferida deterministicamente de e-mails observados no historico, com vocabulario controlado e `null` quando nao ha evidencia
-- `response_latency_band`: `sem_evidencia`, `rapida`, `moderada` ou `lenta`, derivada de `avg_response_time_sec`
-- `closure_outcome_group` e `has_closed_outcome`: normalizacao de desfechos observados para suportar analise de taxa de fechamento por perfil
-- `price_objection_intensity`: `nenhuma`, `leve` ou `forte`, derivada de sinais de cotacao, pressao de preco e contexto competitivo
-- `commercial_urgency_signal`: `nenhuma`, `moderada` ou `alta`, derivada de sinais linguísticos de urgencia e do ciclo observado do lead
-- `competitor_pressure_level`: `nenhuma`, `leve` ou `alta`, derivada de mencoes nomeadas a concorrentes e tambem de sinais genericos de comparacao comercial
-- `conversation_sentiment_label`: `positivo`, `neutro`, `negativo` ou `sem_evidencia`, consolidado da classificacao por conversa
-- `conversation_sentiment_support`: `fraco`, `moderado`, `forte` ou `sem_evidencia`, consolidado do suporte por conversa
-- `*_source_family`: proveniencia das familias interpretativas publicadas em `Gold`
-- `positive_tone_hits` e `negative_tone_hits`: contagens agregadas de familias de pistas lexicais positivas e negativas encontradas no historico inbound
-
-Exemplos de grouped analysis habilitados diretamente pela `Gold`:
-
-- fechamento por `persona_profile` usando `has_closed_outcome` ou `closure_outcome_group`
-- latencia media e distribuicao de `response_latency_band` por `audience_segment`, `city` ou `state`
-- intensidade de objecao de preco por canal de origem usando `price_objection_intensity`
-- pressao competitiva por perfil usando `competitor_pressure_level` e `primary_competitor`
-- leads com maior friccao comercial usando `conversation_sentiment_label = negativo` e `conversation_sentiment_support`
-- interacoes favoraveis para priorizacao comercial usando `conversation_sentiment_label = positivo` combinado com `contact_readiness`
-
-Observacoes sobre enrichment semantico:
-
-- o enrichment por conversa e opcional e fica fora do caminho de controle operacional do agente
-- quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1`, o pipeline monta um runtime dedicado em `src/pipeline/runtime/llm_runtime.py` para executar OpenAI como provider primario e Anthropic como fallback por conversa
-- quando `PIPELINE_ENABLE_LANGFUSE=1`, o mesmo runtime pode adicionar tracing opcional no Langfuse sem tornar o pipeline dependente dele
-- o runtime registra `provider_name`, `provider_attempt_count`, `provider_error_summary`, `prompt_source`, `prompt_version` resolvido e `trace_id` para auditoria sem expor payload cru nem credenciais
-- tracing de chamadas LangChain no Langfuse depende do pacote `langchain`; sem o callback, o runtime ainda pode resolver prompts e abrir o span raiz, mas nao anexa callbacks ao provider
-- prompt management via Langfuse e opcional: quando `PIPELINE_LANGFUSE_PROMPT_NAME` estiver configurado e o prompt for resolvido com sucesso, o cache passa a usar a versao resolvida do prompt no lugar do `prompt_version` local estatico
-- sem credenciais, com erro de provider ou com output invalido fora do vocabulario controlado, o pipeline persiste fallback deterministico e continua a publicacao
-- o cache evita recomputar conversas quando `llm_input_hash`, `prompt_version` e a identidade efetiva de modelos do runtime (`llm_model`) nao mudam
-- `scripts/run_pipeline.py` e `scripts/run_pipeline_daemon.py` fazem shutdown gracioso do cliente Langfuse ao encerrar o processo para nao perder eventos em execucoes curtas
-- sinais de preco, urgencia e concorrencia continuam auditaveis, direction-aware em `silver_messages` e o `Gold` sempre permanece publicavel mesmo sem LLM
-
-## Politica de protecao de dados
-
-O projeto protege dados sensiveis em duas etapas complementares:
-
-1. Mascaramento
-   O pipeline mascara nome, telefone e texto livre, preservando parte do formato visivel para manter utilidade analitica sem expor o valor original.
-2. Publicacao segura
-   Antes de escrever `Silver` e `Gold`, a camada de publicacao remove colunas cruas proibidas e as validacoes verificam o frame final publicado.
-
-Exemplos de mascaramento:
-
-- `Ana Paula` -> `XXX XXXXX`
-- `123.456.789-00` -> `XXX.XXX.XXX-XX`
-- `04567-123` -> `XXXXX-XXX`
-- `ana.paula@gmail.com` -> `xxx.xxxxx@xxxxx.xxx`
-- `ABC1D23` -> `XXX9X99`
-
-Dados que nao sao publicados em artefatos `Silver` e `Gold`:
-
-- nome cru
-- telefone cru
-- texto livre cru
-- nomes crus normalizados ou auxiliares usados para derivacao
-
-## Qualidade e agente operacional
-
-O pipeline e dirigido por spec:
-
-- `config/pipeline_spec.json` descreve colunas obrigatorias, deduplicacao, validacoes, segmentacoes e playbooks seguros
-- `src/pipeline/orchestration/compiler.py` compila a spec para um plano executavel
-- `src/pipeline/agent/planner.py` inspeciona a Bronze e propoe evolucoes estruturadas da spec em modo recomendacao por padrao
-- `src/pipeline/agent/approval.py` controla aprovacao humana explicita para qualquer aplicacao estrutural na spec
-- `src/pipeline/orchestration/operator.py` executa o ciclo operacional completo
-- `src/pipeline/agent/agent.py` diagnostica falhas de validacao e escolhe playbooks seguros
-- `src/pipeline/agent/llm_advisor.py` existe apenas como interface opcional do agente operacional; ele nao participa do caminho principal e pode estar desabilitado sem afetar a execucao
-- `src/pipeline/transforms/conversation_enrichment.py` monta payloads sanitizados por conversa, controla cache por hash, integra o runtime de providers, valida outputs estruturados e persiste fallback seguro
-- `src/pipeline/runtime/llm_runtime.py` concentra resolucao de configuracao, roteamento OpenAI -> Anthropic, metadata de tentativas e integracao opcional com LangChain/LangGraph
-
-A exigencia de aprovacao humana para mudancas estruturais foi uma decisao arquitetural deliberada. O objetivo foi manter o pipeline auditavel, reproduzivel e seguro para um teste tecnico com contratos publicados, permitindo autonomia operacional apenas onde o risco e controlado e deixando evolucoes de schema, segmentacao e spec sob governanca explicita.
-
-Checks atuais de validacao:
-
-- Bronze:
-  - colunas obrigatorias
-  - unicidade de `message_id`
-  - canal restrito a `whatsapp`
-  - diagnostico semantico de conversas em que a primeira mensagem por `conversation_id` nao e `outbound`, sem bloquear a execucao do pipeline
-- Silver principal:
-  - ausencia de colunas cruas proibidas
-  - presenca de `canonical_lead_name_masked` e `lead_contact_ref`
-  - unicidade de `lead_key`
-  - `first_seen_at` e `last_seen_at` nao nulos
-  - contagens agregadas nao negativas
-  - varredura anti-vazamento em campos publicados
-  - consistencia semantica com `silver_messages` para `first_seen_at`, `last_seen_at`, `conversation_count`, `message_count` e propagacao de sinais booleanos
-- Silver auxiliar:
-  - ausencia de colunas cruas proibidas
-  - presenca de `sender_name_masked`, `sender_phone_masked` e `message_body_masked`
-  - `timestamp` nao nulo
-  - unicidade pelas chaves de deduplicacao publicadas
-  - checks anti-vazamento por classe sensivel: e-mail, telefone, CPF, CEP e placa
-  - consistencia de `mentions_vehicle`
-- Silver enrichment por conversa:
-  - contrato obrigatorio por `conversation_id`
-  - status de inferencia validos e schema controlado
-  - vocabularios validos para classificacoes semanticas e `recommended_next_action`
-  - varredura anti-vazamento em `explanation_short`
-- Gold:
-  - ausencia de colunas cruas proibidas
-  - varredura anti-vazamento em qualquer coluna textual publicada nao excluida explicitamente
-  - colunas obrigatorias
-  - unicidade de `lead_key`
-  - `conversation_count`, `total_messages` e `duplicate_events_removed` nao negativos
-  - vocabularios validos para `engagement_bucket`, `persona_profile`, `audience_segment`, `lead_temperature`, `price_sensitivity`, `intent_stage`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level`
-  - consistencia semantica com `silver` e `silver_messages` para chaves, intervalos de tempo, totais agregados e sinais observados
-  - coerencia deterministica de `engagement_bucket`, `lead_temperature`, `contact_readiness`, `risk_signal`, `dominant_email_provider`, `response_latency_band`, `closure_outcome_group`, `has_closed_outcome`, `price_objection_intensity`, `commercial_urgency_signal` e `competitor_pressure_level` com os fatos publicados e com os sinais agregados de `silver_messages`
-  - validacao separada para campos interpretativos, com checagem de vocabulario, alinhamento `persona_profile` x `audience_segment`, proveniencia `*_source_family` e compatibilidade grosseira com evidencia publicada, sem exigir igualdade exata com heuristicas lexicais
-
-As validacoes semanticas usam apenas identificadores tecnicos e amostras limitadas de `lead_key` ou `conversation_id` nos diagnosticos. O runtime nao publica corpo de mensagem, nome cru, telefone cru ou outros valores sensiveis nos payloads de falha.
-
-Status operacionais observaveis nos relatorios:
-
-- `success`
-- `success_after_auto_remediation`
-- `fallback_to_last_successful`
-- `skipped_no_source_change`
-- `idle_no_source_change` no relatorio agencial quando nao ha mudanca na fonte
-- `auto_remediated`, `not_auto_remediable`, `manual_intervention_required` e `fallback_applied` no `latest_agent_report.json` para classificar o tratamento operacional
-
-Importante: o agente e deterministico e limitado ao escopo implementado no repositorio. Ele nao reescreve o codigo Python livremente, nao trata toda falha como auto-remediavel e nao executa evolucao estrutural autonoma sem aprovacao. Isso nao e uma restricao acidental: foi uma decisao arquitetural para separar remediacao operacional segura de mudanca estrutural com impacto de contrato.
-
-## Execucao
-
-Com o ambiente virtual criado e as dependencias instaladas:
+### Setup local
 
 ```bash
-venv/bin/python scripts/profile_bronze.py
-venv/bin/python scripts/plan_pipeline.py
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+cp .env.example .env
+```
+
+### Execução local baseline
+
+O caminho baseline do repositório não depende de rede nem de credenciais externas. Ele usa fallback determinístico para o enrichment semântico.
+
+```bash
 PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline.py --force
-venv/bin/python scripts/run_pipeline.py
-venv/bin/python scripts/run_pipeline.py --force
+```
+
+Saídas principais após a execução:
+
+- `data/bronze/conversations.parquet`
+- `data/silver/silver_leads.parquet`
+- `data/silver/silver_messages.parquet`
+- `data/silver/silver_conversations_llm.parquet`
+- `data/gold/conversations_gold.parquet`
+- `reports/monitoring/latest_run_report.json`
+- `reports/monitoring/latest_agent_report.json`
+- `reports/monitoring/latest_alert_report.json`
+- `state/pipeline_state.json`
+
+### Execução contínua
+
+Para manter o pipeline vivo com polling periódico:
+
+```bash
+PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline_daemon.py --force-first-run --poll-interval-seconds 300
+```
+
+Comportamento:
+
+- o runtime calcula fingerprint da fonte a partir de path, tamanho e `mtime`
+- se nada mudou, a execução é pulada
+- se a fonte cresceu ou mudou, Bronze, Silver e Gold são reprocessadas
+- o estado operacional é persistido em `state/pipeline_state.json`
+
+### Monitoramento e planejamento
+
+```bash
 venv/bin/python scripts/monitor_pipeline.py
-venv/bin/python scripts/run_pipeline_daemon.py --force-first-run --poll-interval-seconds 60
+venv/bin/python scripts/plan_pipeline.py
+```
+
+- `monitor_pipeline.py` consolida snapshot operacional do pipeline.
+- `plan_pipeline.py` roda o planner estrutural que detecta drift de schema e propostas de atualização de contrato.
+
+### Execução com Docker Compose
+
+Há suporte opcional a `docker-compose.yml` para subir o pipeline em modo contínuo junto com uma stack local de Langfuse.
+
+```bash
+docker compose up --build
+```
+
+Esse modo é útil para observabilidade e integração com providers, mas não é necessário para o baseline de validação local.
+
+## Variáveis de ambiente relevantes
+
+As variáveis estão exemplificadas em [`.env.example`](/home/lucas/projects/lucas54neves/namastex-test/.env.example). As mais importantes para a entrega são:
+
+- `PIPELINE_ENABLE_LLM_ENRICHMENT`: habilita ou desabilita enrichment por provider externo.
+- `PIPELINE_POLL_INTERVAL_SECONDS`: intervalo do daemon.
+- `PIPELINE_ENABLE_LANGFUSE`: habilita observabilidade do enrichment.
+- `OPENAI_API_KEY`: credencial opcional para provider OpenAI.
+- `ANTHROPIC_API_KEY`: credencial opcional para provider Anthropic.
+
+## Testes
+
+Conforme a regra do repositório, os testes devem ser executados com o ambiente virtual local:
+
+```bash
 venv/bin/python -m pytest -q
 venv/bin/python -m pytest tests/test_jobs.py -q
+venv/bin/python -m pytest tests/test_requirements_adherence.py -q
 ```
 
-Configuracao por `.env`:
+A suíte de aderência cobre explicitamente:
 
-```bash
-cp .env.example .env
-```
+- Silver principal com granularidade por lead
+- ausência de PII crua nos artefatos publicados
+- persistência do enrichment por conversa
+- atualização automática da Gold após crescimento da Bronze
+- persistência de estado operacional
+- geração de diagnóstico e alerta em falha simulada
 
-O runtime carrega automaticamente o arquivo `.env` na raiz do repositorio. Variaveis ja exportadas no shell continuam tendo precedencia.
+## Agente operacional
 
-Para validar o repositorio de forma deterministica, prefira sobrescrever `PIPELINE_ENABLE_LLM_ENRICHMENT=0` no comando, mesmo se o `.env` local habilitar providers opcionais por padrao.
+O agente deste projeto não governa o pipeline por LLM. Ele é determinístico, auditável e restrito. Suas responsabilidades são:
 
-## Docker Compose com Langfuse self-hosted
+- compilar e aplicar a `pipeline_spec.json`
+- detectar drift de schema e metadados
+- gerar propostas estruturais sujeitas a aprovação
+- classificar falhas conhecidas em diagnósticos operacionais
+- executar apenas playbooks seguros permitidos
+- isolar registros inválidos em quarentena quando aplicável
+- emitir relatórios e alertas
+- restaurar o último estado íntegro em falhas inesperadas
 
-O repositorio tambem oferece um caminho opcional com `docker compose` para subir o pipeline junto com um Langfuse self-hosted inicializado por variaveis de ambiente e com bootstrap automatico do prompt versionado.
+Principais artefatos operacionais:
 
-Fluxo minimo:
+- `reports/monitoring/latest_run_report.json`
+- `reports/monitoring/latest_agent_report.json`
+- `reports/monitoring/latest_plan_report.json`
+- `reports/alerts/`
+- `reports/agent_decisions/latest_agent_decision.json`
+- `state/pipeline_state.json`
+- `state/approval_state.json`
+- `state/pipeline_spec_history.json`
 
-```bash
-cp .env.example .env
-docker compose up --build
-docker compose down
-docker compose down -v
-```
+## Decisões técnicas do projeto
 
-Contrato operacional desse modo:
+### 1. Agente determinístico em vez de agente autônomo generativo
 
-- `langfuse-web` e exposto ao host na porta `3000` por padrao
-- `postgres`, `clickhouse`, `redis`, `minio`, `langfuse-worker`, `langfuse-bootstrap` e `pipeline` ficam internos a rede do Compose
-- `LANGFUSE_INIT_*` inicializa organizacao, projeto, usuario e chaves sem exigir setup manual pela UI
-- `langfuse-bootstrap` espera readiness do `langfuse-web` e cria ou atualiza o prompt `PIPELINE_LANGFUSE_PROMPT_NAME` com o label configurado
-- `pipeline` usa `http://langfuse-web:3000` internamente e recebe as mesmas chaves inicializadas no Langfuse
-- se o bootstrap falhar, o pipeline continua com o prompt local quando `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK=1`
-- `langfuse-worker` usa uma imagem local derivada de `langfuse/langfuse-worker:3` para remover o `socketTimeout` Redis hardcoded da imagem base; isso evita falsos erros em filas Redis/BullMQ locais que ficam bloqueadas aguardando trabalho por design
-- os volumes nomeados preservam traces, prompts e recursos inicializados entre `docker compose down` e o proximo `docker compose up`; use `docker compose down -v` apenas para recriar o ambiente do zero
+O enunciado exige um agente que crie e mantenha o pipeline, mas não exige que ele tome decisões estruturais livres. A escolha foi usar um agente determinístico com regras explícitas, diagnósticos mapeados e playbooks seguros. Isso reduz risco operacional, melhora auditabilidade e facilita defesa técnica da solução.
 
-Limitacoes:
+### 2. Bronze como réplica fiel e não como camada de correção
 
-- esse deployment e intencionalmente de baixa escala e para validacao local; nao representa arquitetura HA ou caminho de producao
-- o baseline do repositorio continua sendo a execucao local via `venv/bin/python`; o Compose e opcional
-- no arquivo `.env` usado pelo Compose, prefira manter `LANGFUSE_INIT_*` sem aspas para evitar problemas de headless initialization
+A Bronze foi tratada como réplica controlada da fonte original. Isso preserva reprodutibilidade, permite auditoria da entrada e evita esconder problemas reais logo na ingestão.
 
-Variaveis de ambiente operacionais e de LLM:
+### 3. Silver principal por lead e Silver auxiliar por mensagem
 
-```bash
-PIPELINE_POLL_INTERVAL_SECONDS="60"
-PIPELINE_ALERT_WEBHOOK_URL="https://seu-endpoint-de-alerta"
-PIPELINE_ALERT_SUPPRESSION_MINUTES="30"
-PIPELINE_ENABLE_LLM_ENRICHMENT="0"
-PIPELINE_ENABLE_LLM_ADVISOR="0"
-PIPELINE_ENABLE_LANGFUSE="0"
-OPENAI_API_KEY="sua-chave-openai"
-ANTHROPIC_API_KEY="sua-chave-anthropic"
-LANGFUSE_PUBLIC_KEY="sua-chave-publica-langfuse"
-LANGFUSE_SECRET_KEY="sua-chave-secreta-langfuse"
-LANGFUSE_BASE_URL="https://cloud.langfuse.com"
-PIPELINE_LLM_OPENAI_MODEL="gpt-5-mini"
-PIPELINE_LLM_ANTHROPIC_MODEL="claude-sonnet"
-PIPELINE_LLM_TIMEOUT_SECONDS="20"
-PIPELINE_LLM_MAX_RETRIES="1"
-PIPELINE_LANGFUSE_PROMPT_NAME="conversation-enrichment-v1"
-PIPELINE_LANGFUSE_PROMPT_LABEL="production"
-PIPELINE_LANGFUSE_TRACE_NAME="conversation-enrichment"
-PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK="1"
-PIPELINE_LANGFUSE_BOOTSTRAP_ENABLED="1"
-PIPELINE_LANGFUSE_BOOTSTRAP_READY_TIMEOUT_SECONDS="180"
-PIPELINE_LANGFUSE_BOOTSTRAP_READY_POLL_INTERVAL_SECONDS="2"
-```
+O enunciado pede Silver organizada por usuário/lead, mas a rastreabilidade por mensagem continua importante para auditoria e agregações. Por isso a solução separa:
 
-Notas de operacao do Langfuse:
+- um artefato principal por `lead_key`
+- um artefato auxiliar por mensagem
+- um artefato intermediário por conversa para semântica
 
-- `PIPELINE_ENABLE_LANGFUSE=1` ativa tracing opcional; se credenciais ou SDK estiverem ausentes, o runtime degrada para execucao sem tracing
-- o SDK Langfuse usa `langchain` para importar `langfuse.langchain.CallbackHandler`; essa dependencia fica declarada em `requirements.txt` para que o Compose registre callbacks e geracoes do provider
-- `PIPELINE_LANGFUSE_PROMPT_NAME` + `PIPELINE_LANGFUSE_PROMPT_LABEL` ativam prompt management; o prompt local continua como fallback controlado quando `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK=1`
-- no caminho Compose, `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` e `LANGFUSE_INIT_PROJECT_SECRET_KEY` sao a fonte de verdade compartilhada entre inicializacao headless, bootstrap e runtime do pipeline
-- `scripts/bootstrap_langfuse_prompt.py` espera `langfuse-web` responder em `/api/public/ready` e em `/api/public/health?failIfDatabaseUnavailable=true` antes de tentar publicar o prompt
-- o payload enviado ao Langfuse respeita o mesmo limite de privacidade do payload ja enviado ao provider: apenas dados mascarados e metadata tecnica por conversa
+Essa escolha equilibra requisito de negócio, rastreabilidade e clareza do contrato.
 
-O modo continuo:
+### 4. Mascaramento com preservação de dimensão
 
-- executa o pipeline em loop
-- recalcula a execucao quando o fingerprint da fonte muda
-- evita reprocessamento quando a Bronze nao mudou
-- pode rodar indefinidamente ou com numero fixo de ciclos via `--max-cycles`
+Dados sensíveis são mascarados mantendo a forma geral do valor, atendendo ao enunciado e preservando utilidade operacional. Além do mascaramento, a publicação remove colunas proibidas e as validações procuram vazamento real em campos textuais.
 
-Exemplo de execucao controlada:
+### 5. Gold atualizada por fingerprint da fonte
 
-```bash
-venv/bin/python scripts/run_pipeline_daemon.py \
-  --force-first-run \
-  --poll-interval-seconds 30 \
-  --max-cycles 5
-```
+Para manter o pipeline "vivo" sem reprocessar inutilmente, o runtime compara fingerprint da Bronze raw source usando caminho, tamanho e tempo de modificação. Essa estratégia é simples, reprodutível e suficiente para o escopo do teste.
 
-## Artefatos gerados
+### 6. Enrichment semântico opcional com fallback determinístico
 
-### Dados
+O enrichment por conversa suporta providers externos e observabilidade com Langfuse, mas o baseline do projeto não depende disso. Quando o provider está desabilitado, indisponível ou retorna saída inválida, o sistema faz fallback determinístico e mantém o contrato publicado.
 
-| Caminho | Papel operacional |
-|---|---|
-| `data/bronze/conversations.parquet` | copia controlada da Bronze para reproducao e reprocessamento |
-| `data/silver/silver_leads.parquet` | contrato principal da `Silver`, uma linha por `lead_key` |
-| `data/silver/silver_messages.parquet` | artefato auxiliar de rastreabilidade e suporte a agregacoes |
-| `data/silver/silver_conversations_llm.parquet` | enrichment semantico por `conversation_id`, com cache, status e fallback auditavel |
-| `data/gold/conversations_gold.parquet` | tabela analitica principal por `lead_key` |
-| `data/quarantine/` | isolamento de registros invalidos ou inseguros quando necessario |
+### 7. Contrato declarativo central em `config/pipeline_spec.json`
 
-Observacao: arquivos legados, como `data/silver/conversations_silver.parquet`, podem existir de execucoes anteriores, mas nao representam o contrato publicado atual do runtime.
+A spec centraliza colunas obrigatórias, buckets válidos, domínios semânticos e regras estruturais do pipeline. Isso facilita validação, planejamento de drift e evolução controlada.
 
-### Relatorios
+### 8. Fallback para último estado íntegro
 
-| Caminho | Papel operacional |
-|---|---|
-| `reports/bronze_profile.json` | perfil exploratorio da Bronze |
-| `reports/monitoring/latest_run_report.json` | resumo da ultima execucao e das validacoes |
-| `reports/monitoring/latest_plan_report.json` | contexto detectado, propostas estruturais, estados de aprovacao e aplicacoes aprovadas |
-| `reports/monitoring/latest_agent_report.json` | diagnostico operacional, classificacao de auto-remediacao, decisoes, fallback e referencia ao planner |
-| `reports/monitoring/latest_alert_report.json` | consolidado do ultimo evento de alerta |
-| `reports/agent_decisions/latest_agent_decision.json` | resumo auditavel das decisoes do agente |
-| `reports/alerts/alert_history.json` | historico consolidado de eventos de alerta |
-| `reports/alerts/*.json` | incidentes persistidos por evento |
+Em falhas inesperadas, o operador preserva o último conjunto válido de artefatos. Isso foi escolhido para privilegiar continuidade operacional e evitar publicar saídas parcialmente corrompidas.
 
-### Estado
+### 9. Separação entre qualidade, transformação e orquestração
 
-| Caminho | Papel operacional |
-|---|---|
-| `state/pipeline_state.json` | estado de execucao, fingerprint e historico de runs |
-| `state/approval_state.json` | decisoes humanas persistidas para propostas estruturais identificadas por `proposal_id` |
-| `state/pipeline_spec_history.json` | historico de propostas/aplicacoes de mudanca da spec |
+O código foi organizado para deixar explícita a diferença entre:
 
-## Decisoes e trade-offs
+- regras de transformação
+- política de publicação
+- validação de contrato
+- orquestração do ciclo
+- comportamento do agente
 
-- `Silver` principal por lead
-  Esta modelagem atende melhor ao enunciado de dados organizados por usuario/lead. O trade-off e manter um segundo artefato de mensagens para nao perder rastreabilidade e suporte a agregacoes.
-- `Gold` por lead, nao por conversa
-  A camada analitica fica mais defensavel para segmentacao comercial e consolidacao de sinais. O trade-off e que metricas por conversa deixam de ser a entidade principal e passam a ser insumo auxiliar, inclusive quando o enrichment semantico e produzido por `conversation_id`.
-- Persistencia sem PII crua
-  Reduz o risco de exposicao e alinha documentacao e artefatos. O trade-off e que investigacao detalhada depende das versoes mascaradas e dos sinais derivados, nao de texto livre cru.
-- Agente deterministico e limitado
-  O comportamento e mais auditavel e seguro para o teste tecnico. O trade-off e menor flexibilidade do que um sistema autonomo irrestrito. A exigencia de aprovacao humana para mudancas estruturais foi mantida de forma intencional como parte dessa arquitetura.
+Essa divisão melhora manutenção, testes e legibilidade da entrega.
 
-## Limitacoes atuais
+## Limitações conhecidas
 
-- o agente atual e deterministico e baseado em regras; o `llm_advisor` e opcional
-- o enrichment LLM por conversa depende de habilitacao explicita e de um provedor conectado; sem isso, o pipeline permanece funcional com fallback deterministico
-- a operacao continua e por polling local, nao por orquestrador externo como Airflow ou systemd
-- o planner agora emite propostas estruturadas e auditaveis para schema, validacoes, derivacoes, segmentacoes e regras de transformacao; ele nao altera o codigo Python por conta propria
-- a `Gold` e explicavel e reproduzivel, mas ainda pode evoluir com taxonomias semanticas de dominio e conectores reais de inferencia
+- O fingerprint observa mudança do arquivo de entrada, não CDC linha a linha.
+- O modo com provider externo depende de credenciais, rede e disponibilidade do serviço.
+- O planner estrutural propõe mudanças e exige aprovação para alterações de contrato, em vez de modificar tudo automaticamente.
+- O projeto foi otimizado para o dataset e o escopo do teste, não como plataforma multi-tenant completa.
 
-## Testes automatizados
+## Referências
 
-A suite atual cobre:
-
-- mascaramento de PII preservando formato
-- deduplicacao com retencao do `status` mais informativo
-- contratos de publicacao sem PII
-- enrichment semantico por conversa com cache, validacao e fallback
-- checks anti-vazamento em `Silver` e `Gold`
-- modelagem `Silver` principal por lead e `Gold` por lead
-- planner, spec e aprovacao
-- quarentena de registros invalidos
-- execucao incremental por fingerprint
-- fallback em erro inesperado
-- modo continuo com polling e ciclos controlados
+- [Enunciado técnico](/home/lucas/projects/lucas54neves/namastex-test/docs/technical-test-data-ai-engineering.md)
+- [Data dictionary](/home/lucas/projects/lucas54neves/namastex-test/docs/data-dictionary-data-ai-engineering.md)
