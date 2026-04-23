@@ -78,24 +78,50 @@ def _required_env(env: dict[str, str], name: str) -> str:
     return value
 
 
+def _optional_env(env: dict[str, str], name: str, default: str) -> str:
+    value = env.get(name, "").strip()
+    return value or default
+
+
+def _optional_int_env(env: dict[str, str], name: str, default: int) -> int:
+    value = env.get(name, "").strip()
+    return int(value) if value else default
+
+
 def build_databricks_deployment_config(
     repo_root: Path,
     env: dict[str, str] | None = None,
 ) -> DatabricksDeploymentConfig:
     runtime_env = dict(os.environ if env is None else env)
     host = _required_env(runtime_env, "DATABRICKS_HOST")
-    workspace_root = runtime_env.get("DATABRICKS_WORKSPACE_ROOT", "/Workspace/Shared/namastex-test")
-    catalog_name = runtime_env.get("DATABRICKS_CATALOG", "main")
-    schema_name = runtime_env.get("DATABRICKS_SCHEMA", "ops")
-    input_volume_name = runtime_env.get("DATABRICKS_INPUT_VOLUME", "bronze_input")
-    output_volume_name = runtime_env.get("DATABRICKS_OUTPUT_VOLUME", "pipeline_output")
+    workspace_root = _optional_env(
+        runtime_env,
+        "DATABRICKS_WORKSPACE_ROOT",
+        "/Workspace/Shared/namastex-test",
+    )
+    catalog_name = _optional_env(runtime_env, "DATABRICKS_CATALOG", "main")
+    schema_name = _optional_env(runtime_env, "DATABRICKS_SCHEMA", "ops")
+    input_volume_name = _optional_env(runtime_env, "DATABRICKS_INPUT_VOLUME", "bronze_input")
+    output_volume_name = _optional_env(
+        runtime_env,
+        "DATABRICKS_OUTPUT_VOLUME",
+        "pipeline_output",
+    )
     output_volume_path = f"/Volumes/{catalog_name}/{schema_name}/{output_volume_name}"
     input_volume_path = f"/Volumes/{catalog_name}/{schema_name}/{input_volume_name}"
-    input_filename = runtime_env.get("DATABRICKS_INPUT_FILENAME", "conversations_bronze.parquet")
+    input_filename = _optional_env(
+        runtime_env,
+        "DATABRICKS_INPUT_FILENAME",
+        "conversations_bronze.parquet",
+    )
 
     return DatabricksDeploymentConfig(
         host=host,
-        job_name=runtime_env.get("DATABRICKS_JOB_NAME", "namastex-test-pipeline"),
+        job_name=_optional_env(
+            runtime_env,
+            "DATABRICKS_JOB_NAME",
+            "namastex-test-pipeline",
+        ),
         workspace_root=workspace_root.rstrip("/"),
         workspace_script_path=f"{workspace_root.rstrip('/')}/scripts/run_pipeline.py",
         catalog_name=catalog_name,
@@ -110,10 +136,18 @@ def build_databricks_deployment_config(
         runtime_dir=f"{output_volume_path}/runtime",
         config_dir=f"{workspace_root.rstrip('/')}/config",
         pipeline_input_file=f"{input_volume_path}/{input_filename}",
-        spark_version=runtime_env.get("DATABRICKS_SPARK_VERSION", "15.4.x-scala2.12"),
-        node_type_id=runtime_env.get("DATABRICKS_NODE_TYPE_ID", "Standard_DS3_v2"),
-        num_workers=int(runtime_env.get("DATABRICKS_NUM_WORKERS", "1")),
-        poll_seconds=int(runtime_env.get("DATABRICKS_RUN_POLL_SECONDS", "10")),
+        spark_version=_optional_env(
+            runtime_env,
+            "DATABRICKS_SPARK_VERSION",
+            "15.4.x-scala2.12",
+        ),
+        node_type_id=_optional_env(
+            runtime_env,
+            "DATABRICKS_NODE_TYPE_ID",
+            "Standard_DS3_v2",
+        ),
+        num_workers=_optional_int_env(runtime_env, "DATABRICKS_NUM_WORKERS", 1),
+        poll_seconds=_optional_int_env(runtime_env, "DATABRICKS_RUN_POLL_SECONDS", 10),
         optional_job_env={
             name: value.strip()
             for name in _OPTIONAL_JOB_ENV_VARS

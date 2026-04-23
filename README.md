@@ -239,36 +239,43 @@ As variáveis estão exemplificadas em [`.env.example`](/home/lucas/projects/luc
 
 ### Variáveis para execução em Databricks
 
-O deploy automatizado via GitHub Actions usa duas classes de configuração:
+O deploy automatizado via GitHub Actions usa duas classes de configuração.
 
-- GitHub Secrets obrigatórios:
-  - `DATABRICKS_HOST`
-  - `DATABRICKS_TOKEN`
-- GitHub Secrets opcionais para LLM/observabilidade:
-  - `OPENAI_API_KEY`
-  - `LANGFUSE_PUBLIC_KEY`
-  - `LANGFUSE_SECRET_KEY`
-- GitHub Variables recomendadas:
-  - `DATABRICKS_WORKSPACE_ROOT`
-  - `DATABRICKS_JOB_NAME`
-  - `DATABRICKS_CATALOG`
-  - `DATABRICKS_SCHEMA`
-  - `DATABRICKS_INPUT_VOLUME`
-  - `DATABRICKS_OUTPUT_VOLUME`
-  - `DATABRICKS_SPARK_VERSION`
-  - `DATABRICKS_NODE_TYPE_ID`
-  - `DATABRICKS_NUM_WORKERS`
-  - `DATABRICKS_RUN_POLL_SECONDS`
-  - `PIPELINE_ENABLE_LLM_ENRICHMENT`
-  - `PIPELINE_LLM_OPENAI_MODEL`
-  - `PIPELINE_LLM_TIMEOUT_SECONDS`
-  - `PIPELINE_LLM_MAX_RETRIES`
-  - `PIPELINE_ENABLE_LANGFUSE`
-  - `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK`
-  - `PIPELINE_LANGFUSE_PROMPT_NAME`
-  - `PIPELINE_LANGFUSE_PROMPT_LABEL`
-  - `PIPELINE_LANGFUSE_TRACE_NAME`
-  - `LANGFUSE_BASE_URL`
+GitHub Secrets:
+
+| Nome | Obrigatória | Uso |
+| --- | --- | --- |
+| `DATABRICKS_HOST` | Sim | Host HTTPS do workspace Databricks |
+| `DATABRICKS_TOKEN` | Sim | Token usado pelo CLI/API do Databricks |
+| `OPENAI_API_KEY` | Não | Credencial para habilitar enrichment com OpenAI |
+| `LANGFUSE_PUBLIC_KEY` | Não | Credencial de observabilidade Langfuse |
+| `LANGFUSE_SECRET_KEY` | Não | Credencial de observabilidade Langfuse |
+
+GitHub Variables:
+
+| Nome | Obrigatória | Uso | Default interno |
+| --- | --- | --- | --- |
+| `DATABRICKS_WORKSPACE_ROOT` | Não | Raiz de deploy em Workspace Files | `/Workspace/Shared/namastex-test` |
+| `DATABRICKS_JOB_NAME` | Não | Nome do job gerenciado | `namastex-test-pipeline` |
+| `DATABRICKS_CATALOG` | Não | Catalog Unity Catalog | `main` |
+| `DATABRICKS_SCHEMA` | Não | Schema Unity Catalog | `ops` |
+| `DATABRICKS_INPUT_VOLUME` | Não | Volume UC para input Bronze | `bronze_input` |
+| `DATABRICKS_OUTPUT_VOLUME` | Não | Volume UC para outputs persistidos | `pipeline_output` |
+| `DATABRICKS_INPUT_FILENAME` | Não | Nome do arquivo Bronze enviado ao volume | `conversations_bronze.parquet` |
+| `DATABRICKS_SPARK_VERSION` | Não | Runtime Spark do job | `15.4.x-scala2.12` |
+| `DATABRICKS_NODE_TYPE_ID` | Não | Tipo de nó do cluster do job | `Standard_DS3_v2` |
+| `DATABRICKS_NUM_WORKERS` | Não | Quantidade de workers do job | `1` |
+| `DATABRICKS_RUN_POLL_SECONDS` | Não | Intervalo de polling até o término da run | `10` |
+| `PIPELINE_ENABLE_LLM_ENRICHMENT` | Não | Liga enrichment com provider externo | nenhum |
+| `PIPELINE_LLM_OPENAI_MODEL` | Não | Modelo OpenAI usado no enrichment | nenhum |
+| `PIPELINE_LLM_TIMEOUT_SECONDS` | Não | Timeout por chamada do runtime LLM | nenhum |
+| `PIPELINE_LLM_MAX_RETRIES` | Não | Máximo de tentativas do runtime LLM | nenhum |
+| `PIPELINE_ENABLE_LANGFUSE` | Não | Liga observabilidade Langfuse | nenhum |
+| `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK` | Não | Permite fallback local do prompt | nenhum |
+| `PIPELINE_LANGFUSE_PROMPT_NAME` | Não | Nome do prompt no Langfuse | nenhum |
+| `PIPELINE_LANGFUSE_PROMPT_LABEL` | Não | Label do prompt no Langfuse | nenhum |
+| `PIPELINE_LANGFUSE_TRACE_NAME` | Não | Nome base dos traces | nenhum |
+| `LANGFUSE_BASE_URL` | Não | Base URL da instância Langfuse | nenhum |
 
 Defaults internos:
 

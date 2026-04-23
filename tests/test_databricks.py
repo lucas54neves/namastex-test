@@ -102,6 +102,42 @@ def test_build_databricks_job_settings_uses_volume_and_workspace_paths(tmp_path:
     assert task["new_cluster"]["num_workers"] == 2
 
 
+def test_build_databricks_config_uses_defaults_when_workflow_vars_are_empty(
+    tmp_path: Path,
+) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={
+            "DATABRICKS_HOST": "https://dbc.example.com",
+            "DATABRICKS_WORKSPACE_ROOT": "",
+            "DATABRICKS_CATALOG": "",
+            "DATABRICKS_SCHEMA": "",
+            "DATABRICKS_INPUT_VOLUME": "",
+            "DATABRICKS_OUTPUT_VOLUME": "",
+            "DATABRICKS_JOB_NAME": "",
+            "DATABRICKS_SPARK_VERSION": "",
+            "DATABRICKS_NODE_TYPE_ID": "",
+            "DATABRICKS_NUM_WORKERS": "",
+            "DATABRICKS_RUN_POLL_SECONDS": "",
+        },
+    )
+
+    assert config.workspace_root == "/Workspace/Shared/namastex-test"
+    assert config.catalog_name == "main"
+    assert config.schema_name == "ops"
+    assert config.input_volume_name == "bronze_input"
+    assert config.output_volume_name == "pipeline_output"
+    assert config.job_name == "namastex-test-pipeline"
+    assert config.spark_version == "15.4.x-scala2.12"
+    assert config.node_type_id == "Standard_DS3_v2"
+    assert config.num_workers == 1
+    assert config.poll_seconds == 10
+
+
 def test_workflow_exists_with_required_triggers_and_databricks_contract() -> None:
     workflow = Path(".github/workflows/databricks-deploy-run.yml").read_text(encoding="utf-8")
 
