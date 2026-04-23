@@ -131,6 +131,7 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "mentioned_competitor",
             "mentioned_sinistro",
             "avg_response_time_sec",
+            "business_hours_message_ratio",
             "city",
             "state",
             "observed_lead_sources",

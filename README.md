@@ -1,6 +1,6 @@
-# Pipeline Medalhão com Agente Operacional Determinístico
+# Pipeline Medalhão com Agente Autônomo Governado por Impacto
 
-Entrega final do teste técnico de Data & AI Engineering descrito em [docs/technical-test-data-ai-engineering.md](/home/lucas/projects/lucas54neves/namastex-test/docs/technical-test-data-ai-engineering.md). O projeto implementa um pipeline em Python para transformar conversas transacionais de WhatsApp em uma arquitetura Bronze -> Silver -> Gold, com atualização automática da camada analítica quando a fonte cresce e um agente operacional determinístico para diagnóstico, alerta, fallback e remediação segura.
+Entrega final do teste técnico de Data & AI Engineering descrito em [docs/technical-test-data-ai-engineering.md](/home/lucas/projects/lucas54neves/namastex-test/docs/technical-test-data-ai-engineering.md). O projeto implementa um pipeline em Python para transformar conversas transacionais de WhatsApp em uma arquitetura Bronze -> Silver -> Gold, com atualização automática da camada analítica quando a fonte cresce e um agente governado por impacto para diagnóstico, proposta estruturada, candidate materialization, promoção segura, aprovação explícita e fallback.
 
 ## Objetivo da entrega
 
@@ -10,7 +10,7 @@ O enunciado pede mais do que uma análise pontual: pede uma infraestrutura persi
 - Bronze como réplica controlada da fonte original.
 - Silver como camada de limpeza, normalização, deduplicação, mascaramento e organização por lead.
 - Gold como camada analítica para segmentação, personas, audiência, sinais comerciais e sentimento.
-- Agente operacional determinístico para planejar ajustes de contrato, classificar falhas, acionar playbooks seguros, registrar decisões e preservar o último estado íntegro.
+- Agente governado por impacto para classificar propostas em `low`/`medium`/`high`, materializar candidatos isolados, promover mudanças seguras, solicitar aprovação para mutações estruturais e preservar o último estado íntegro.
 - Execução pontual e execução contínua com polling para reprocessar automaticamente quando a Bronze muda.
 
 ## Como a solução responde ao enunciado
@@ -32,7 +32,7 @@ O enunciado pede mais do que uma análise pontual: pede uma infraestrutura persi
 - `Bronze` replica a fonte para uma área controlada de processamento.
 - `Silver` gera três artefatos: uma visão principal por lead, uma visão auxiliar por mensagem e uma visão intermediária por conversa para enriquecimento semântico.
 - `Gold` consolida métricas e classificações analíticas por lead.
-- O agente operacional observa o ciclo, valida contratos, registra relatórios, aciona alertas e executa fallback quando necessário.
+- O agente observa o ciclo, valida contratos, registra relatórios, materializa candidatos em `runtime/candidates/`, aciona alertas e executa fallback quando necessário.
 
 ### Diagrama mermaid
 
@@ -58,6 +58,7 @@ flowchart TD
     L --> M[reports/monitoring]
     L --> N[reports/alerts]
     L --> O[reports/agent_decisions]
+    L --> Q[runtime/candidates]
     L --> P[state/pipeline_state.json]
     I --> L
     D --> L
@@ -158,8 +159,13 @@ Saídas principais após a execução:
 - `data/silver/silver_conversations_llm.parquet`
 - `data/gold/conversations_gold.parquet`
 - `reports/monitoring/latest_run_report.json`
+- `reports/monitoring/latest_plan_report.json`
+- `reports/monitoring/agent_autonomy_metrics.json`
 - `reports/monitoring/latest_agent_report.json`
 - `reports/monitoring/latest_alert_report.json`
+- `reports/agent_decisions/proposals/`
+- `reports/agent_decisions/autonomy/latest_autonomy_decision.json`
+- `runtime/candidates/<proposal_id>/`
 - `state/pipeline_state.json`
 
 ### Execução contínua
@@ -185,7 +191,16 @@ venv/bin/python scripts/plan_pipeline.py
 ```
 
 - `monitor_pipeline.py` consolida snapshot operacional do pipeline.
-- `plan_pipeline.py` roda o planner estrutural que detecta drift de schema e propostas de atualização de contrato.
+- `plan_pipeline.py` roda o planner de autonomia que detecta drift, classifica impacto, materializa candidatos e promove apenas mudanças permitidas por política.
+
+### Autonomia governada por impacto
+
+- A política canônica fica em `config/agent_autonomy_policy.json`.
+- Propostas estruturadas são persistidas em `reports/agent_decisions/proposals/`.
+- Cada candidato é materializado de forma isolada em `runtime/candidates/<proposal_id>/`.
+- A última decisão de promoção ou retenção fica em `reports/agent_decisions/autonomy/latest_autonomy_decision.json`.
+- Métricas do ciclo autônomo ficam em `reports/monitoring/agent_autonomy_metrics.json`.
+- Mudanças `high impact` nunca são auto-promovidas; ficam em `awaiting_approval` até registro em `state/approval_state.json`.
 
 ### Execução com Docker Compose
 
@@ -206,6 +221,33 @@ As variáveis estão exemplificadas em [`.env.example`](/home/lucas/projects/luc
 - `PIPELINE_ENABLE_LANGFUSE`: habilita observabilidade do enrichment.
 - `OPENAI_API_KEY`: credencial opcional para provider OpenAI.
 - `ANTHROPIC_API_KEY`: credencial opcional para provider Anthropic.
+
+### Configuração do Langfuse
+
+O projeto continua com suporte a Langfuse self-hosted para prompt management e tracing do enrichment semântico, mas isso depende de uma instância realmente disponível e de credenciais válidas.
+
+Para usar Langfuse de verdade, o ambiente precisa ter:
+
+- `PIPELINE_ENABLE_LANGFUSE=1`
+- `LANGFUSE_BASE_URL` apontando para a instância ativa
+- `LANGFUSE_PUBLIC_KEY` válida
+- `LANGFUSE_SECRET_KEY` válida
+- `PIPELINE_LANGFUSE_PROMPT_NAME` e `PIPELINE_LANGFUSE_PROMPT_LABEL` compatíveis com o prompt bootstrapado
+
+No `docker-compose.yml`, a stack local inclui:
+
+- `langfuse-web`
+- `langfuse-worker`
+- `langfuse-bootstrap`
+
+O bootstrap do prompt é feito por `scripts/bootstrap_langfuse_prompt.py`.
+
+Importante:
+
+- Se `PIPELINE_ENABLE_LANGFUSE=1` estiver ativo com credenciais placeholder como `lf_pk_change_me` e `lf_sk_change_me`, o runtime não usa Langfuse de forma real.
+- Nesse caso, o pipeline faz fallback para prompt local e segue executando quando o modo fallback está permitido.
+- Para validação local baseline, o caminho mais previsível continua sendo `PIPELINE_ENABLE_LLM_ENRICHMENT=0`.
+- Para validar Langfuse end-to-end localmente, suba primeiro a stack com `docker compose up --build` antes de rodar o pipeline com enrichment habilitado.
 
 ## Testes
 
@@ -228,11 +270,14 @@ A suíte de aderência cobre explicitamente:
 
 ## Agente operacional
 
-O agente deste projeto não governa o pipeline por LLM. Ele é determinístico, auditável e restrito. Suas responsabilidades são:
+O agente deste projeto continua auditável e restrito, mas agora executa um ciclo explícito de autonomia governada por impacto. O uso de LLM permanece opcional e nunca substitui os gates determinísticos. Suas responsabilidades são:
 
 - compilar e aplicar a `pipeline_spec.json`
 - detectar drift de schema e metadados
-- gerar propostas estruturais sujeitas a aprovação
+- gerar propostas estruturadas com `impact_class`, `candidate_actions`, evidência e política aplicada
+- materializar candidatos isolados antes de qualquer promoção
+- promover automaticamente apenas mudanças autorizadas por política e gates determinísticos
+- reter mudanças `high impact` em aprovação explícita
 - classificar falhas conhecidas em diagnósticos operacionais
 - executar apenas playbooks seguros permitidos
 - isolar registros inválidos em quarentena quando aplicável
@@ -244,17 +289,21 @@ Principais artefatos operacionais:
 - `reports/monitoring/latest_run_report.json`
 - `reports/monitoring/latest_agent_report.json`
 - `reports/monitoring/latest_plan_report.json`
+- `reports/monitoring/agent_autonomy_metrics.json`
 - `reports/alerts/`
 - `reports/agent_decisions/latest_agent_decision.json`
+- `reports/agent_decisions/proposals/`
+- `reports/agent_decisions/autonomy/latest_autonomy_decision.json`
+- `runtime/candidates/`
 - `state/pipeline_state.json`
 - `state/approval_state.json`
 - `state/pipeline_spec_history.json`
 
 ## Decisões técnicas do projeto
 
-### 1. Agente determinístico em vez de agente autônomo generativo
+### 1. Agente governado por impacto em vez de autonomia irrestrita
 
-O enunciado exige um agente que crie e mantenha o pipeline, mas não exige que ele tome decisões estruturais livres. A escolha foi usar um agente determinístico com regras explícitas, diagnósticos mapeados e playbooks seguros. Isso reduz risco operacional, melhora auditabilidade e facilita defesa técnica da solução.
+O enunciado exige um agente que crie e mantenha o pipeline. A escolha foi evoluir para autonomia governada por impacto: mudanças aditivas e reversíveis podem ser promovidas automaticamente; mudanças estruturais e semânticas ficam bloqueadas por política e aprovação humana. Isso eleva autonomia sem perder auditabilidade.
 
 ### 2. Bronze como réplica fiel e não como camada de correção
 
@@ -306,7 +355,7 @@ Essa divisão melhora manutenção, testes e legibilidade da entrega.
 
 - O fingerprint observa mudança do arquivo de entrada, não CDC linha a linha.
 - O modo com provider externo depende de credenciais, rede e disponibilidade do serviço.
-- O planner estrutural propõe mudanças e exige aprovação para alterações de contrato, em vez de modificar tudo automaticamente.
+- O planner autônomo ainda restringe a promoção ao conjunto inicial de famílias suportadas e validadas deterministicamente.
 - O projeto foi otimizado para o dataset e o escopo do teste, não como plataforma multi-tenant completa.
 
 ## Referências

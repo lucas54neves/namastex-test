@@ -764,13 +764,15 @@ def validate_gold_consistency(
     )
 
     expected_latency = gold_common["avg_response_time_sec"].map(
-        lambda value: "sem_evidencia"
-        if pd.isna(value)
-        else "rapida"
-        if float(value) <= 300
-        else "moderada"
-        if float(value) <= 1800
-        else "lenta"
+        lambda value: (
+            "sem_evidencia"
+            if pd.isna(value)
+            else "rapida"
+            if float(value) <= 300
+            else "moderada"
+            if float(value) <= 1800
+            else "lenta"
+        )
     )
     latency_mask = _series_equal(
         gold_common["response_latency_band"].astype("string"),

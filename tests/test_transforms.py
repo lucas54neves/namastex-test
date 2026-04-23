@@ -572,6 +572,140 @@ def test_build_conversation_enrichment_records_provider_fallback_metadata(monkey
     assert enrichment.iloc[0]["trace_id"] == "trace_123"
 
 
+def test_build_conversation_enrichment_disables_managed_prompt_lookup_after_first_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PIPELINE_ENABLE_LLM_ENRICHMENT", "1")
+
+    silver_messages = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv_1",
+                "lead_key": "lead_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "message_id": "m1",
+                "direction": "inbound",
+                "message_type": "text",
+                "message_body_masked": "quero cotacao",
+                "mentions_vehicle": False,
+                "mentions_competitor": False,
+                "mentions_sinistro": False,
+                "quoted_price": None,
+                "metadata_response_time_sec": 60.0,
+                "contains_email": False,
+                "contains_phone": False,
+                "contains_cpf": False,
+                "contains_cep": False,
+                "contains_plate": False,
+                "price_objection_signal": False,
+                "urgency_strength": 0,
+                "competitor_comparison_signal": False,
+                "competitor_mentioned": None,
+            },
+            {
+                "conversation_id": "conv_2",
+                "lead_key": "lead_2",
+                "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
+                "message_id": "m2",
+                "direction": "inbound",
+                "message_type": "text",
+                "message_body_masked": "quero cotacao tambem",
+                "mentions_vehicle": False,
+                "mentions_competitor": False,
+                "mentions_sinistro": False,
+                "quoted_price": None,
+                "metadata_response_time_sec": 30.0,
+                "contains_email": False,
+                "contains_phone": False,
+                "contains_cpf": False,
+                "contains_cep": False,
+                "contains_plate": False,
+                "price_objection_signal": False,
+                "urgency_strength": 0,
+                "competitor_comparison_signal": False,
+                "competitor_mentioned": None,
+            },
+        ]
+    )
+    observed_sources: list[str] = []
+
+    def fake_resolve_runtime_prompt(payload, compiled_plan, config=None):
+        del payload
+        del compiled_plan
+        assert config is not None
+        if config["langfuse"]["enabled"]:
+            observed_sources.append("managed")
+            return {
+                "source": "local_fallback",
+                "prompt_text": "local fallback",
+                "prompt_name": "conversation-enrichment-v1",
+                "prompt_label": "production",
+                "prompt_version": "v1",
+                "langfuse_prompt_ref": None,
+                "resolution_error": "prompt_lookup_failed",
+            }
+        observed_sources.append("local")
+        return {
+            "source": "local",
+            "prompt_text": "local prompt",
+            "prompt_name": None,
+            "prompt_label": None,
+            "prompt_version": "v1",
+            "langfuse_prompt_ref": None,
+            "resolution_error": None,
+        }
+
+    def fake_infer(payload, compiled_plan, prompt_resolution=None):
+        del payload
+        del compiled_plan
+        assert prompt_resolution is not None
+        return {
+            "status": "provider_error",
+            "provider_name": None,
+            "model_name": "deterministic_fallback",
+            "prompt_source": prompt_resolution["source"],
+            "prompt_name": prompt_resolution["prompt_name"],
+            "prompt_label": prompt_resolution["prompt_label"],
+            "prompt_version": prompt_resolution["prompt_version"],
+            "trace_id": None,
+            "output": None,
+            "validation_error": None,
+            "provider_errors": [],
+            "attempted_providers": [],
+        }
+
+    monkeypatch.setattr(
+        conversation_enrichment,
+        "resolve_runtime_prompt",
+        fake_resolve_runtime_prompt,
+    )
+    monkeypatch.setattr(conversation_enrichment, "infer_conversation_semantics", fake_infer)
+
+    enrichment = build_conversation_enrichment(
+        silver_messages,
+        {
+            **get_default_compiled_plan(),
+            "llm": {
+                "enabled": True,
+                "prompt_version": "v1",
+                "langfuse": {
+                    "enabled": True,
+                    "prompt_name": "conversation-enrichment-v1",
+                    "prompt_label": "production",
+                    "allow_local_prompt_fallback": True,
+                },
+                "providers": {
+                    "openai": {"enabled": True, "model": "gpt-5-mini"},
+                    "anthropic": {"enabled": True, "model": "claude-sonnet"},
+                },
+            },
+        },
+    )
+
+    assert observed_sources == ["managed", "local"]
+    assert enrichment["prompt_source"].tolist() == ["local_fallback", "local"]
+
+
 def test_consolidate_gold_semantics_respects_dominance_and_recency() -> None:
     enrichment = pd.DataFrame(
         [

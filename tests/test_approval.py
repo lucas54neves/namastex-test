@@ -3,6 +3,7 @@ from __future__ import annotations
 from pipeline.agent.approval import (
     APPROVAL_STATUS_REJECTED,
     approve_proposal,
+    get_proposal_approval_record,
     get_proposal_approval_status,
     is_proposal_approved,
     reject_proposal,
@@ -23,3 +24,15 @@ def test_reject_proposal_persists_status(tmp_path) -> None:
 
     assert is_proposal_approved(paths, "proposal_x") is False
     assert get_proposal_approval_status(paths, "proposal_x") == APPROVAL_STATUS_REJECTED
+
+
+def test_approval_record_persists_actor_and_timestamp(tmp_path) -> None:
+    paths = build_paths(tmp_path)
+    approve_proposal(paths, "proposal_x", "tester")
+
+    record = get_proposal_approval_record(paths, "proposal_x")
+
+    assert record["approved"] is True
+    assert record["approved_by"] == "tester"
+    assert record["status"] == "approved"
+    assert "decided_at_utc" in record

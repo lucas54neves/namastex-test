@@ -74,6 +74,7 @@ def _base_gold_row() -> dict[str, object]:
         "mentioned_competitor": False,
         "mentioned_sinistro": False,
         "avg_response_time_sec": None,
+        "business_hours_message_ratio": 0.0,
         "avg_quoted_price": None,
         "primary_competitor": None,
         "city": "Sao Paulo",

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,27 +11,43 @@ import pandas as pd
 
 from pipeline.agent.approval import (
     APPROVAL_STATUS_APPROVED,
-    APPROVAL_STATUS_PENDING,
     APPROVAL_STATUS_REJECTED,
+    get_proposal_approval_record,
     get_proposal_approval_status,
+)
+from pipeline.agent.autonomy import (
+    DECISION_HOLD_FOR_APPROVAL,
+    DECISION_PROMOTE,
+    DECISION_REJECT,
+    PROPOSAL_STATUS_APPROVED,
+    PROPOSAL_STATUS_AWAITING_APPROVAL,
+    PROPOSAL_STATUS_CANDIDATE_MATERIALIZED,
+    PROPOSAL_STATUS_CLOSED_NO_ACTION,
+    PROPOSAL_STATUS_PROMOTED,
+    PROPOSAL_STATUS_PROPOSED,
+    PROPOSAL_STATUS_REJECTED,
+    PROPOSAL_STATUS_VALIDATION_FAILED,
+    apply_proposal_to_spec,
+    build_candidate_actions,
+    classify_proposal,
+    evaluate_candidate,
+    persist_autonomy_decision,
+    persist_candidate_artifacts,
+    persist_proposal_record,
+    promote_candidate_spec,
+    update_autonomy_metrics,
 )
 from pipeline.agent.llm_advisor import get_llm_advice
 from pipeline.config import PipelinePaths
-from pipeline.io.parquet_io import read_json, write_json
+from pipeline.io.parquet_io import write_json
 from pipeline.orchestration.compiler import compile_pipeline_spec
-from pipeline.runtime.spec import load_pipeline_spec, save_pipeline_spec
+from pipeline.runtime.spec import load_pipeline_spec
 
 PROPOSAL_FAMILY_SCHEMA_UPDATE = "schema_update"
 PROPOSAL_FAMILY_VALIDATION = "validation_enhancement"
 PROPOSAL_FAMILY_DERIVED = "derived_column_addition"
 PROPOSAL_FAMILY_SEGMENTATION = "segmentation_adjustment"
 PROPOSAL_FAMILY_TRANSFORMATION = "transformation_rule_change"
-
-PROPOSAL_STATUS_PROPOSED = "proposed"
-PROPOSAL_STATUS_APPROVED = "approved"
-PROPOSAL_STATUS_APPLIED = "applied"
-PROPOSAL_STATUS_REJECTED = "rejected"
-PROPOSAL_STATUS_NOT_APPLICABLE = "not_applicable"
 
 _CAMEL_CASE_PATTERN = re.compile(r"(?<!^)(?=[A-Z])")
 
@@ -93,6 +109,7 @@ def _proposal_fingerprint(
 
 
 def _build_proposal(
+    paths: PipelinePaths,
     planning_run_id: str,
     proposal_type: str,
     proposal_family: str,
@@ -116,57 +133,46 @@ def _build_proposal(
         proposed_change,
         proposal_items,
     )
+    classification = classify_proposal(proposal_family, paths)
+    requires_explicit_approval = classification["requires_approval"] or requires_approval
     return {
         "proposal_id": proposal_id,
         "planning_run_id": planning_run_id,
+        "created_at_utc": _utc_now_iso(),
         "proposal_type": proposal_type,
         "proposal_family": proposal_family,
+        "trigger_kind": str(context_detected.get("context_type", "runtime_observation")),
+        "impact_class": classification["impact_class"],
+        "safe_auto_promote": classification["safe_auto_promote"] and not requires_explicit_approval,
+        "requires_approval": requires_explicit_approval,
+        "status": PROPOSAL_STATUS_PROPOSED,
         "title": title,
         "context_detected": context_detected,
         "proposed_change": proposed_change,
+        "expected_outcome": expected_impact,
         "expected_impact": expected_impact,
         "risk": risk,
         "impact_scope": impact_scope,
-        "requires_approval": requires_approval,
-        "safe_auto_apply": False,
+        "safe_auto_apply": classification["safe_auto_promote"] and not requires_explicit_approval,
         "recommendation_only": True,
         "rationale": rationale,
         "affected_layers": affected_layers,
+        "affected_paths": affected_artifacts,
         "affected_artifacts": affected_artifacts,
+        "evidence_bundle": {
+            "context": context_detected,
+            "items": proposal_items,
+        },
+        "candidate_actions": [],
+        "approval_context": get_proposal_approval_record(paths, proposal_id),
+        "policy_snapshot": classification["policy_snapshot"],
         "privacy_impact": privacy_impact,
-        "status": PROPOSAL_STATUS_PROPOSED,
         "items": proposal_items,
     }
 
 
-def _apply_supported_proposals(
-    spec: dict[str, Any], proposals: list[dict[str, Any]]
-) -> tuple[dict[str, Any], list[str], list[str]]:
-    updated_spec = copy.deepcopy(spec)
-    applied_types: list[str] = []
-    applied_ids: list[str] = []
-
-    for proposal in proposals:
-        proposal_type = str(proposal["proposal_type"])
-        proposal_id = str(proposal["proposal_id"])
-        items = list(proposal.get("items", []))
-        if proposal_type == "bronze_required_columns_addition" and items:
-            updated_spec["bronze"]["required_columns"] = sorted(
-                set(updated_spec["bronze"]["required_columns"]) | set(items)
-            )
-            applied_types.append(proposal_type)
-            applied_ids.append(proposal_id)
-        elif proposal_type == "silver_metadata_fields_addition" and items:
-            updated_spec["silver"]["metadata_fields"] = sorted(
-                set(updated_spec["silver"]["metadata_fields"]) | set(items)
-            )
-            applied_types.append(proposal_type)
-            applied_ids.append(proposal_id)
-
-    return updated_spec, applied_types, applied_ids
-
-
 def _schema_proposals(
+    paths: PipelinePaths,
     planning_run_id: str,
     spec: dict[str, Any],
     observed_columns: list[str],
@@ -185,6 +191,7 @@ def _schema_proposals(
         contexts.append(context)
         proposals.append(
             _build_proposal(
+                paths=paths,
                 planning_run_id=planning_run_id,
                 proposal_type="bronze_required_columns_addition",
                 proposal_family=PROPOSAL_FAMILY_SCHEMA_UPDATE,
@@ -227,6 +234,7 @@ def _schema_proposals(
         contexts.append(context)
         proposals.append(
             _build_proposal(
+                paths=paths,
                 planning_run_id=planning_run_id,
                 proposal_type="silver_metadata_fields_addition",
                 proposal_family=PROPOSAL_FAMILY_SCHEMA_UPDATE,
@@ -262,6 +270,7 @@ def _schema_proposals(
 
 
 def _validation_proposals(
+    paths: PipelinePaths,
     planning_run_id: str,
     metadata_objects: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -281,6 +290,7 @@ def _validation_proposals(
         {"items": items, "string_value_count": sum(boolean_string_fields.values())},
     )
     proposal = _build_proposal(
+        paths=paths,
         planning_run_id=planning_run_id,
         proposal_type="metadata_boolean_validation_addition",
         proposal_family=PROPOSAL_FAMILY_VALIDATION,
@@ -298,10 +308,10 @@ def _validation_proposals(
         ),
         risk="medium",
         impact_scope="silver",
-        requires_approval=True,
+        requires_approval=False,
         rationale=(
             "Campos booleanos serializados como texto indicam uma lacuna "
-            "de qualidade que precisa ser explicitamente validada."
+            "de qualidade que pode ser tratada de forma aditiva."
         ),
         affected_layers=["silver", "quality"],
         affected_artifacts=[
@@ -315,6 +325,7 @@ def _validation_proposals(
 
 
 def _derived_column_proposals(
+    paths: PipelinePaths,
     planning_run_id: str,
     spec: dict[str, Any],
     metadata_objects: list[dict[str, Any]],
@@ -335,6 +346,7 @@ def _derived_column_proposals(
         {"items": ["is_business_hours"], "observed_count": len(metadata_objects)},
     )
     proposal = _build_proposal(
+        paths=paths,
         planning_run_id=planning_run_id,
         proposal_type="gold_business_hours_metric_addition",
         proposal_family=PROPOSAL_FAMILY_DERIVED,
@@ -352,10 +364,10 @@ def _derived_column_proposals(
         ),
         risk="medium",
         impact_scope="gold",
-        requires_approval=True,
+        requires_approval=False,
         rationale=(
             "Ja existe sinal suficiente na Bronze para derivar uma metrica "
-            "adicional util sem depender de texto livre."
+            "adicional util sem quebrar o contrato existente."
         ),
         affected_layers=["silver", "gold"],
         affected_artifacts=[
@@ -369,6 +381,7 @@ def _derived_column_proposals(
 
 
 def _segmentation_proposals(
+    paths: PipelinePaths,
     planning_run_id: str,
     spec: dict[str, Any],
     bronze_df: pd.DataFrame,
@@ -393,6 +406,7 @@ def _segmentation_proposals(
         {"items": ["em_negociacao"], "observed_count": negotiation_count},
     )
     proposal = _build_proposal(
+        paths=paths,
         planning_run_id=planning_run_id,
         proposal_type="intent_stage_negotiation_extension",
         proposal_family=PROPOSAL_FAMILY_SEGMENTATION,
@@ -427,6 +441,7 @@ def _segmentation_proposals(
 
 
 def _transformation_proposals(
+    paths: PipelinePaths,
     planning_run_id: str,
     metadata_objects: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -451,6 +466,7 @@ def _transformation_proposals(
         {"items": items, "normalized_mapping": normalization_gaps},
     )
     proposal = _build_proposal(
+        paths=paths,
         planning_run_id=planning_run_id,
         proposal_type="metadata_key_normalization_rule",
         proposal_family=PROPOSAL_FAMILY_TRANSFORMATION,
@@ -504,13 +520,12 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         )
     ]
     proposals: list[dict[str, Any]] = []
-
     detector_results = [
-        _schema_proposals(planning_run_id, spec, observed_columns, observed_metadata_fields),
-        _validation_proposals(planning_run_id, metadata_objects),
-        _derived_column_proposals(planning_run_id, spec, metadata_objects),
-        _segmentation_proposals(planning_run_id, spec, bronze_df),
-        _transformation_proposals(planning_run_id, metadata_objects),
+        _schema_proposals(paths, planning_run_id, spec, observed_columns, observed_metadata_fields),
+        _validation_proposals(paths, planning_run_id, metadata_objects),
+        _derived_column_proposals(paths, planning_run_id, spec, metadata_objects),
+        _segmentation_proposals(paths, planning_run_id, spec, bronze_df),
+        _transformation_proposals(paths, planning_run_id, metadata_objects),
     ]
     for contexts, generated_proposals in detector_results:
         detected_contexts.extend(contexts)
@@ -533,53 +548,164 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         if status == APPROVAL_STATUS_REJECTED
     )
     requires_approval = any(bool(proposal["requires_approval"]) for proposal in proposals)
-    approved = bool(proposals) and all(
-        approval_status_by_proposal[str(proposal["proposal_id"])] == APPROVAL_STATUS_APPROVED
-        for proposal in proposals
-        if proposal["requires_approval"]
-    )
-
-    eligible_for_application = [
-        proposal
-        for proposal in proposals
-        if approval_status_by_proposal[str(proposal["proposal_id"])] == APPROVAL_STATUS_APPROVED
-    ]
 
     applied_proposal_types: list[str] = []
     applied_proposal_ids: list[str] = []
+    promoted_proposal_ids: list[str] = []
     active_spec = spec
-    if eligible_for_application:
-        updated_spec, applied_proposal_types, applied_proposal_ids = _apply_supported_proposals(
-            spec, eligible_for_application
-        )
-        if applied_proposal_types:
-            save_pipeline_spec(updated_spec, paths.pipeline_spec)
-            history = read_json(paths.spec_history, default={"changes": []})
-            history.setdefault("changes", []).append(
-                {
-                    "planning_run_id": planning_run_id,
-                    "applied_at_utc": _utc_now_iso(),
-                    "applied_proposal_ids": applied_proposal_ids,
-                    "applied_proposal_types": applied_proposal_types,
-                    "proposals": proposals,
-                }
-            )
-            write_json(history, paths.spec_history)
-            active_spec = updated_spec
+    promotion_enabled = paths.pipeline_spec.parent.resolve() == paths.config.resolve()
 
     for proposal in proposals:
         proposal_id = str(proposal["proposal_id"])
         approval_status = approval_status_by_proposal[proposal_id]
-        if proposal_id in applied_proposal_ids:
-            proposal["status"] = PROPOSAL_STATUS_APPLIED
-        elif approval_status == APPROVAL_STATUS_APPROVED:
-            proposal["status"] = PROPOSAL_STATUS_APPROVED
+        proposal["candidate_actions"] = build_candidate_actions(proposal)
+        proposal["approval_context"] = get_proposal_approval_record(paths, proposal_id)
+        update_autonomy_metrics(
+            paths,
+            str(proposal["proposal_family"]),
+            counted_proposal=True,
+            approval_required=bool(proposal["requires_approval"]),
+        )
+
+        candidate_spec, changed = apply_proposal_to_spec(active_spec, proposal)
+        if not changed:
+            proposal["status"] = PROPOSAL_STATUS_CLOSED_NO_ACTION
+            persist_proposal_record(paths, proposal)
+            continue
+
+        started_at = time.perf_counter()
+        try:
+            gate_results, diff = evaluate_candidate(proposal, active_spec, candidate_spec)
+            validation_status = "passed"
+        except Exception as exc:
+            gate_results = {
+                "contract_validation": {
+                    "passed": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                "targeted_tests": {
+                    "passed": False,
+                    "executed": False,
+                },
+                "backward_compatibility": {
+                    "passed": False,
+                    "removed_fields": [],
+                },
+                "privacy": {
+                    "passed": False,
+                    "requires_privacy_scan": bool(
+                        proposal["policy_snapshot"].get("requires_privacy_scan", False)
+                    ),
+                },
+            }
+            diff = {
+                "schema_diff": {},
+                "value_distribution_diff": {},
+                "null_rate_diff": {},
+                "privacy_diff": {},
+                "taxonomy_diff": {},
+                "quality_diff": {},
+                "business_signal_diff": {},
+            }
+            validation_status = "failed"
+        duration_sec = time.perf_counter() - started_at
+        candidate_references = persist_candidate_artifacts(
+            paths,
+            proposal,
+            candidate_spec,
+            gate_results,
+            diff,
+            validation_status,
+        )
+        update_autonomy_metrics(
+            paths,
+            str(proposal["proposal_family"]),
+            validation_duration_sec=duration_sec,
+            privacy_blocked=not gate_results["privacy"]["passed"],
+        )
+
+        gate_passed = all(
+            bool(gate_results[key]["passed"])
+            for key in (
+                "contract_validation",
+                "targeted_tests",
+                "backward_compatibility",
+                "privacy",
+            )
+        )
+        decision = DECISION_REJECT
+        decision_reason = "Candidate gates failed."
+        if (
+            gate_passed
+            and proposal["requires_approval"]
+            and approval_status != APPROVAL_STATUS_APPROVED
+        ):
+            proposal["status"] = PROPOSAL_STATUS_AWAITING_APPROVAL
+            decision = DECISION_HOLD_FOR_APPROVAL
+            decision_reason = "Impact-governed policy requires explicit approval."
         elif approval_status == APPROVAL_STATUS_REJECTED:
             proposal["status"] = PROPOSAL_STATUS_REJECTED
-        elif approval_status == APPROVAL_STATUS_PENDING and proposal["requires_approval"]:
-            proposal["status"] = PROPOSAL_STATUS_PROPOSED
+            decision = DECISION_REJECT
+            decision_reason = "Proposal was explicitly rejected."
+        elif gate_passed and not promotion_enabled:
+            proposal["status"] = PROPOSAL_STATUS_CANDIDATE_MATERIALIZED
+            decision_reason = (
+                "Candidate materialized, but the configured pipeline spec is read-only."
+            )
+        elif gate_passed and (
+            proposal["safe_auto_promote"] or approval_status == APPROVAL_STATUS_APPROVED
+        ):
+            promote_candidate_spec(
+                paths,
+                candidate_spec,
+                planning_run_id=planning_run_id,
+                proposal=proposal,
+                candidate_references=candidate_references,
+            )
+            active_spec = candidate_spec
+            proposal["status"] = PROPOSAL_STATUS_PROMOTED
+            decision = DECISION_PROMOTE
+            decision_reason = "Candidate passed deterministic gates and promotion policy."
+            applied_proposal_ids.append(proposal_id)
+            applied_proposal_types.append(str(proposal["proposal_type"]))
+            promoted_proposal_ids.append(proposal_id)
+            update_autonomy_metrics(
+                paths,
+                str(proposal["proposal_family"]),
+                promoted=True,
+            )
+        elif gate_passed and approval_status == APPROVAL_STATUS_APPROVED:
+            proposal["status"] = PROPOSAL_STATUS_APPROVED
+            decision_reason = "Proposal approved but not yet eligible for automatic promotion."
+        elif gate_passed:
+            proposal["status"] = PROPOSAL_STATUS_CANDIDATE_MATERIALIZED
+            decision_reason = "Candidate materialized but policy does not allow promotion."
         else:
-            proposal["status"] = PROPOSAL_STATUS_NOT_APPLICABLE
+            proposal["status"] = PROPOSAL_STATUS_VALIDATION_FAILED
+            update_autonomy_metrics(
+                paths,
+                str(proposal["proposal_family"]),
+                unresolved_failure=True,
+            )
+
+        proposal["approval_context"] = get_proposal_approval_record(paths, proposal_id)
+        persist_proposal_record(paths, proposal)
+        persist_autonomy_decision(
+            paths,
+            {
+                "decision_id": f"decision_{proposal_id}",
+                "proposal_id": proposal_id,
+                "decision_at_utc": _utc_now_iso(),
+                "decision": decision,
+                "decision_reason": decision_reason,
+                "gate_results": gate_results,
+                "baseline_reference": {
+                    "pipeline_spec_path": str(paths.pipeline_spec),
+                },
+                "candidate_reference": candidate_references,
+                "post_promotion_monitoring_required": decision == DECISION_PROMOTE,
+            },
+        )
 
     compiled_plan = compile_pipeline_spec(active_spec)
     llm_advice = get_llm_advice(
@@ -590,6 +716,11 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             "proposals": proposals,
         },
         compiled_plan,
+    )
+    approved = bool(proposals) and all(
+        proposal["status"] in {PROPOSAL_STATUS_PROMOTED, PROPOSAL_STATUS_APPROVED}
+        for proposal in proposals
+        if proposal["requires_approval"]
     )
 
     report = {
@@ -605,8 +736,11 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         "approved_proposal_ids": approved_proposal_ids,
         "rejected_proposal_ids": rejected_proposal_ids,
         "applied": bool(applied_proposal_ids),
+        "promoted_proposal_ids": promoted_proposal_ids,
         "applied_proposal_ids": applied_proposal_ids,
         "applied_proposal_types": applied_proposal_types,
+        "autonomy_policy_path": str(paths.autonomy_policy),
+        "autonomy_metrics_path": str(paths.autonomy_metrics),
         "llm_advice": llm_advice,
         "summary": {
             "proposal_count": len(proposals),
@@ -616,19 +750,34 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
                 PROPOSAL_STATUS_PROPOSED: sum(
                     1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_PROPOSED
                 ),
+                PROPOSAL_STATUS_CANDIDATE_MATERIALIZED: sum(
+                    1
+                    for proposal in proposals
+                    if proposal["status"] == PROPOSAL_STATUS_CANDIDATE_MATERIALIZED
+                ),
+                PROPOSAL_STATUS_AWAITING_APPROVAL: sum(
+                    1
+                    for proposal in proposals
+                    if proposal["status"] == PROPOSAL_STATUS_AWAITING_APPROVAL
+                ),
                 PROPOSAL_STATUS_APPROVED: sum(
                     1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_APPROVED
                 ),
-                PROPOSAL_STATUS_APPLIED: sum(
-                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_APPLIED
+                PROPOSAL_STATUS_PROMOTED: sum(
+                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_PROMOTED
                 ),
                 PROPOSAL_STATUS_REJECTED: sum(
                     1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_REJECTED
                 ),
-                PROPOSAL_STATUS_NOT_APPLICABLE: sum(
+                PROPOSAL_STATUS_VALIDATION_FAILED: sum(
                     1
                     for proposal in proposals
-                    if proposal["status"] == PROPOSAL_STATUS_NOT_APPLICABLE
+                    if proposal["status"] == PROPOSAL_STATUS_VALIDATION_FAILED
+                ),
+                PROPOSAL_STATUS_CLOSED_NO_ACTION: sum(
+                    1
+                    for proposal in proposals
+                    if proposal["status"] == PROPOSAL_STATUS_CLOSED_NO_ACTION
                 ),
             },
         },

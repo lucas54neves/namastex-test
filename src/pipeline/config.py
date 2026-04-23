@@ -23,6 +23,11 @@ class PipelinePaths:
     pipeline_spec: Path
     approval_state: Path
     spec_history: Path
+    autonomy_policy: Path
+    autonomy_metrics: Path
+    candidates: Path
+    autonomy_decisions: Path
+    autonomy_proposals: Path
 
 
 def build_paths(root: Path | None = None) -> PipelinePaths:
@@ -47,6 +52,11 @@ def build_paths(root: Path | None = None) -> PipelinePaths:
         pipeline_spec=config / "pipeline_spec.json",
         approval_state=base / "state" / "approval_state.json",
         spec_history=base / "state" / "pipeline_spec_history.json",
+        autonomy_policy=config / "agent_autonomy_policy.json",
+        autonomy_metrics=base / "reports" / "monitoring" / "agent_autonomy_metrics.json",
+        candidates=base / "runtime" / "candidates",
+        autonomy_decisions=base / "reports" / "agent_decisions" / "autonomy",
+        autonomy_proposals=base / "reports" / "agent_decisions" / "proposals",
     )
 
 
@@ -62,6 +72,9 @@ def ensure_directories(paths: PipelinePaths) -> None:
         paths.monitoring,
         paths.alerts,
         paths.agent_decisions,
+        paths.autonomy_decisions,
+        paths.autonomy_proposals,
         paths.state,
+        paths.candidates,
     ):
         directory.mkdir(parents=True, exist_ok=True)

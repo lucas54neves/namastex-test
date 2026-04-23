@@ -1,0 +1,39 @@
+{
+  "mutation_families": {
+    "schema_update": {
+      "default_impact_class": "high",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": true
+    },
+    "validation_enhancement": {
+      "default_impact_class": "low",
+      "auto_promote": true,
+      "requires_approval": false,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": false
+    },
+    "derived_column_addition": {
+      "default_impact_class": "medium",
+      "auto_promote": true,
+      "requires_approval": false,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": true
+    },
+    "segmentation_adjustment": {
+      "default_impact_class": "high",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": false
+    },
+    "transformation_rule_change": {
+      "default_impact_class": "medium",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": false
+    }
+  }
+}

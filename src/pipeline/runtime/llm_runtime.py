@@ -11,6 +11,10 @@ from typing import Any, Protocol, TypedDict, cast
 from pipeline.runtime.env import env_flag
 from pipeline.runtime.langfuse_bootstrap import runtime_langfuse_prompt_template
 
+Langfuse: Any = None
+get_client: Any = None
+LangfuseCallbackHandler: Any = None
+
 try:
     _langgraph_graph = importlib.import_module("langgraph.graph")
     END: Any = _langgraph_graph.END
@@ -34,13 +38,12 @@ except Exception:  # pragma: no cover
 try:
     from langfuse import Langfuse, get_client
 except Exception:  # pragma: no cover
-    Langfuse = None
-    get_client = None
+    pass
 
 try:
     from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
 except Exception:  # pragma: no cover
-    LangfuseCallbackHandler = None
+    pass
 
 
 class _PromptLike(Protocol):

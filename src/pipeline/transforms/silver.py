@@ -926,6 +926,12 @@ def add_gold_segments(
     ] = str(readiness_cfg["high_label"])
 
     segmented["intent_stage"] = str(intent_cfg["default"])
+    negotiation_label = intent_cfg.get("negotiation_label")
+    if negotiation_label is not None and "latest_outcome" in segmented.columns:
+        normalized_outcome = segmented["latest_outcome"].fillna("").astype(str).str.lower()
+        segmented.loc[normalized_outcome.str.contains("negoci"), "intent_stage"] = str(
+            negotiation_label
+        )
     segmented.loc[segmented["mentioned_sinistro"], "intent_stage"] = str(
         intent_cfg["sinistro_label"]
     )
@@ -1107,6 +1113,7 @@ def build_gold(
     gold["lead_lifecycle_hours"] = (
         gold["last_seen_at"] - gold["first_seen_at"]
     ).dt.total_seconds() / 3600.0
+    gold["business_hours_message_ratio"] = gold["business_hours_ratio"]
     gold["response_latency_band"] = gold["avg_response_time_sec"].map(_response_latency_band)
     gold["closure_outcome_group"] = gold["observed_outcomes"].map(_normalize_outcome_group)
     gold["has_closed_outcome"] = gold["closure_outcome_group"].eq("fechado")

@@ -88,8 +88,11 @@ def _planner_report_summary(paths: PipelinePaths, planner_report: dict[str, Any]
         "requires_approval": planner_report.get("requires_approval", False),
         "approved": planner_report.get("approved", False),
         "applied": planner_report.get("applied", False),
+        "promoted_proposal_ids": planner_report.get("promoted_proposal_ids", []),
         "applied_proposal_ids": planner_report.get("applied_proposal_ids", []),
         "applied_proposal_types": planner_report.get("applied_proposal_types", []),
+        "autonomy_policy_path": planner_report.get("autonomy_policy_path"),
+        "autonomy_metrics_path": planner_report.get("autonomy_metrics_path"),
     }
 
 
@@ -543,6 +546,10 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 ),
                 "planner_proposal_count": agent_report["planner_report"].get("proposal_count", 0),
                 "planner_applied": agent_report["planner_report"].get("applied", False),
+                "planner_promoted_proposal_ids": agent_report["planner_report"].get(
+                    "promoted_proposal_ids",
+                    [],
+                ),
             },
         )
         alert_report = _build_alert_report(paths, run_record, agent_report, validation_summary)
@@ -663,6 +670,10 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:
                 ),
                 "planner_proposal_count": agent_report["planner_report"].get("proposal_count", 0),
                 "planner_applied": agent_report["planner_report"].get("applied", False),
+                "planner_promoted_proposal_ids": agent_report["planner_report"].get(
+                    "promoted_proposal_ids",
+                    [],
+                ),
             },
         )
         alert_report = _build_alert_report(paths, run_record, agent_report, validation_summary)
@@ -711,6 +722,8 @@ def build_monitor_snapshot(paths: PipelinePaths) -> dict[str, Any]:
         "agent_report_path": str(agent_report_path),
         "alert_report_path": str(alert_report_path),
         "plan_report_path": str(plan_report_path),
+        "autonomy_policy_path": str(paths.autonomy_policy),
+        "autonomy_metrics_path": str(paths.autonomy_metrics),
         "pipeline_spec_path": str(paths.pipeline_spec),
         "last_run": last_run,
         "run_count": len(state.get("runs", [])),

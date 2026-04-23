@@ -348,6 +348,11 @@ def test_repository_entrypoint_runs_with_versioned_spec_and_deterministic_llm_mo
         pipeline_spec=root / "config" / "pipeline_spec.json",
         approval_state=temp_root / "state" / "approval_state.json",
         spec_history=temp_root / "state" / "pipeline_spec_history.json",
+        autonomy_policy=root / "config" / "agent_autonomy_policy.json",
+        autonomy_metrics=temp_root / "reports" / "monitoring" / "agent_autonomy_metrics.json",
+        candidates=temp_root / "runtime" / "candidates",
+        autonomy_decisions=temp_root / "reports" / "agent_decisions" / "autonomy",
+        autonomy_proposals=temp_root / "reports" / "agent_decisions" / "proposals",
     )
     result = run_pipeline(paths, force=True)
     report = json.loads((paths.monitoring / "latest_run_report.json").read_text(encoding="utf-8"))

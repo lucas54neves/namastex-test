@@ -12,6 +12,7 @@ import pandas as pd
 from pipeline.runtime.env import env_flag
 from pipeline.runtime.llm_runtime import (
     PromptResolution,
+    resolve_runtime_config,
     resolve_runtime_prompt,
     run_conversation_enrichment_graph,
     runtime_model_identity,
@@ -587,7 +588,9 @@ def build_conversation_enrichment(
 
     ordered_messages = silver_messages.sort_values(["conversation_id", "timestamp", "message_id"])
     enabled = _llm_enabled(compiled_plan)
+    runtime_config = resolve_runtime_config(compiled_plan)
     model_name = _model_name(compiled_plan)
+    managed_prompt_lookup_enabled = enabled
     cache_df = existing_enrichment.copy() if existing_enrichment is not None else pd.DataFrame()
     cache_lookup: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     if not cache_df.empty:
@@ -606,7 +609,19 @@ def build_conversation_enrichment(
         llm_input_hash = _stable_input_hash(payload)
         runtime_payload = {**payload, "llm_input_hash": llm_input_hash}
         prompt_resolution = (
-            resolve_runtime_prompt(runtime_payload, compiled_plan)
+            resolve_runtime_prompt(
+                runtime_payload,
+                compiled_plan,
+                config=runtime_config
+                if managed_prompt_lookup_enabled
+                else {
+                    **runtime_config,
+                    "langfuse": {
+                        **runtime_config["langfuse"],
+                        "enabled": False,
+                    },
+                },
+            )
             if enabled
             else {
                 "source": "local",
@@ -618,6 +633,8 @@ def build_conversation_enrichment(
                 "resolution_error": None,
             }
         )
+        if enabled and prompt_resolution["source"] == "local_fallback":
+            managed_prompt_lookup_enabled = False
         prompt_version = _safe_string(prompt_resolution.get("prompt_version")) or _prompt_version(
             compiled_plan
         )
