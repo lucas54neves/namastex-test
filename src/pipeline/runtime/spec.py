@@ -416,6 +416,13 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
         "prompt_version": "v1",
         "timeout_seconds": 20,
         "max_retries": 1,
+        "langfuse": {
+            "enabled": False,
+            "prompt_name": "conversation-enrichment-v1",
+            "prompt_label": "production",
+            "trace_name": "conversation-enrichment",
+            "allow_local_prompt_fallback": True,
+        },
         "providers": {
             "openai": {
                 "enabled": True,

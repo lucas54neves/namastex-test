@@ -458,6 +458,13 @@
     "prompt_version": "v1",
     "timeout_seconds": 20,
     "max_retries": 1,
+    "langfuse": {
+      "enabled": false,
+      "prompt_name": "conversation-enrichment-v1",
+      "prompt_label": "production",
+      "trace_name": "conversation-enrichment",
+      "allow_local_prompt_fallback": true
+    },
     "providers": {
       "openai": {
         "enabled": true,

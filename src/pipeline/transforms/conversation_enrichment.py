@@ -10,7 +10,12 @@ from typing import Any, cast
 import pandas as pd
 
 from pipeline.runtime.env import env_flag
-from pipeline.runtime.llm_runtime import run_conversation_enrichment_graph, runtime_model_identity
+from pipeline.runtime.llm_runtime import (
+    PromptResolution,
+    resolve_runtime_prompt,
+    run_conversation_enrichment_graph,
+    runtime_model_identity,
+)
 from pipeline.transforms.silver import (
     NEGATIVE_TONE_PATTERNS,
     POSITIVE_TONE_PATTERNS,
@@ -480,11 +485,13 @@ def build_deterministic_conversation_fallback(
 def infer_conversation_semantics(
     payload: dict[str, Any],
     compiled_plan: dict[str, Any],
+    prompt_resolution: PromptResolution | None = None,
 ) -> dict[str, Any]:
     return run_conversation_enrichment_graph(
         payload,
         compiled_plan,
         validator=_validate_llm_response,
+        prompt_resolution=prompt_resolution,
     )
 
 
@@ -553,11 +560,15 @@ def build_conversation_enrichment(
                 "conversation_last_message_at",
                 "llm_input_hash",
                 "prompt_version",
+                "prompt_source",
+                "prompt_name",
+                "prompt_label",
                 "llm_model",
                 "provider_name",
                 "provider_attempt_count",
                 "provider_error_summary",
                 "inference_status",
+                "trace_id",
                 "processed_at_utc",
                 "sentiment_label",
                 "sentiment_confidence_band",
@@ -576,7 +587,6 @@ def build_conversation_enrichment(
 
     ordered_messages = silver_messages.sort_values(["conversation_id", "timestamp", "message_id"])
     enabled = _llm_enabled(compiled_plan)
-    prompt_version = _prompt_version(compiled_plan)
     model_name = _model_name(compiled_plan)
     cache_df = existing_enrichment.copy() if existing_enrichment is not None else pd.DataFrame()
     cache_lookup: dict[tuple[str, str, str, str], dict[str, Any]] = {}
@@ -594,6 +604,23 @@ def build_conversation_enrichment(
     for _, conversation_messages in ordered_messages.groupby("conversation_id", dropna=False):
         payload = _build_llm_request_payload(conversation_messages, compiled_plan)
         llm_input_hash = _stable_input_hash(payload)
+        runtime_payload = {**payload, "llm_input_hash": llm_input_hash}
+        prompt_resolution = (
+            resolve_runtime_prompt(runtime_payload, compiled_plan)
+            if enabled
+            else {
+                "source": "local",
+                "prompt_text": "",
+                "prompt_name": None,
+                "prompt_label": None,
+                "prompt_version": _prompt_version(compiled_plan),
+                "langfuse_prompt_ref": None,
+                "resolution_error": None,
+            }
+        )
+        prompt_version = _safe_string(prompt_resolution.get("prompt_version")) or _prompt_version(
+            compiled_plan
+        )
         cache_key = (
             _safe_string(payload["conversation_id"]),
             llm_input_hash,
@@ -608,10 +635,14 @@ def build_conversation_enrichment(
             "conversation_last_message_at": conversation_messages["timestamp"].max(),
             "llm_input_hash": llm_input_hash,
             "prompt_version": prompt_version,
+            "prompt_source": _safe_string(prompt_resolution.get("source")) or "local",
+            "prompt_name": _safe_string(prompt_resolution.get("prompt_name")) or None,
+            "prompt_label": _safe_string(prompt_resolution.get("prompt_label")) or None,
             "llm_model": model_name,
             "provider_name": None,
             "provider_attempt_count": 0,
             "provider_error_summary": None,
+            "trace_id": None,
             "processed_at_utc": _utc_now_iso(),
             "fallback_reason": None,
             "validation_error": None,
@@ -639,6 +670,7 @@ def build_conversation_enrichment(
                             "provider_error_summary",
                             "fallback_reason",
                             "validation_error",
+                            "trace_id",
                         )
                     },
                     "inference_status": "skipped_cache_hit",
@@ -658,7 +690,11 @@ def build_conversation_enrichment(
             continue
 
         try:
-            llm_response = infer_conversation_semantics(payload, compiled_plan)
+            llm_response = infer_conversation_semantics(
+                runtime_payload,
+                compiled_plan,
+                prompt_resolution=prompt_resolution,
+            )
         except Exception as exc:
             rows.append(
                 {
@@ -700,6 +736,7 @@ def build_conversation_enrichment(
                     "provider_name": _safe_string(llm_response.get("provider_name")) or None,
                     "provider_attempt_count": len(attempted_providers),
                     "provider_error_summary": provider_error_summary,
+                    "trace_id": _safe_string(llm_response.get("trace_id")) or None,
                     "inference_status": llm_status
                     if llm_status in LLM_INFERENCE_STATUSES
                     else "fallback",
@@ -719,6 +756,7 @@ def build_conversation_enrichment(
                     "provider_name": _safe_string(llm_response.get("provider_name")) or None,
                     "provider_attempt_count": len(attempted_providers),
                     "provider_error_summary": provider_error_summary,
+                    "trace_id": _safe_string(llm_response.get("trace_id")) or None,
                     "inference_status": "invalid_output",
                     "fallback_reason": "invalid_llm_response",
                     "validation_error": validation_error,
@@ -732,6 +770,7 @@ def build_conversation_enrichment(
                 "provider_name": _safe_string(llm_response.get("provider_name")) or None,
                 "provider_attempt_count": len(attempted_providers),
                 "provider_error_summary": provider_error_summary,
+                "trace_id": _safe_string(llm_response.get("trace_id")) or None,
                 "inference_status": "success",
                 "sentiment_label": _safe_string(output_payload.get("sentiment_label")),
                 "sentiment_confidence_band": _safe_string(
@@ -836,11 +875,15 @@ def validate_conversation_enrichment_frame(
         "lead_key",
         "llm_input_hash",
         "prompt_version",
+        "prompt_source",
+        "prompt_name",
+        "prompt_label",
         "llm_model",
         "provider_name",
         "provider_attempt_count",
         "provider_error_summary",
         "inference_status",
+        "trace_id",
         "processed_at_utc",
         "sentiment_label",
         "sentiment_confidence_band",

@@ -5,10 +5,10 @@ import importlib.util
 from pathlib import Path
 
 
-def _load_daemon_module():
+def _load_run_pipeline_module():
     root = Path(__file__).resolve().parents[1]
-    module_path = root / "scripts" / "run_pipeline_daemon.py"
-    spec = importlib.util.spec_from_file_location("run_pipeline_daemon", module_path)
+    module_path = root / "scripts" / "run_pipeline.py"
+    spec = importlib.util.spec_from_file_location("run_pipeline", module_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -16,9 +16,8 @@ def _load_daemon_module():
     return module
 
 
-def test_run_daemon_respects_max_cycles(monkeypatch, capsys) -> None:
-    module = _load_daemon_module()
-    calls: list[bool] = []
+def test_run_pipeline_main_shuts_down_langfuse(monkeypatch, capsys) -> None:
+    module = _load_run_pipeline_module()
     shutdown_calls: list[str] = []
 
     class DummyArtifacts:
@@ -32,12 +31,9 @@ def test_run_daemon_respects_max_cycles(monkeypatch, capsys) -> None:
         executed = True
         status = "success"
 
-    def fake_run_pipeline(_paths, force: bool = False):
-        calls.append(force)
-        return DummyArtifacts()
-
-    monkeypatch.setattr(module, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(module, "parse_args", lambda: argparse.Namespace(force=False))
     monkeypatch.setattr(module, "build_paths", lambda root: root)
+    monkeypatch.setattr(module, "run_pipeline", lambda _paths, force=False: DummyArtifacts())
     monkeypatch.setattr(
         module,
         "artifacts_as_dict",
@@ -53,24 +49,10 @@ def test_run_daemon_respects_max_cycles(monkeypatch, capsys) -> None:
             "status": artifacts.status,
         },
     )
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(module, "shutdown_langfuse_client", lambda: shutdown_calls.append("done"))
 
-    module.run_daemon(
-        argparse.Namespace(force_first_run=True, poll_interval_seconds=1, max_cycles=2)
-    )
+    module.main()
 
-    assert calls == [True, False]
     captured = capsys.readouterr()
-    assert '"cycle": 1' in captured.out
-    assert '"cycle": 2' in captured.out
-    assert (
-        "INFO pipeline.runtime daemon_cycle_started cycle=1 force=true poll_interval_seconds=1"
-        in captured.err
-    )
-    assert (
-        "INFO pipeline.runtime daemon_cycle_started cycle=2 force=false poll_interval_seconds=1"
-        in captured.err
-    )
-    assert "INFO pipeline.runtime daemon_stopped cycle=2 reason=max_cycles_reached" in captured.err
+    assert '"status": "success"' in captured.out
     assert shutdown_calls == ["done"]

@@ -341,13 +341,19 @@ def test_build_conversation_enrichment_accepts_mocked_llm_success(monkeypatch) -
         ]
     )
 
-    def fake_infer(payload, compiled_plan):
+    def fake_infer(payload, compiled_plan, prompt_resolution=None):
         del payload
         del compiled_plan
+        del prompt_resolution
         return {
             "status": "success",
             "provider_name": "openai",
             "model_name": "gpt-5-mini",
+            "prompt_source": "local",
+            "prompt_name": None,
+            "prompt_label": None,
+            "prompt_version": "v1",
+            "trace_id": None,
             "output": {
                 "sentiment_label": "neutral",
                 "sentiment_confidence_band": "high",
@@ -387,6 +393,7 @@ def test_build_conversation_enrichment_accepts_mocked_llm_success(monkeypatch) -
     assert enrichment.iloc[0]["persona_profile"] == "cotador_comparador"
     assert enrichment.iloc[0]["provider_name"] == "openai"
     assert enrichment.iloc[0]["provider_attempt_count"] == 1
+    assert enrichment.iloc[0]["prompt_source"] == "local"
 
 
 def test_build_conversation_enrichment_rejects_unmappable_llm_values(monkeypatch) -> None:
@@ -420,13 +427,19 @@ def test_build_conversation_enrichment_rejects_unmappable_llm_values(monkeypatch
         ]
     )
 
-    def fake_infer(payload, compiled_plan):
+    def fake_infer(payload, compiled_plan, prompt_resolution=None):
         del payload
         del compiled_plan
+        del prompt_resolution
         return {
             "status": "success",
             "provider_name": "openai",
             "model_name": "gpt-5-mini",
+            "prompt_source": "local",
+            "prompt_name": None,
+            "prompt_label": None,
+            "prompt_version": "v1",
+            "trace_id": None,
             "output": {
                 "sentiment_label": "skeptical",
                 "sentiment_confidence_band": "moderado",
@@ -497,13 +510,19 @@ def test_build_conversation_enrichment_records_provider_fallback_metadata(monkey
         ]
     )
 
-    def fake_infer(payload, compiled_plan):
+    def fake_infer(payload, compiled_plan, prompt_resolution=None):
         del payload
         del compiled_plan
+        del prompt_resolution
         return {
             "status": "success",
             "provider_name": "anthropic",
             "model_name": "claude-sonnet",
+            "prompt_source": "local",
+            "prompt_name": None,
+            "prompt_label": None,
+            "prompt_version": "v1",
+            "trace_id": "trace_123",
             "output": {
                 "sentiment_label": "neutro",
                 "sentiment_confidence_band": "moderado",
@@ -550,6 +569,7 @@ def test_build_conversation_enrichment_records_provider_fallback_metadata(monkey
         "openai:invalid_output:invalid_intent_stage:<empty>"
         in enrichment.iloc[0]["provider_error_summary"]
     )
+    assert enrichment.iloc[0]["trace_id"] == "trace_123"
 
 
 def test_consolidate_gold_semantics_respects_dominance_and_recency() -> None:

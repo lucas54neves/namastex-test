@@ -1,28 +1,52 @@
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 import os
 from collections.abc import Callable
-from typing import Any, TypedDict, cast
+from contextlib import nullcontext
+from typing import Any, Protocol, TypedDict, cast
 
 from pipeline.runtime.env import env_flag
+from pipeline.runtime.langfuse_bootstrap import runtime_langfuse_prompt_template
 
 try:
-    from langgraph.graph import END, START, StateGraph
+    _langgraph_graph = importlib.import_module("langgraph.graph")
+    END: Any = _langgraph_graph.END
+    START: Any = _langgraph_graph.START
+    StateGraph: Any = _langgraph_graph.StateGraph
 except Exception:  # pragma: no cover
     END = "__end__"
     START = "__start__"
     StateGraph = None
 
 try:
-    from langchain_anthropic import ChatAnthropic
+    ChatAnthropic: Any = importlib.import_module("langchain_anthropic").ChatAnthropic
 except Exception:  # pragma: no cover
     ChatAnthropic = None
 
 try:
-    from langchain_openai import ChatOpenAI
+    ChatOpenAI: Any = importlib.import_module("langchain_openai").ChatOpenAI
 except Exception:  # pragma: no cover
     ChatOpenAI = None
+
+try:
+    from langfuse import Langfuse, get_client
+except Exception:  # pragma: no cover
+    Langfuse = None
+    get_client = None
+
+try:
+    from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
+except Exception:  # pragma: no cover
+    LangfuseCallbackHandler = None
+
+
+class _PromptLike(Protocol):
+    version: Any
+
+    def compile(self, **kwargs: Any) -> Any: ...
 
 
 class ProviderRuntimeConfig(TypedDict):
@@ -33,12 +57,41 @@ class ProviderRuntimeConfig(TypedDict):
     api_key_env: str
 
 
+class LangfuseRuntimeConfig(TypedDict):
+    enabled: bool
+    prompt_name: str | None
+    prompt_label: str | None
+    trace_name: str
+    base_url: str | None
+    allow_local_prompt_fallback: bool
+
+
 class RuntimeConfig(TypedDict):
     enabled: bool
     prompt_version: str
     timeout_seconds: int
     max_retries: int
     providers: dict[str, ProviderRuntimeConfig]
+    langfuse: LangfuseRuntimeConfig
+
+
+class PromptResolution(TypedDict):
+    source: str
+    prompt_text: str
+    prompt_name: str | None
+    prompt_label: str | None
+    prompt_version: str
+    langfuse_prompt_ref: Any | None
+    resolution_error: str | None
+
+
+class LangfuseRunContext(TypedDict):
+    enabled: bool
+    trace_id: str | None
+    handler: Any | None
+    metadata: dict[str, Any]
+    root_observation: Any | None
+    root_context: Any | None
 
 
 class GraphState(TypedDict):
@@ -54,6 +107,8 @@ class GraphState(TypedDict):
     final_status: str | None
     current_provider: str | None
     pending_provider: str | None
+    prompt_resolution: PromptResolution
+    langfuse_context: LangfuseRunContext
 
 
 def _safe_string(value: Any) -> str:
@@ -67,6 +122,7 @@ def _safe_string(value: Any) -> str:
 def resolve_runtime_config(compiled_plan: dict[str, Any]) -> RuntimeConfig:
     llm_cfg = cast(dict[str, Any], compiled_plan.get("llm") or {})
     providers_cfg = cast(dict[str, Any], llm_cfg.get("providers") or {})
+    langfuse_cfg = cast(dict[str, Any], llm_cfg.get("langfuse") or {})
     timeout_seconds = int(
         _safe_string(os.getenv("PIPELINE_LLM_TIMEOUT_SECONDS")).strip()
         or llm_cfg.get("timeout_seconds")
@@ -101,6 +157,36 @@ def resolve_runtime_config(compiled_plan: dict[str, Any]) -> RuntimeConfig:
                 "max_retries": max_retries,
                 "api_key_env": "ANTHROPIC_API_KEY",
             },
+        },
+        "langfuse": {
+            "enabled": env_flag(
+                "PIPELINE_ENABLE_LANGFUSE",
+                bool(langfuse_cfg.get("enabled")),
+            ),
+            "prompt_name": _safe_string(
+                os.getenv("PIPELINE_LANGFUSE_PROMPT_NAME") or langfuse_cfg.get("prompt_name")
+            ).strip()
+            or None,
+            "prompt_label": _safe_string(
+                os.getenv("PIPELINE_LANGFUSE_PROMPT_LABEL")
+                or langfuse_cfg.get("prompt_label")
+                or "production"
+            ).strip()
+            or None,
+            "trace_name": _safe_string(
+                os.getenv("PIPELINE_LANGFUSE_TRACE_NAME")
+                or langfuse_cfg.get("trace_name")
+                or "conversation-enrichment"
+            ).strip()
+            or "conversation-enrichment",
+            "base_url": _safe_string(
+                os.getenv("LANGFUSE_BASE_URL") or langfuse_cfg.get("base_url")
+            ).strip()
+            or None,
+            "allow_local_prompt_fallback": env_flag(
+                "PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK",
+                bool(langfuse_cfg.get("allow_local_prompt_fallback", True)),
+            ),
         },
     }
 
@@ -156,18 +242,24 @@ def _allowed_values_text(compiled_plan: dict[str, Any]) -> str:
     return json.dumps(allowed_values, ensure_ascii=True, sort_keys=True)
 
 
+def _payload_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in {"llm_input_hash", "trace_id", "prompt_source"}
+    }
+
+
 def _build_prompt(payload: dict[str, Any], compiled_plan: dict[str, Any]) -> str:
-    return (
-        "Return valid JSON only with these fields: "
-        "sentiment_label, sentiment_confidence_band, intent_stage, persona_profile, "
-        "audience_segment, price_objection_intensity, competitor_pressure_level, "
-        "commercial_urgency_signal, recommended_next_action, explanation_short. "
-        "For every categorical field, you must choose exactly one value from this allowed set and "
-        "must not invent synonyms, English labels, or intermediate stages: "
-        f"{_allowed_values_text(compiled_plan)}. "
-        "Keep explanation_short privacy-safe and under 280 characters. "
-        f"Payload: {json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+    prompt_text = runtime_langfuse_prompt_template()
+    prompt_text = prompt_text.replace(
+        "{{allowed_values_json}}", _allowed_values_text(compiled_plan)
     )
+    prompt_text = prompt_text.replace(
+        "{{payload_json}}",
+        json.dumps(_payload_for_prompt(payload), ensure_ascii=True, sort_keys=True),
+    )
+    return prompt_text
 
 
 def _response_text(response: Any) -> str:
@@ -179,36 +271,304 @@ def _response_text(response: Any) -> str:
     return _safe_string(content)
 
 
-def _invoke_openai(
+def _langfuse_credentials_present() -> bool:
+    return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+
+
+def _langfuse_available() -> bool:
+    return get_client is not None
+
+
+def _get_langfuse_client(config: RuntimeConfig) -> Any | None:
+    if not _langfuse_available():
+        return None
+    base_url = config["langfuse"]["base_url"]
+    if base_url and not os.getenv("LANGFUSE_BASE_URL"):
+        os.environ["LANGFUSE_BASE_URL"] = base_url
+    try:
+        return get_client()
+    except Exception:
+        return None
+
+
+def _langfuse_prompt_version(prompt: Any, fallback_version: str) -> str:
+    for candidate in (
+        getattr(prompt, "version", None),
+        getattr(prompt, "version_id", None),
+        getattr(prompt, "id", None),
+    ):
+        normalized = _safe_string(candidate).strip()
+        if normalized:
+            return normalized
+    if isinstance(prompt, dict):
+        for key in ("version", "version_id", "id"):
+            normalized = _safe_string(prompt.get(key)).strip()
+            if normalized:
+                return normalized
+    return fallback_version
+
+
+def resolve_runtime_prompt(
+    payload: dict[str, Any],
+    compiled_plan: dict[str, Any],
+    config: RuntimeConfig | None = None,
+) -> PromptResolution:
+    runtime_config = config or resolve_runtime_config(compiled_plan)
+    local_prompt = _build_prompt(payload, compiled_plan)
+    local_resolution: PromptResolution = {
+        "source": "local",
+        "prompt_text": local_prompt,
+        "prompt_name": None,
+        "prompt_label": None,
+        "prompt_version": runtime_config["prompt_version"],
+        "langfuse_prompt_ref": None,
+        "resolution_error": None,
+    }
+    langfuse_cfg = runtime_config["langfuse"]
+    prompt_name = _safe_string(langfuse_cfg.get("prompt_name")).strip()
+    if not prompt_name or not langfuse_cfg["enabled"]:
+        return local_resolution
+    if not _langfuse_credentials_present():
+        return {
+            **local_resolution,
+            "source": "local_fallback",
+            "prompt_name": prompt_name,
+            "prompt_label": langfuse_cfg["prompt_label"],
+            "resolution_error": "missing_langfuse_credentials",
+        }
+    client = _get_langfuse_client(runtime_config)
+    if client is None:
+        return {
+            **local_resolution,
+            "source": "local_fallback",
+            "prompt_name": prompt_name,
+            "prompt_label": langfuse_cfg["prompt_label"],
+            "resolution_error": "langfuse_unavailable",
+        }
+    try:
+        prompt_ref = client.get_prompt(prompt_name, label=langfuse_cfg["prompt_label"])
+        compiled_prompt = prompt_ref.compile(
+            allowed_values_json=_allowed_values_text(compiled_plan),
+            payload_json=json.dumps(
+                _payload_for_prompt(payload), ensure_ascii=True, sort_keys=True
+            ),
+        )
+        prompt_text = _safe_string(compiled_prompt).strip()
+        if not prompt_text:
+            raise RuntimeError("empty_langfuse_prompt")
+        return {
+            "source": "langfuse",
+            "prompt_text": prompt_text,
+            "prompt_name": prompt_name,
+            "prompt_label": langfuse_cfg["prompt_label"],
+            "prompt_version": _langfuse_prompt_version(
+                prompt_ref, runtime_config["prompt_version"]
+            ),
+            "langfuse_prompt_ref": prompt_ref,
+            "resolution_error": None,
+        }
+    except Exception as exc:
+        if not langfuse_cfg["allow_local_prompt_fallback"]:
+            raise
+        return {
+            **local_resolution,
+            "source": "local_fallback",
+            "prompt_name": prompt_name,
+            "prompt_label": langfuse_cfg["prompt_label"],
+            "resolution_error": _safe_string(exc) or "langfuse_prompt_resolution_failed",
+        }
+
+
+def _deterministic_trace_id(
+    payload: dict[str, Any], prompt_resolution: PromptResolution
+) -> str | None:
+    conversation_id = _safe_string(payload.get("conversation_id")).strip()
+    lead_key = _safe_string(payload.get("lead_key")).strip()
+    llm_input_hash = _safe_string(payload.get("llm_input_hash")).strip()
+    if not (conversation_id or lead_key or llm_input_hash):
+        return None
+    seed = "|".join(
+        part
+        for part in (
+            conversation_id,
+            lead_key,
+            llm_input_hash,
+            _safe_string(prompt_resolution.get("prompt_version")).strip(),
+        )
+        if part
+    )
+    if not seed:
+        return None
+    if Langfuse is not None and hasattr(Langfuse, "create_trace_id"):
+        try:
+            return _safe_string(Langfuse.create_trace_id(seed=seed)).strip() or None
+        except Exception:
+            pass
+    return hashlib.md5(seed.encode("utf-8")).hexdigest()
+
+
+def _langfuse_trace_metadata(
+    payload: dict[str, Any],
+    prompt_resolution: PromptResolution,
+    config: RuntimeConfig,
+) -> dict[str, Any]:
+    return {
+        "conversation_id": _safe_string(payload.get("conversation_id")),
+        "lead_key": _safe_string(payload.get("lead_key")),
+        "llm_input_hash": _safe_string(payload.get("llm_input_hash")) or None,
+        "prompt_version": prompt_resolution["prompt_version"],
+        "prompt_source": prompt_resolution["source"],
+        "prompt_name": prompt_resolution["prompt_name"],
+        "prompt_label": prompt_resolution["prompt_label"],
+        "trace_name": config["langfuse"]["trace_name"],
+    }
+
+
+def _enter_if_possible(context_manager: Any) -> Any | None:
+    enter = getattr(context_manager, "__enter__", None)
+    if enter is None:
+        return None
+    return enter()
+
+
+def _exit_if_possible(context_manager: Any, exc_type: Any, exc: Any, tb: Any) -> None:
+    exit_fn = getattr(context_manager, "__exit__", None)
+    if exit_fn is not None:
+        exit_fn(exc_type, exc, tb)
+
+
+def start_langfuse_run(
     payload: dict[str, Any],
     config: RuntimeConfig,
-    compiled_plan: dict[str, Any],
+    prompt_resolution: PromptResolution,
+) -> LangfuseRunContext:
+    metadata = _langfuse_trace_metadata(payload, prompt_resolution, config)
+    disabled_context: LangfuseRunContext = {
+        "enabled": False,
+        "trace_id": None,
+        "handler": None,
+        "metadata": metadata,
+        "root_observation": None,
+        "root_context": None,
+    }
+    if not config["langfuse"]["enabled"] or not _langfuse_credentials_present():
+        return disabled_context
+    client = _get_langfuse_client(config)
+    if client is None:
+        return disabled_context
+    try:
+        trace_id = _deterministic_trace_id(payload, prompt_resolution)
+        handler = LangfuseCallbackHandler() if LangfuseCallbackHandler is not None else None
+        root_context = (
+            client.start_as_current_observation(
+                as_type="span",
+                name=config["langfuse"]["trace_name"],
+                trace_context={"trace_id": trace_id} if trace_id else None,
+            )
+            if hasattr(client, "start_as_current_observation")
+            else nullcontext()
+        )
+        root_observation = _enter_if_possible(root_context)
+        if root_observation is not None and hasattr(root_observation, "update"):
+            root_observation.update(metadata=metadata)
+        return {
+            "enabled": True,
+            "trace_id": trace_id,
+            "handler": handler,
+            "metadata": metadata,
+            "root_observation": root_observation,
+            "root_context": root_context,
+        }
+    except Exception:
+        return disabled_context
+
+
+def finish_langfuse_run(context: LangfuseRunContext, result: dict[str, Any]) -> None:
+    root_observation = context["root_observation"]
+    if root_observation is not None and hasattr(root_observation, "update"):
+        try:
+            root_observation.update(
+                output={
+                    "status": result.get("status"),
+                    "provider_name": result.get("provider_name"),
+                    "model_name": result.get("model_name"),
+                    "validation_error": result.get("validation_error"),
+                    "provider_errors": result.get("provider_errors"),
+                }
+            )
+        except Exception:
+            pass
+    handler_trace_id = _safe_string(getattr(context["handler"], "last_trace_id", "")).strip()
+    if handler_trace_id:
+        context["trace_id"] = handler_trace_id
+
+
+def close_langfuse_run(context: LangfuseRunContext) -> None:
+    _exit_if_possible(context["root_context"], None, None, None)
+
+
+def shutdown_langfuse_client(flush: bool = False) -> None:
+    client = _get_langfuse_client(resolve_runtime_config({"llm": {"langfuse": {}}}))
+    if client is None:
+        return
+    try:
+        if flush and hasattr(client, "flush"):
+            client.flush()
+    except Exception:
+        pass
+    try:
+        if hasattr(client, "shutdown"):
+            client.shutdown()
+    except Exception:
+        pass
+
+
+def _invoke_model(
+    model_factory: Any,
+    prompt_text: str,
+    provider_cfg: ProviderRuntimeConfig,
+    langfuse_context: LangfuseRunContext,
+    provider: str,
+) -> dict[str, Any]:
+    invoke_config: dict[str, Any] | None = None
+    if langfuse_context["enabled"] and langfuse_context["handler"] is not None:
+        invoke_config = {
+            "callbacks": [langfuse_context["handler"]],
+            "metadata": {
+                **langfuse_context["metadata"],
+                "provider_name": provider,
+                "model_name": provider_cfg["model"],
+                "trace_id": langfuse_context["trace_id"],
+            },
+        }
+    response = model_factory(
+        model=provider_cfg["model"],
+        timeout=provider_cfg["timeout_seconds"],
+        max_retries=provider_cfg["max_retries"],
+    ).invoke(prompt_text, config=invoke_config)
+    return cast(dict[str, Any], json.loads(_response_text(response)))
+
+
+def _invoke_openai(
+    prompt_text: str,
+    config: RuntimeConfig,
+    langfuse_context: LangfuseRunContext,
 ) -> dict[str, Any]:
     if ChatOpenAI is None:
         raise RuntimeError("langchain_openai_unavailable")
     provider_cfg = config["providers"]["openai"]
-    response = ChatOpenAI(
-        model=provider_cfg["model"],
-        timeout=provider_cfg["timeout_seconds"],
-        max_retries=provider_cfg["max_retries"],
-    ).invoke(_build_prompt(payload, compiled_plan))
-    return cast(dict[str, Any], json.loads(_response_text(response)))
+    return _invoke_model(ChatOpenAI, prompt_text, provider_cfg, langfuse_context, "openai")
 
 
 def _invoke_anthropic(
-    payload: dict[str, Any],
+    prompt_text: str,
     config: RuntimeConfig,
-    compiled_plan: dict[str, Any],
+    langfuse_context: LangfuseRunContext,
 ) -> dict[str, Any]:
     if ChatAnthropic is None:
         raise RuntimeError("langchain_anthropic_unavailable")
     provider_cfg = config["providers"]["anthropic"]
-    response = ChatAnthropic(
-        model=provider_cfg["model"],
-        timeout=provider_cfg["timeout_seconds"],
-        max_retries=provider_cfg["max_retries"],
-    ).invoke(_build_prompt(payload, compiled_plan))
-    return cast(dict[str, Any], json.loads(_response_text(response)))
+    return _invoke_model(ChatAnthropic, prompt_text, provider_cfg, langfuse_context, "anthropic")
 
 
 def _call_provider(
@@ -230,7 +590,12 @@ def _call_provider(
 
     invoke = _invoke_openai if provider == "openai" else _invoke_anthropic
     try:
-        provider_result = invoke(state["payload"], config, compiled_plan)
+        del compiled_plan
+        provider_result = invoke(
+            state["prompt_resolution"]["prompt_text"],
+            config,
+            state["langfuse_context"],
+        )
     except Exception as exc:
         return {
             **state,
@@ -289,6 +654,8 @@ def _validate_provider_output(
 
 def _finalize_result(state: GraphState) -> dict[str, Any]:
     status = _safe_string(state["final_status"]).strip() or "fallback"
+    prompt_resolution = state["prompt_resolution"]
+    langfuse_context = state["langfuse_context"]
     return {
         "status": status,
         "provider_name": state["selected_provider"],
@@ -297,6 +664,11 @@ def _finalize_result(state: GraphState) -> dict[str, Any]:
         "validation_error": state["validation_error"],
         "provider_errors": state["provider_errors"],
         "attempted_providers": state["attempted_providers"],
+        "prompt_source": prompt_resolution["source"],
+        "prompt_name": prompt_resolution["prompt_name"],
+        "prompt_label": prompt_resolution["prompt_label"],
+        "prompt_version": prompt_resolution["prompt_version"],
+        "trace_id": langfuse_context["trace_id"],
     }
 
 
@@ -372,8 +744,13 @@ def run_conversation_enrichment_graph(
     payload: dict[str, Any],
     compiled_plan: dict[str, Any],
     validator: Callable[[dict[str, Any], dict[str, Any]], str | None] | None = None,
+    prompt_resolution: PromptResolution | None = None,
 ) -> dict[str, Any]:
     config = resolve_runtime_config(compiled_plan)
+    resolved_prompt = prompt_resolution or resolve_runtime_prompt(
+        payload, compiled_plan, config=config
+    )
+    langfuse_context = start_langfuse_run(payload, config, resolved_prompt)
     initial_state: GraphState = {
         "conversation_id": _safe_string(payload.get("conversation_id")),
         "lead_key": _safe_string(payload.get("lead_key")),
@@ -387,7 +764,19 @@ def run_conversation_enrichment_graph(
         "final_status": None,
         "current_provider": None,
         "pending_provider": None,
+        "prompt_resolution": resolved_prompt,
+        "langfuse_context": langfuse_context,
     }
     if not config["enabled"]:
-        return _finalize_result({**initial_state, "final_status": "fallback"})
-    return _run_langgraph(initial_state, config, validator, compiled_plan)
+        result = _finalize_result({**initial_state, "final_status": "fallback"})
+        finish_langfuse_run(langfuse_context, result)
+        result["trace_id"] = langfuse_context["trace_id"]
+        close_langfuse_run(langfuse_context)
+        return result
+    try:
+        result = _run_langgraph(initial_state, config, validator, compiled_plan)
+        finish_langfuse_run(langfuse_context, result)
+        result["trace_id"] = langfuse_context["trace_id"]
+        return result
+    finally:
+        close_langfuse_run(langfuse_context)

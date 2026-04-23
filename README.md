@@ -58,6 +58,7 @@ src/pipeline/
     quarantine.py
   runtime/
     env.py
+    langfuse_bootstrap.py
     llm_runtime.py
     spec.py
     state.py
@@ -68,6 +69,7 @@ src/pipeline/
     silver.py
 
 scripts/
+  bootstrap_langfuse_prompt.py
   profile_bronze.py
   plan_pipeline.py
   monitor_pipeline.py
@@ -93,6 +95,10 @@ state/
   approval_state.json
   pipeline_state.json
   pipeline_spec_history.json
+
+docker-compose.yml
+Dockerfile
+.env.example
 ```
 
 ## Aderencia ao teste
@@ -230,11 +236,15 @@ O contrato de `silver_conversations_llm.parquet` inclui, entre outras:
 - `conversation_last_message_at`
 - `llm_input_hash`
 - `prompt_version`
+- `prompt_source`
+- `prompt_name`
+- `prompt_label`
 - `llm_model`
 - `provider_name`
 - `provider_attempt_count`
 - `provider_error_summary`
 - `inference_status`
+- `trace_id`
 - `processed_at_utc`
 - `sentiment_label`
 - `sentiment_confidence_band`
@@ -359,9 +369,13 @@ Observacoes sobre enrichment semantico:
 
 - o enrichment por conversa e opcional e fica fora do caminho de controle operacional do agente
 - quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1`, o pipeline monta um runtime dedicado em `src/pipeline/runtime/llm_runtime.py` para executar OpenAI como provider primario e Anthropic como fallback por conversa
-- o runtime registra `provider_name`, `provider_attempt_count` e `provider_error_summary` para auditoria sem expor payload cru nem credenciais
+- quando `PIPELINE_ENABLE_LANGFUSE=1`, o mesmo runtime pode adicionar tracing opcional no Langfuse sem tornar o pipeline dependente dele
+- o runtime registra `provider_name`, `provider_attempt_count`, `provider_error_summary`, `prompt_source`, `prompt_version` resolvido e `trace_id` para auditoria sem expor payload cru nem credenciais
+- tracing de chamadas LangChain no Langfuse depende do pacote `langchain`; sem o callback, o runtime ainda pode resolver prompts e abrir o span raiz, mas nao anexa callbacks ao provider
+- prompt management via Langfuse e opcional: quando `PIPELINE_LANGFUSE_PROMPT_NAME` estiver configurado e o prompt for resolvido com sucesso, o cache passa a usar a versao resolvida do prompt no lugar do `prompt_version` local estatico
 - sem credenciais, com erro de provider ou com output invalido fora do vocabulario controlado, o pipeline persiste fallback deterministico e continua a publicacao
 - o cache evita recomputar conversas quando `llm_input_hash`, `prompt_version` e a identidade efetiva de modelos do runtime (`llm_model`) nao mudam
+- `scripts/run_pipeline.py` e `scripts/run_pipeline_daemon.py` fazem shutdown gracioso do cliente Langfuse ao encerrar o processo para nao perder eventos em execucoes curtas
 - sinais de preco, urgencia e concorrencia continuam auditaveis, direction-aware em `silver_messages` e o `Gold` sempre permanece publicavel mesmo sem LLM
 
 ## Politica de protecao de dados
@@ -481,6 +495,36 @@ O runtime carrega automaticamente o arquivo `.env` na raiz do repositorio. Varia
 
 Para validar o repositorio de forma deterministica, prefira sobrescrever `PIPELINE_ENABLE_LLM_ENRICHMENT=0` no comando, mesmo se o `.env` local habilitar providers opcionais por padrao.
 
+## Docker Compose com Langfuse self-hosted
+
+O repositorio tambem oferece um caminho opcional com `docker compose` para subir o pipeline junto com um Langfuse self-hosted inicializado por variaveis de ambiente e com bootstrap automatico do prompt versionado.
+
+Fluxo minimo:
+
+```bash
+cp .env.example .env
+docker compose up --build
+docker compose down
+docker compose down -v
+```
+
+Contrato operacional desse modo:
+
+- `langfuse-web` e exposto ao host na porta `3000` por padrao
+- `postgres`, `clickhouse`, `redis`, `minio`, `langfuse-worker`, `langfuse-bootstrap` e `pipeline` ficam internos a rede do Compose
+- `LANGFUSE_INIT_*` inicializa organizacao, projeto, usuario e chaves sem exigir setup manual pela UI
+- `langfuse-bootstrap` espera readiness do `langfuse-web` e cria ou atualiza o prompt `PIPELINE_LANGFUSE_PROMPT_NAME` com o label configurado
+- `pipeline` usa `http://langfuse-web:3000` internamente e recebe as mesmas chaves inicializadas no Langfuse
+- se o bootstrap falhar, o pipeline continua com o prompt local quando `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK=1`
+- `langfuse-worker` usa uma imagem local derivada de `langfuse/langfuse-worker:3` para remover o `socketTimeout` Redis hardcoded da imagem base; isso evita falsos erros em filas Redis/BullMQ locais que ficam bloqueadas aguardando trabalho por design
+- os volumes nomeados preservam traces, prompts e recursos inicializados entre `docker compose down` e o proximo `docker compose up`; use `docker compose down -v` apenas para recriar o ambiente do zero
+
+Limitacoes:
+
+- esse deployment e intencionalmente de baixa escala e para validacao local; nao representa arquitetura HA ou caminho de producao
+- o baseline do repositorio continua sendo a execucao local via `venv/bin/python`; o Compose e opcional
+- no arquivo `.env` usado pelo Compose, prefira manter `LANGFUSE_INIT_*` sem aspas para evitar problemas de headless initialization
+
 Variaveis de ambiente operacionais e de LLM:
 
 ```bash
@@ -489,13 +533,33 @@ PIPELINE_ALERT_WEBHOOK_URL="https://seu-endpoint-de-alerta"
 PIPELINE_ALERT_SUPPRESSION_MINUTES="30"
 PIPELINE_ENABLE_LLM_ENRICHMENT="0"
 PIPELINE_ENABLE_LLM_ADVISOR="0"
+PIPELINE_ENABLE_LANGFUSE="0"
 OPENAI_API_KEY="sua-chave-openai"
 ANTHROPIC_API_KEY="sua-chave-anthropic"
+LANGFUSE_PUBLIC_KEY="sua-chave-publica-langfuse"
+LANGFUSE_SECRET_KEY="sua-chave-secreta-langfuse"
+LANGFUSE_BASE_URL="https://cloud.langfuse.com"
 PIPELINE_LLM_OPENAI_MODEL="gpt-5-mini"
 PIPELINE_LLM_ANTHROPIC_MODEL="claude-sonnet"
 PIPELINE_LLM_TIMEOUT_SECONDS="20"
 PIPELINE_LLM_MAX_RETRIES="1"
+PIPELINE_LANGFUSE_PROMPT_NAME="conversation-enrichment-v1"
+PIPELINE_LANGFUSE_PROMPT_LABEL="production"
+PIPELINE_LANGFUSE_TRACE_NAME="conversation-enrichment"
+PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK="1"
+PIPELINE_LANGFUSE_BOOTSTRAP_ENABLED="1"
+PIPELINE_LANGFUSE_BOOTSTRAP_READY_TIMEOUT_SECONDS="180"
+PIPELINE_LANGFUSE_BOOTSTRAP_READY_POLL_INTERVAL_SECONDS="2"
 ```
+
+Notas de operacao do Langfuse:
+
+- `PIPELINE_ENABLE_LANGFUSE=1` ativa tracing opcional; se credenciais ou SDK estiverem ausentes, o runtime degrada para execucao sem tracing
+- o SDK Langfuse usa `langchain` para importar `langfuse.langchain.CallbackHandler`; essa dependencia fica declarada em `requirements.txt` para que o Compose registre callbacks e geracoes do provider
+- `PIPELINE_LANGFUSE_PROMPT_NAME` + `PIPELINE_LANGFUSE_PROMPT_LABEL` ativam prompt management; o prompt local continua como fallback controlado quando `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK=1`
+- no caminho Compose, `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` e `LANGFUSE_INIT_PROJECT_SECRET_KEY` sao a fonte de verdade compartilhada entre inicializacao headless, bootstrap e runtime do pipeline
+- `scripts/bootstrap_langfuse_prompt.py` espera `langfuse-web` responder em `/api/public/ready` e em `/api/public/health?failIfDatabaseUnavailable=true` antes de tentar publicar o prompt
+- o payload enviado ao Langfuse respeita o mesmo limite de privacidade do payload ja enviado ao provider: apenas dados mascarados e metadata tecnica por conversa
 
 O modo continuo:
 
