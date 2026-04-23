@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,10 +31,33 @@ class PipelinePaths:
     autonomy_proposals: Path
 
 
-def build_paths(root: Path | None = None) -> PipelinePaths:
+def _resolve_path(
+    env: dict[str, str],
+    name: str,
+    default: Path,
+    *,
+    resolve: bool = True,
+) -> Path:
+    raw = env.get(name)
+    candidate = Path(raw).expanduser() if raw else default
+    return candidate.resolve() if resolve else candidate
+
+
+def build_paths(root: Path | None = None, env: dict[str, str] | None = None) -> PipelinePaths:
     base = (root or Path(__file__).resolve().parents[2]).resolve()
-    data = base / "data"
-    config = base / "config"
+    runtime_env = dict(os.environ if env is None else env)
+
+    config = _resolve_path(runtime_env, "PIPELINE_CONFIG_DIR", base / "config")
+    data = _resolve_path(runtime_env, "PIPELINE_DATA_DIR", base / "data")
+    reports = _resolve_path(runtime_env, "PIPELINE_REPORTS_DIR", base / "reports")
+    state = _resolve_path(runtime_env, "PIPELINE_STATE_DIR", base / "state")
+    runtime = _resolve_path(runtime_env, "PIPELINE_RUNTIME_DIR", base / "runtime")
+    raw_bronze_source = _resolve_path(
+        runtime_env,
+        "PIPELINE_INPUT_FILE",
+        base / "docs" / "conversations_bronze.parquet",
+    )
+
     return PipelinePaths(
         root=base,
         config=config,
@@ -43,20 +67,20 @@ def build_paths(root: Path | None = None) -> PipelinePaths:
         silver=data / "silver",
         gold=data / "gold",
         quarantine=data / "quarantine",
-        reports=base / "reports",
-        monitoring=base / "reports" / "monitoring",
-        alerts=base / "reports" / "alerts",
-        agent_decisions=base / "reports" / "agent_decisions",
-        state=base / "state",
-        raw_bronze_source=base / "docs" / "conversations_bronze.parquet",
+        reports=reports,
+        monitoring=reports / "monitoring",
+        alerts=reports / "alerts",
+        agent_decisions=reports / "agent_decisions",
+        state=state,
+        raw_bronze_source=raw_bronze_source,
         pipeline_spec=config / "pipeline_spec.json",
-        approval_state=base / "state" / "approval_state.json",
-        spec_history=base / "state" / "pipeline_spec_history.json",
+        approval_state=state / "approval_state.json",
+        spec_history=state / "pipeline_spec_history.json",
         autonomy_policy=config / "agent_autonomy_policy.json",
-        autonomy_metrics=base / "reports" / "monitoring" / "agent_autonomy_metrics.json",
-        candidates=base / "runtime" / "candidates",
-        autonomy_decisions=base / "reports" / "agent_decisions" / "autonomy",
-        autonomy_proposals=base / "reports" / "agent_decisions" / "proposals",
+        autonomy_metrics=reports / "monitoring" / "agent_autonomy_metrics.json",
+        candidates=runtime / "candidates",
+        autonomy_decisions=reports / "agent_decisions" / "autonomy",
+        autonomy_proposals=reports / "agent_decisions" / "proposals",
     )
 
 

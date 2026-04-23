@@ -1,0 +1,61 @@
+name: Databricks Deploy And Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy-and-run:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      DATABRICKS_CATALOG: ${{ vars.DATABRICKS_CATALOG }}
+      DATABRICKS_SCHEMA: ${{ vars.DATABRICKS_SCHEMA }}
+      DATABRICKS_INPUT_VOLUME: ${{ vars.DATABRICKS_INPUT_VOLUME }}
+      DATABRICKS_OUTPUT_VOLUME: ${{ vars.DATABRICKS_OUTPUT_VOLUME }}
+      DATABRICKS_WORKSPACE_ROOT: ${{ vars.DATABRICKS_WORKSPACE_ROOT }}
+      DATABRICKS_JOB_NAME: ${{ vars.DATABRICKS_JOB_NAME }}
+      DATABRICKS_SPARK_VERSION: ${{ vars.DATABRICKS_SPARK_VERSION }}
+      DATABRICKS_NODE_TYPE_ID: ${{ vars.DATABRICKS_NODE_TYPE_ID }}
+      DATABRICKS_NUM_WORKERS: ${{ vars.DATABRICKS_NUM_WORKERS }}
+      DATABRICKS_RUN_POLL_SECONDS: ${{ vars.DATABRICKS_RUN_POLL_SECONDS }}
+      PIPELINE_ENABLE_LLM_ENRICHMENT: ${{ vars.PIPELINE_ENABLE_LLM_ENRICHMENT }}
+      PIPELINE_LLM_OPENAI_MODEL: ${{ vars.PIPELINE_LLM_OPENAI_MODEL }}
+      PIPELINE_LLM_TIMEOUT_SECONDS: ${{ vars.PIPELINE_LLM_TIMEOUT_SECONDS }}
+      PIPELINE_LLM_MAX_RETRIES: ${{ vars.PIPELINE_LLM_MAX_RETRIES }}
+      PIPELINE_ENABLE_LANGFUSE: ${{ vars.PIPELINE_ENABLE_LANGFUSE }}
+      PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK: ${{ vars.PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK }}
+      PIPELINE_LANGFUSE_PROMPT_NAME: ${{ vars.PIPELINE_LANGFUSE_PROMPT_NAME }}
+      PIPELINE_LANGFUSE_PROMPT_LABEL: ${{ vars.PIPELINE_LANGFUSE_PROMPT_LABEL }}
+      PIPELINE_LANGFUSE_TRACE_NAME: ${{ vars.PIPELINE_LANGFUSE_TRACE_NAME }}
+      LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Validate tests before deploy
+        run: |
+          python -m pytest tests/test_jobs.py -q
+          python -m pytest tests/test_databricks.py -q
+
+      - name: Deploy repository, provision Databricks resources, and run pipeline
+        run: python scripts/databricks_deploy_run.py

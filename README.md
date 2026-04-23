@@ -168,6 +168,21 @@ Saídas principais após a execução:
 - `runtime/candidates/<proposal_id>/`
 - `state/pipeline_state.json`
 
+### Runtime com paths configuráveis
+
+O pipeline continua assumindo o layout local do repositório por padrão, mas agora também aceita overrides por ambiente para separar código de storage persistente. Isso permite executar o mesmo `scripts/run_pipeline.py` em Databricks usando Workspace Files para código e Unity Catalog Volumes para entrada e saídas.
+
+Variáveis de path suportadas:
+
+- `PIPELINE_INPUT_FILE`: arquivo parquet bruto de entrada
+- `PIPELINE_DATA_DIR`: raiz persistente de `bronze/`, `silver/`, `gold/` e `quarantine/`
+- `PIPELINE_REPORTS_DIR`: raiz persistente de relatórios operacionais
+- `PIPELINE_STATE_DIR`: raiz persistente de estado do pipeline
+- `PIPELINE_RUNTIME_DIR`: raiz persistente de `runtime/candidates/`
+- `PIPELINE_CONFIG_DIR`: diretório opcional para `pipeline_spec.json` e `agent_autonomy_policy.json`
+
+Sem essas variáveis, o comportamento local atual permanece o mesmo.
+
 ### Execução contínua
 
 Para manter o pipeline vivo com polling periódico:
@@ -221,6 +236,86 @@ As variáveis estão exemplificadas em [`.env.example`](/home/lucas/projects/luc
 - `PIPELINE_ENABLE_LANGFUSE`: habilita observabilidade do enrichment.
 - `OPENAI_API_KEY`: credencial opcional para provider OpenAI.
 - `ANTHROPIC_API_KEY`: credencial opcional para provider Anthropic.
+
+### Variáveis para execução em Databricks
+
+O deploy automatizado via GitHub Actions usa duas classes de configuração:
+
+- GitHub Secrets obrigatórios:
+  - `DATABRICKS_HOST`
+  - `DATABRICKS_TOKEN`
+- GitHub Secrets opcionais para LLM/observabilidade:
+  - `OPENAI_API_KEY`
+  - `LANGFUSE_PUBLIC_KEY`
+  - `LANGFUSE_SECRET_KEY`
+- GitHub Variables recomendadas:
+  - `DATABRICKS_WORKSPACE_ROOT`
+  - `DATABRICKS_JOB_NAME`
+  - `DATABRICKS_CATALOG`
+  - `DATABRICKS_SCHEMA`
+  - `DATABRICKS_INPUT_VOLUME`
+  - `DATABRICKS_OUTPUT_VOLUME`
+  - `DATABRICKS_SPARK_VERSION`
+  - `DATABRICKS_NODE_TYPE_ID`
+  - `DATABRICKS_NUM_WORKERS`
+  - `DATABRICKS_RUN_POLL_SECONDS`
+  - `PIPELINE_ENABLE_LLM_ENRICHMENT`
+  - `PIPELINE_LLM_OPENAI_MODEL`
+  - `PIPELINE_LLM_TIMEOUT_SECONDS`
+  - `PIPELINE_LLM_MAX_RETRIES`
+  - `PIPELINE_ENABLE_LANGFUSE`
+  - `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK`
+  - `PIPELINE_LANGFUSE_PROMPT_NAME`
+  - `PIPELINE_LANGFUSE_PROMPT_LABEL`
+  - `PIPELINE_LANGFUSE_TRACE_NAME`
+  - `LANGFUSE_BASE_URL`
+
+Defaults internos:
+
+- workspace root: `/Workspace/Shared/namastex-test`
+- catalog/schema: `main.ops`
+- input volume: `bronze_input`
+- output volume: `pipeline_output`
+- job name: `namastex-test-pipeline`
+
+## Deploy e execução no Databricks
+
+O repositório agora inclui o workflow [databricks-deploy-run.yml](/home/lucas/projects/lucas54neves/namastex-test/.github/workflows/databricks-deploy-run.yml), acionado em `push` para `main` e por `workflow_dispatch`.
+
+Fluxo do workflow:
+
+- instala dependências Python e Databricks CLI
+- valida os testes locais relevantes antes do deploy
+- sincroniza o repositório para `Workspace Files`
+- reconcilia catalog, schema, input volume, output volume e job
+- envia `docs/conversations_bronze.parquet` para o volume de input
+- propaga para o job Databricks apenas as variáveis explícitas de runtime de LLM/Langfuse quando estiverem definidas no workflow
+- dispara o job Databricks e falha o workflow se a run falhar
+
+Para um cenário com OpenAI habilitada no Databricks, configure no GitHub:
+
+- Secret: `OPENAI_API_KEY`
+- Variable: `PIPELINE_ENABLE_LLM_ENRICHMENT=1`
+- Variable: `PIPELINE_LLM_OPENAI_MODEL=gpt-5-mini`
+
+Se também quiser Langfuse:
+
+- Secrets: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`
+- Variables: `PIPELINE_ENABLE_LANGFUSE=1`, `LANGFUSE_BASE_URL`, `PIPELINE_LANGFUSE_PROMPT_NAME`, `PIPELINE_LANGFUSE_PROMPT_LABEL`
+
+O script operacional chamado pelo workflow é [scripts/databricks_deploy_run.py](/home/lucas/projects/lucas54neves/namastex-test/scripts/databricks_deploy_run.py), com a lógica de provisionamento e payload do job em [src/pipeline/infrastructure/databricks.py](/home/lucas/projects/lucas54neves/namastex-test/src/pipeline/infrastructure/databricks.py).
+
+Mapeamento de runtime no Databricks:
+
+- código: `/Workspace/Shared/namastex-test/...`
+- input bruto: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
+- outputs persistidos: `/Volumes/<catalog>/<schema>/<output_volume>/{data,reports,state,runtime}`
+
+Pré-requisitos operacionais no workspace:
+
+- Unity Catalog habilitado
+- permissão do principal usado no GitHub para criar ou atualizar catalogs, schemas, volumes e jobs
+- compute compatível com os parâmetros do job
 
 ### Configuração do Langfuse
 
