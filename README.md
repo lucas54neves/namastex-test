@@ -257,11 +257,13 @@ GitHub Variables:
 | --- | --- | --- | --- |
 | `DATABRICKS_WORKSPACE_ROOT` | Não | Raiz de deploy em Workspace Files | `/Workspace/Shared/namastex-test` |
 | `DATABRICKS_JOB_NAME` | Não | Nome do job gerenciado | `namastex-test-pipeline` |
+| `DATABRICKS_JOB_COMPUTE_MODE` | Não | Modo de compute do job Databricks | `serverless` |
 | `DATABRICKS_CATALOG` | Não | Catalog Unity Catalog | `main` |
 | `DATABRICKS_SCHEMA` | Não | Schema Unity Catalog | `ops` |
 | `DATABRICKS_INPUT_VOLUME` | Não | Volume UC para input Bronze | `bronze_input` |
 | `DATABRICKS_OUTPUT_VOLUME` | Não | Volume UC para outputs persistidos | `pipeline_output` |
 | `DATABRICKS_INPUT_FILENAME` | Não | Nome do arquivo Bronze enviado ao volume | `conversations_bronze.parquet` |
+| `DATABRICKS_SERVERLESS_ENVIRONMENT_VERSION` | Não | Environment version usada em compute serverless | `2` |
 | `DATABRICKS_SPARK_VERSION` | Não | Runtime Spark do job | `15.4.x-scala2.12` |
 | `DATABRICKS_NODE_TYPE_ID` | Não | Tipo de nó do cluster do job | `Standard_DS3_v2` |
 | `DATABRICKS_NUM_WORKERS` | Não | Quantidade de workers do job | `1` |
@@ -280,6 +282,7 @@ GitHub Variables:
 Defaults internos:
 
 - workspace root: `/Workspace/Shared/namastex-test`
+- job compute mode: `serverless`
 - catalog/schema: `main.ops`
 - input volume: `bronze_input`
 - output volume: `pipeline_output`
@@ -296,6 +299,7 @@ Fluxo do workflow:
 - sincroniza o repositório para `Workspace Files`
 - reconcilia catalog, schema, input volume, output volume e job
 - envia `docs/conversations_bronze.parquet` para o volume de input via Databricks CLI usando `dbfs:/Volumes/...`, com retry curto para acomodar propagação do volume no workspace
+- cria o job em `serverless` por padrão e referencia `requirements.txt` do workspace como dependência do ambiente do job
 - propaga para o job Databricks apenas as variáveis explícitas de runtime de LLM/Langfuse quando estiverem definidas no workflow
 - dispara o job Databricks e falha o workflow se a run falhar
 
@@ -322,12 +326,14 @@ Mapeamento de upload no workflow:
 
 - upload do arquivo Bronze via CLI: `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
 - path consumido pelo job em runtime: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
+- dependencies do job serverless: `-r /Workspace/Shared/namastex-test/requirements.txt`
 
 Pré-requisitos operacionais no workspace:
 
 - Unity Catalog habilitado
 - permissão do principal usado no GitHub para criar ou atualizar catalogs, schemas, volumes e jobs
 - permissão efetiva de escrita no volume de input configurado, porque o workflow faz upload via `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/...`
+- compatibilidade do workspace com o modo de compute configurado; em workspaces `serverless-only`, mantenha `DATABRICKS_JOB_COMPUTE_MODE=serverless`
 - compute compatível com os parâmetros do job
 
 Diagnóstico operacional:

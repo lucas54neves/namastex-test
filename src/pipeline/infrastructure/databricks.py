@@ -32,6 +32,7 @@ _INPUT_UPLOAD_RETRY_SECONDS = 5
 class DatabricksDeploymentConfig:
     host: str
     job_name: str
+    job_compute_mode: str
     workspace_root: str
     workspace_script_path: str
     catalog_name: str
@@ -46,6 +47,8 @@ class DatabricksDeploymentConfig:
     runtime_dir: str
     config_dir: str
     pipeline_input_file: str
+    workspace_requirements_path: str
+    serverless_environment_version: str
     spark_version: str
     node_type_id: str
     num_workers: int
@@ -95,6 +98,13 @@ def _optional_int_env(env: dict[str, str], name: str, default: int) -> int:
     return int(value) if value else default
 
 
+def _normalized_job_compute_mode(env: dict[str, str]) -> str:
+    mode = _optional_env(env, "DATABRICKS_JOB_COMPUTE_MODE", "serverless").lower()
+    if mode not in {"serverless", "classic"}:
+        raise ValueError("DATABRICKS_JOB_COMPUTE_MODE must be either 'serverless' or 'classic'")
+    return mode
+
+
 def build_databricks_deployment_config(
     repo_root: Path,
     env: dict[str, str] | None = None,
@@ -129,6 +139,7 @@ def build_databricks_deployment_config(
             "DATABRICKS_JOB_NAME",
             "namastex-test-pipeline",
         ),
+        job_compute_mode=_normalized_job_compute_mode(runtime_env),
         workspace_root=workspace_root.rstrip("/"),
         workspace_script_path=f"{workspace_root.rstrip('/')}/scripts/run_pipeline.py",
         catalog_name=catalog_name,
@@ -143,6 +154,12 @@ def build_databricks_deployment_config(
         runtime_dir=f"{output_volume_path}/runtime",
         config_dir=f"{workspace_root.rstrip('/')}/config",
         pipeline_input_file=f"{input_volume_path}/{input_filename}",
+        workspace_requirements_path=f"{workspace_root.rstrip('/')}/requirements.txt",
+        serverless_environment_version=_optional_env(
+            runtime_env,
+            "DATABRICKS_SERVERLESS_ENVIRONMENT_VERSION",
+            "2",
+        ),
         spark_version=_optional_env(
             runtime_env,
             "DATABRICKS_SPARK_VERSION",
@@ -163,24 +180,52 @@ def build_databricks_deployment_config(
     )
 
 
-def build_databricks_job_settings(config: DatabricksDeploymentConfig) -> dict[str, Any]:
+def _build_serverless_task_settings(config: DatabricksDeploymentConfig) -> dict[str, Any]:
     return {
-        "name": config.job_name,
-        "tasks": [
+        "environment_key": "default",
+        "environments": [
             {
-                "task_key": "run_pipeline",
-                "spark_python_task": {
-                    "python_file": config.workspace_script_path,
-                    "parameters": ["--force"],
+                "environment_key": "default",
+                "spec": {
+                    "environment_version": config.serverless_environment_version,
+                    "dependencies": [f"-r {config.workspace_requirements_path}"],
                 },
-                "new_cluster": {
-                    "spark_version": config.spark_version,
-                    "node_type_id": config.node_type_id,
-                    "num_workers": config.num_workers,
-                },
-                "environment_variables": config.environment,
             }
         ],
+    }
+
+
+def _build_classic_task_settings(config: DatabricksDeploymentConfig) -> dict[str, Any]:
+    return {
+        "new_cluster": {
+            "spark_version": config.spark_version,
+            "node_type_id": config.node_type_id,
+            "num_workers": config.num_workers,
+        }
+    }
+
+
+def build_databricks_job_settings(config: DatabricksDeploymentConfig) -> dict[str, Any]:
+    task_settings: dict[str, Any] = {
+        "task_key": "run_pipeline",
+        "spark_python_task": {
+            "python_file": config.workspace_script_path,
+            "parameters": ["--force"],
+        },
+        "environment_variables": config.environment,
+    }
+    if config.job_compute_mode == "serverless":
+        serverless_settings = _build_serverless_task_settings(config)
+        task_settings["environment_key"] = serverless_settings["environment_key"]
+        environments = serverless_settings["environments"]
+    else:
+        task_settings.update(_build_classic_task_settings(config))
+        environments = []
+
+    return {
+        "name": config.job_name,
+        "tasks": [task_settings],
+        **({"environments": environments} if environments else {}),
     }
 
 

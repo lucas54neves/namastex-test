@@ -48,7 +48,7 @@ def test_build_paths_applies_runtime_overrides(tmp_path: Path) -> None:
     )
 
 
-def test_build_databricks_job_settings_uses_volume_and_workspace_paths(tmp_path: Path) -> None:
+def test_build_databricks_job_settings_uses_serverless_defaults(tmp_path: Path) -> None:
     input_file = tmp_path / "docs" / "conversations_bronze.parquet"
     input_file.parent.mkdir(parents=True)
     input_file.write_bytes(b"PAR1")
@@ -63,9 +63,7 @@ def test_build_databricks_job_settings_uses_volume_and_workspace_paths(tmp_path:
             "DATABRICKS_INPUT_VOLUME": "bronze_input",
             "DATABRICKS_OUTPUT_VOLUME": "pipeline_output",
             "DATABRICKS_JOB_NAME": "namastex-test-pipeline",
-            "DATABRICKS_SPARK_VERSION": "15.4.x-scala2.12",
-            "DATABRICKS_NODE_TYPE_ID": "Standard_DS3_v2",
-            "DATABRICKS_NUM_WORKERS": "2",
+            "DATABRICKS_SERVERLESS_ENVIRONMENT_VERSION": "2",
             "PIPELINE_ENABLE_LLM_ENRICHMENT": "1",
             "PIPELINE_LLM_OPENAI_MODEL": "gpt-5-mini",
             "OPENAI_API_KEY": "sk-test",
@@ -80,10 +78,21 @@ def test_build_databricks_job_settings_uses_volume_and_workspace_paths(tmp_path:
     task = settings["tasks"][0]
 
     assert settings["name"] == "namastex-test-pipeline"
+    assert settings["environments"] == [
+        {
+            "environment_key": "default",
+            "spec": {
+                "environment_version": "2",
+                "dependencies": ["-r /Workspace/Shared/namastex-test/requirements.txt"],
+            },
+        }
+    ]
     assert task["spark_python_task"]["python_file"] == (
         "/Workspace/Shared/namastex-test/scripts/run_pipeline.py"
     )
     assert task["spark_python_task"]["parameters"] == ["--force"]
+    assert task["environment_key"] == "default"
+    assert "new_cluster" not in task
     assert task["environment_variables"]["PIPELINE_INPUT_FILE"] == (
         "/Volumes/main/ops/bronze_input/conversations_bronze.parquet"
     )
@@ -106,7 +115,38 @@ def test_build_databricks_job_settings_uses_volume_and_workspace_paths(tmp_path:
     assert task["environment_variables"]["LANGFUSE_BASE_URL"] == "https://langfuse.example.com"
     assert task["environment_variables"]["LANGFUSE_PUBLIC_KEY"] == "lf_pk_test"
     assert task["environment_variables"]["LANGFUSE_SECRET_KEY"] == "lf_sk_test"
-    assert task["new_cluster"]["num_workers"] == 2
+    assert settings["environments"][0]["spec"]["environment_version"] == "2"
+    assert settings["environments"][0]["spec"]["dependencies"] == [
+        "-r /Workspace/Shared/namastex-test/requirements.txt"
+    ]
+
+
+def test_build_databricks_job_settings_supports_classic_compute(tmp_path: Path) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={
+            "DATABRICKS_HOST": "https://dbc.example.com",
+            "DATABRICKS_JOB_COMPUTE_MODE": "classic",
+            "DATABRICKS_SPARK_VERSION": "15.4.x-scala2.12",
+            "DATABRICKS_NODE_TYPE_ID": "Standard_DS3_v2",
+            "DATABRICKS_NUM_WORKERS": "2",
+        },
+    )
+
+    settings = build_databricks_job_settings(config)
+    task = settings["tasks"][0]
+
+    assert "environments" not in settings
+    assert "environment_key" not in task
+    assert task["new_cluster"] == {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 2,
+    }
 
 
 def test_build_databricks_config_uses_defaults_when_workflow_vars_are_empty(
@@ -139,10 +179,31 @@ def test_build_databricks_config_uses_defaults_when_workflow_vars_are_empty(
     assert config.input_volume_name == "bronze_input"
     assert config.output_volume_name == "pipeline_output"
     assert config.job_name == "namastex-test-pipeline"
+    assert config.job_compute_mode == "serverless"
+    assert config.serverless_environment_version == "2"
     assert config.spark_version == "15.4.x-scala2.12"
     assert config.node_type_id == "Standard_DS3_v2"
     assert config.num_workers == 1
     assert config.poll_seconds == 10
+
+
+def test_build_databricks_config_rejects_invalid_compute_mode(tmp_path: Path) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+
+    try:
+        build_databricks_deployment_config(
+            tmp_path,
+            env={
+                "DATABRICKS_HOST": "https://dbc.example.com",
+                "DATABRICKS_JOB_COMPUTE_MODE": "gpu-dragon",
+            },
+        )
+    except ValueError as exc:
+        assert "DATABRICKS_JOB_COMPUTE_MODE" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
 
 
 def test_resource_exists_returns_false_for_databricks_not_found_errors(
@@ -312,4 +373,9 @@ def test_workflow_exists_with_required_triggers_and_databricks_contract() -> Non
     assert "LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}" in workflow
     assert "LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}" in workflow
     assert "uses: databricks/setup-cli@main" in workflow
+    assert "DATABRICKS_JOB_COMPUTE_MODE: ${{ vars.DATABRICKS_JOB_COMPUTE_MODE }}" in workflow
+    assert (
+        "DATABRICKS_SERVERLESS_ENVIRONMENT_VERSION: "
+        "${{ vars.DATABRICKS_SERVERLESS_ENVIRONMENT_VERSION }}" in workflow
+    )
     assert "python scripts/databricks_deploy_run.py" in workflow
