@@ -56,3 +56,14 @@ def test_run_pipeline_main_shuts_down_langfuse(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert '"status": "success"' in captured.out
     assert shutdown_calls == ["done"]
+
+
+def test_resolve_root_falls_back_to_pipeline_config_dir(tmp_path: Path) -> None:
+    module = _load_run_pipeline_module()
+
+    root = module._resolve_root(
+        None,
+        {"PIPELINE_CONFIG_DIR": str(tmp_path / "workspace" / "config")},
+    )
+
+    assert root == (tmp_path / "workspace").resolve()

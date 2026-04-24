@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+
+def _resolve_root(file_name: str | None, env: dict[str, str] | None = None) -> Path:
+    if file_name:
+        return Path(file_name).resolve().parents[1]
+    runtime_env = dict(os.environ if env is None else env)
+    config_dir = runtime_env.get("PIPELINE_CONFIG_DIR", "").strip()
+    if config_dir:
+        return Path(config_dir).resolve().parent
+    return Path.cwd().resolve()
+
+
+ROOT = _resolve_root(globals().get("__file__"), dict(os.environ))
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
