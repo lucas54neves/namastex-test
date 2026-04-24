@@ -300,6 +300,7 @@ Fluxo do workflow:
 - reconcilia catalog, schema, input volume, output volume e job
 - envia `docs/conversations_bronze.parquet` para o volume de input via Databricks CLI usando `dbfs:/Volumes/...`, com retry curto para acomodar propagação do volume no workspace
 - cria o job em `serverless` por padrão e referencia `requirements.txt` do workspace como dependência do ambiente do job
+- passa os paths críticos do pipeline para o script Databricks por argumentos explícitos (`--input-file`, `--data-dir`, `--reports-dir`, `--state-dir`, `--runtime-dir`, `--config-dir`)
 - propaga para o job Databricks apenas as variáveis explícitas de runtime de LLM/Langfuse quando estiverem definidas no workflow
 - dispara o job Databricks e falha o workflow se a run falhar
 

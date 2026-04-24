@@ -94,7 +94,21 @@ def test_build_databricks_job_settings_uses_serverless_defaults(tmp_path: Path) 
     assert task["spark_python_task"]["python_file"] == (
         "/Workspace/Shared/namastex-test/scripts/run_pipeline.py"
     )
-    assert task["spark_python_task"]["parameters"] == ["--force"]
+    assert task["spark_python_task"]["parameters"] == [
+        "--force",
+        "--input-file",
+        "/Volumes/main/ops/bronze_input/conversations_bronze.parquet",
+        "--data-dir",
+        "/Volumes/main/ops/pipeline_output/data",
+        "--reports-dir",
+        "/Volumes/main/ops/pipeline_output/reports",
+        "--state-dir",
+        "/Volumes/main/ops/pipeline_output/state",
+        "--runtime-dir",
+        "/Volumes/main/ops/pipeline_output/runtime",
+        "--config-dir",
+        "/Workspace/Shared/namastex-test/config",
+    ]
     assert task["environment_key"] == "default"
     assert "new_cluster" not in task
     assert task["environment_variables"]["PIPELINE_INPUT_FILE"] == (

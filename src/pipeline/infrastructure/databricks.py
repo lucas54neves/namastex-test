@@ -215,7 +215,21 @@ def build_databricks_job_settings(config: DatabricksDeploymentConfig) -> dict[st
         "task_key": "run_pipeline",
         "spark_python_task": {
             "python_file": config.workspace_script_path,
-            "parameters": ["--force"],
+            "parameters": [
+                "--force",
+                "--input-file",
+                config.pipeline_input_file,
+                "--data-dir",
+                config.data_dir,
+                "--reports-dir",
+                config.reports_dir,
+                "--state-dir",
+                config.state_dir,
+                "--runtime-dir",
+                config.runtime_dir,
+                "--config-dir",
+                config.config_dir,
+            ],
         },
         "environment_variables": config.environment,
     }
