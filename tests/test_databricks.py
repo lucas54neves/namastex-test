@@ -9,6 +9,7 @@ from pipeline.infrastructure.databricks import (
     _resource_exists,
     build_databricks_deployment_config,
     build_databricks_job_settings,
+    run_job_and_wait,
     upload_input_file,
 )
 
@@ -357,6 +358,100 @@ def test_upload_input_file_raises_runtime_error_with_cli_output(
         raise AssertionError("Expected RuntimeError")
 
     assert sleeps == [5, 5]
+
+
+def test_run_job_and_wait_raises_enriched_error_for_internal_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={"DATABRICKS_HOST": "https://dbc.example.com"},
+    )
+
+    def fake_api_call(_config, method: str, path: str, payload=None):
+        if method == "post" and path == "/api/2.1/jobs/run-now":
+            return {"run_id": 123}
+        if method == "get" and path == "/api/2.1/jobs/runs/get?run_id=123":
+            return {
+                "state": {
+                    "life_cycle_state": "INTERNAL_ERROR",
+                    "result_state": "FAILED",
+                    "state_message": "Serverless environment setup failed",
+                },
+                "tasks": [{"task_key": "run_pipeline", "run_id": 456}],
+            }
+        if method == "get" and path == "/api/2.1/jobs/runs/get-output?run_id=456":
+            return {
+                "metadata": {
+                    "state": {
+                        "state_message": "Dependency installation failed",
+                    }
+                },
+                "error": "pip could not resolve requirements",
+            }
+        raise AssertionError(f"Unexpected API call: {method} {path} payload={payload}")
+
+    monkeypatch.setattr("pipeline.infrastructure.databricks._api_call", fake_api_call)
+
+    try:
+        run_job_and_wait(config, 999)
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "Databricks run 123 failed" in message
+        assert "life_cycle_state=INTERNAL_ERROR" in message
+        assert "result_state=FAILED" in message
+        assert "state_message=Serverless environment setup failed" in message
+        assert "task run_pipeline state_message=Dependency installation failed" in message
+        assert "task run_pipeline error=pip could not resolve requirements" in message
+    else:
+        raise AssertionError("Expected RuntimeError")
+
+
+def test_run_job_and_wait_raises_enriched_error_for_terminated_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={"DATABRICKS_HOST": "https://dbc.example.com"},
+    )
+
+    def fake_api_call(_config, method: str, path: str, payload=None):
+        if method == "post" and path == "/api/2.1/jobs/run-now":
+            return {"run_id": 321}
+        if method == "get" and path == "/api/2.1/jobs/runs/get?run_id=321":
+            return {
+                "state": {
+                    "life_cycle_state": "TERMINATED",
+                    "result_state": "FAILED",
+                    "state_message": "Task failed while executing script",
+                },
+                "tasks": [{"task_key": "run_pipeline", "run_id": 654}],
+            }
+        if method == "get" and path == "/api/2.1/jobs/runs/get-output?run_id=654":
+            raise RuntimeError(
+                "Databricks API GET /api/2.1/jobs/runs/get-output failed: not available"
+            )
+        raise AssertionError(f"Unexpected API call: {method} {path} payload={payload}")
+
+    monkeypatch.setattr("pipeline.infrastructure.databricks._api_call", fake_api_call)
+
+    try:
+        run_job_and_wait(config, 999)
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "Databricks run 321 failed" in message
+        assert "life_cycle_state=TERMINATED" in message
+        assert "result_state=FAILED" in message
+        assert "state_message=Task failed while executing script" in message
+        assert "task run_pipeline output unavailable" in message
+    else:
+        raise AssertionError("Expected RuntimeError")
 
 
 def test_workflow_exists_with_required_triggers_and_databricks_contract() -> None:

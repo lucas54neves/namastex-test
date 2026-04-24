@@ -340,6 +340,7 @@ Diagnóstico operacional:
 
 - falhas no upload para o volume agora preservam `stderr` e `stdout` do Databricks CLI no erro do workflow
 - o upload tenta novamente por um curto intervalo antes de falhar definitivamente, o que reduz erro transitório logo após a reconciliação do volume
+- falhas da run do job agora preservam `life_cycle_state`, `result_state`, `state_message` e, quando disponível, a saída de `jobs/runs/get-output` da task para acelerar a análise no GitHub Actions
 
 ### Configuração do Langfuse
 

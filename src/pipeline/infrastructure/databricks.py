@@ -405,6 +405,49 @@ def reconcile_job(config: DatabricksDeploymentConfig) -> int:
     return job_id
 
 
+def _run_output_summary(config: DatabricksDeploymentConfig, status: dict[str, Any]) -> str:
+    tasks = status.get("tasks", [])
+    details: list[str] = []
+    for task in tasks:
+        run_id = task.get("run_id")
+        task_key = task.get("task_key", "unknown")
+        if run_id is None:
+            continue
+        try:
+            output = _api_call(config, "get", f"/api/2.1/jobs/runs/get-output?run_id={run_id}")
+        except RuntimeError as exc:
+            details.append(f"task {task_key} output unavailable: {exc}")
+            continue
+        metadata = output.get("metadata", {})
+        state = metadata.get("state", {})
+        state_message = state.get("state_message", "").strip()
+        error = str(output.get("error", "")).strip()
+        if state_message:
+            details.append(f"task {task_key} state_message={state_message}")
+        if error:
+            details.append(f"task {task_key} error={error}")
+    return "; ".join(details)
+
+
+def _run_failure_details(
+    config: DatabricksDeploymentConfig, run_id: int, status: dict[str, Any]
+) -> str:
+    state = status.get("state", {})
+    life_cycle_state = state.get("life_cycle_state", "") or "UNKNOWN"
+    result_state = state.get("result_state", "") or "UNKNOWN"
+    state_message = str(state.get("state_message", "")).strip()
+    details = [
+        f"life_cycle_state={life_cycle_state}",
+        f"result_state={result_state}",
+    ]
+    if state_message:
+        details.append(f"state_message={state_message}")
+    output_summary = _run_output_summary(config, status)
+    if output_summary:
+        details.append(output_summary)
+    return f"Databricks run {run_id} failed: " + "; ".join(details)
+
+
 def run_job_and_wait(config: DatabricksDeploymentConfig, job_id: int) -> dict[str, Any]:
     run_response = _api_call(
         config,
@@ -420,15 +463,10 @@ def run_job_and_wait(config: DatabricksDeploymentConfig, job_id: int) -> dict[st
         result_state = state.get("result_state", "")
         if life_cycle_state == "TERMINATED":
             if result_state != "SUCCESS":
-                raise RuntimeError(
-                    f"Databricks run {run_id} failed with result_state={result_state or 'UNKNOWN'}"
-                )
+                raise RuntimeError(_run_failure_details(config, run_id, status))
             return status
         if life_cycle_state in {"SKIPPED", "INTERNAL_ERROR"}:
-            raise RuntimeError(
-                "Databricks run "
-                f"{run_id} ended unexpectedly with life_cycle_state={life_cycle_state}"
-            )
+            raise RuntimeError(_run_failure_details(config, run_id, status))
         time.sleep(max(config.poll_seconds, 1))
 
 
