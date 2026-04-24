@@ -296,17 +296,61 @@ Defaults internos:
 
 O repositório agora inclui o workflow [databricks-deploy-run.yml](/home/lucas/projects/lucas54neves/namastex-test/.github/workflows/databricks-deploy-run.yml), acionado em `push` para `main` e por `workflow_dispatch`.
 
-Fluxo do workflow:
+Para a entrega final, o caminho recomendado é o baseline sem provider externo e sem Langfuse. Nesse modo, basta configurar no GitHub `DATABRICKS_HOST` e `DATABRICKS_TOKEN`; as demais variáveis podem ficar nos defaults internos documentados acima.
 
-- instala dependências Python e Databricks CLI
-- valida os testes locais relevantes antes do deploy
+### Passo a passo mínimo
+
+1. Configure no repositório GitHub os secrets obrigatórios `DATABRICKS_HOST` e `DATABRICKS_TOKEN`.
+2. Se necessário, ajuste GitHub Variables como `DATABRICKS_WORKSPACE_ROOT`, `DATABRICKS_CATALOG`, `DATABRICKS_SCHEMA`, `DATABRICKS_INPUT_VOLUME` e `DATABRICKS_OUTPUT_VOLUME`. Se nada for definido, o workflow usa os defaults internos.
+3. Garanta que o principal associado ao token tenha permissão para criar ou atualizar schema, volumes e job no workspace alvo, além de escrever no volume de input.
+4. Dispare o workflow `Databricks Deploy And Run` por `workflow_dispatch` ou faça `push` para `main`.
+5. Acompanhe a execução no GitHub Actions. O workflow instala dependências, roda os testes `tests/test_jobs.py` e `tests/test_databricks.py`, sincroniza o repositório para `Workspace Files`, reconcilia recursos no Databricks, faz upload do Bronze e executa o job.
+6. Considere a entrega validada quando a run do GitHub Actions terminar com sucesso e os artefatos esperados estiverem presentes no volume de output do Databricks.
+
+### O que o workflow faz
+
 - sincroniza o repositório para `Workspace Files`
 - reconcilia catalog, schema, input volume, output volume e job
-- envia `docs/conversations_bronze.parquet` para o volume de input via Databricks CLI usando `dbfs:/Volumes/...`, com retry curto para acomodar propagação do volume no workspace
+- envia `docs/conversations_bronze.parquet` para o volume de input via Databricks CLI usando `dbfs:/Volumes/...`
 - cria o job em `serverless` por padrão e referencia `requirements.txt` do workspace como dependência do ambiente do job
-- passa os paths críticos do pipeline para o script Databricks por argumentos explícitos (`--input-file`, `--data-dir`, `--reports-dir`, `--state-dir`, `--runtime-dir`, `--config-dir`)
-- propaga para o job Databricks apenas as variáveis explícitas de runtime de LLM/Langfuse quando estiverem definidas no workflow
+- passa os paths críticos do pipeline por argumentos explícitos (`--input-file`, `--data-dir`, `--reports-dir`, `--state-dir`, `--runtime-dir`, `--config-dir`)
+- propaga para o job apenas variáveis explícitas de runtime de LLM e Langfuse quando estiverem definidas
 - dispara o job Databricks e falha o workflow se a run falhar
+
+O script operacional chamado pelo workflow é [scripts/databricks_deploy_run.py](/home/lucas/projects/lucas54neves/namastex-test/scripts/databricks_deploy_run.py), com a lógica de provisionamento e payload do job em [src/pipeline/infrastructure/databricks.py](/home/lucas/projects/lucas54neves/namastex-test/src/pipeline/infrastructure/databricks.py).
+
+### Como validar a execução
+
+Mapeamento de runtime no Databricks:
+
+- código: `/Workspace/Shared/namastex-test/...`
+- input bruto: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
+- outputs persistidos: `/Volumes/<catalog>/<schema>/<output_volume>/{data,reports,state,runtime}`
+
+Ao final da run, os seguintes artefatos devem existir no volume de output:
+
+- `data/bronze/conversations.parquet`
+- `data/silver/silver_leads.parquet`
+- `data/silver/silver_messages.parquet`
+- `data/silver/silver_conversations_llm.parquet`
+- `data/gold/conversations_gold.parquet`
+- `reports/monitoring/latest_run_report.json`
+- `reports/monitoring/latest_plan_report.json`
+- `reports/monitoring/agent_autonomy_metrics.json`
+- `reports/monitoring/latest_agent_report.json`
+- `reports/monitoring/latest_alert_report.json`
+- `reports/agent_decisions/proposals/`
+- `reports/agent_decisions/autonomy/latest_autonomy_decision.json`
+- `state/pipeline_state.json`
+
+Mapeamento de upload no workflow:
+
+- upload do arquivo Bronze via CLI: `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
+- path consumido pelo job em runtime: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
+- dependencies do job serverless: instala o projeto a partir de `/Workspace/Shared/namastex-test` e depois aplica `-r /Workspace/Shared/namastex-test/requirements.txt`
+- bootstrap do script principal no Databricks: usa `PIPELINE_CONFIG_DIR` para resolver a raiz do projeto quando `__file__` não estiver disponível no runtime
+
+### Configurações opcionais
 
 Para um cenário com OpenAI habilitada no Databricks, configure no GitHub:
 
@@ -325,34 +369,22 @@ Se também quiser Langfuse:
 - Secrets: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`
 - Variables: `PIPELINE_ENABLE_LANGFUSE=1`, `LANGFUSE_BASE_URL`, `PIPELINE_LANGFUSE_PROMPT_NAME`, `PIPELINE_LANGFUSE_PROMPT_LABEL`
 
-O script operacional chamado pelo workflow é [scripts/databricks_deploy_run.py](/home/lucas/projects/lucas54neves/namastex-test/scripts/databricks_deploy_run.py), com a lógica de provisionamento e payload do job em [src/pipeline/infrastructure/databricks.py](/home/lucas/projects/lucas54neves/namastex-test/src/pipeline/infrastructure/databricks.py).
-
-Mapeamento de runtime no Databricks:
-
-- código: `/Workspace/Shared/namastex-test/...`
-- input bruto: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
-- outputs persistidos: `/Volumes/<catalog>/<schema>/<output_volume>/{data,reports,state,runtime}`
-
-Mapeamento de upload no workflow:
-
-- upload do arquivo Bronze via CLI: `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
-- path consumido pelo job em runtime: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
-- dependencies do job serverless: instala o projeto a partir de `/Workspace/Shared/namastex-test` e depois aplica `-r /Workspace/Shared/namastex-test/requirements.txt`
-- bootstrap do script principal no Databricks: usa `PIPELINE_CONFIG_DIR` para resolver a raiz do projeto quando `__file__` não estiver disponível no runtime
+### Pré-requisitos e diagnóstico
 
 Pré-requisitos operacionais no workspace:
 
 - Unity Catalog habilitado
-- permissão do principal usado no GitHub para criar ou atualizar catalogs, schemas, volumes e jobs
+- permissão efetiva do principal usado no GitHub para criar ou atualizar o schema configurado, criar ou atualizar os volumes configurados e criar ou atualizar o job
 - permissão efetiva de escrita no volume de input configurado, porque o workflow faz upload via `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/...`
+- se o catálogo não puder ser criado pelo principal, ele deve existir previamente e o valor de `DATABRICKS_CATALOG` deve apontar para esse catálogo
 - compatibilidade do workspace com o modo de compute configurado; em workspaces `serverless-only`, mantenha `DATABRICKS_JOB_COMPUTE_MODE=serverless`
-- compute compatível com os parâmetros do job
+- compute compatível com os parâmetros do job quando o modo for `classic`
 
 Diagnóstico operacional:
 
-- falhas no upload para o volume agora preservam `stderr` e `stdout` do Databricks CLI no erro do workflow
-- o upload tenta novamente por um curto intervalo antes de falhar definitivamente, o que reduz erro transitório logo após a reconciliação do volume
-- falhas da run do job agora preservam `life_cycle_state`, `result_state`, `state_message` e, quando disponível, a saída de `jobs/runs/get-output` da task para acelerar a análise no GitHub Actions
+- falhas no upload para o volume preservam `stderr` e `stdout` do Databricks CLI no erro do workflow
+- o upload tenta novamente por um curto intervalo antes de falhar definitivamente, reduzindo erro transitório logo após a reconciliação do volume
+- falhas da run do job preservam `life_cycle_state`, `result_state`, `state_message` e, quando disponível, a saída de `jobs/runs/get-output` da task para acelerar a análise no GitHub Actions
 
 ### Configuração do Langfuse
 
