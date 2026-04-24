@@ -46,6 +46,7 @@ class DatabricksDeploymentConfig:
     state_dir: str
     runtime_dir: str
     config_dir: str
+    workspace_project_path: str
     pipeline_input_file: str
     workspace_requirements_path: str
     serverless_environment_version: str
@@ -153,6 +154,7 @@ def build_databricks_deployment_config(
         state_dir=f"{output_volume_path}/state",
         runtime_dir=f"{output_volume_path}/runtime",
         config_dir=f"{workspace_root.rstrip('/')}/config",
+        workspace_project_path=workspace_root.rstrip("/"),
         pipeline_input_file=f"{input_volume_path}/{input_filename}",
         workspace_requirements_path=f"{workspace_root.rstrip('/')}/requirements.txt",
         serverless_environment_version=_optional_env(
@@ -188,7 +190,10 @@ def _build_serverless_task_settings(config: DatabricksDeploymentConfig) -> dict[
                 "environment_key": "default",
                 "spec": {
                     "environment_version": config.serverless_environment_version,
-                    "dependencies": [f"-r {config.workspace_requirements_path}"],
+                    "dependencies": [
+                        config.workspace_project_path,
+                        f"-r {config.workspace_requirements_path}",
+                    ],
                 },
             }
         ],

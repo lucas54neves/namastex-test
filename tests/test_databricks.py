@@ -84,7 +84,10 @@ def test_build_databricks_job_settings_uses_serverless_defaults(tmp_path: Path) 
             "environment_key": "default",
             "spec": {
                 "environment_version": "2",
-                "dependencies": ["-r /Workspace/Shared/namastex-test/requirements.txt"],
+                "dependencies": [
+                    "/Workspace/Shared/namastex-test",
+                    "-r /Workspace/Shared/namastex-test/requirements.txt",
+                ],
             },
         }
     ]
@@ -118,7 +121,8 @@ def test_build_databricks_job_settings_uses_serverless_defaults(tmp_path: Path) 
     assert task["environment_variables"]["LANGFUSE_SECRET_KEY"] == "lf_sk_test"
     assert settings["environments"][0]["spec"]["environment_version"] == "2"
     assert settings["environments"][0]["spec"]["dependencies"] == [
-        "-r /Workspace/Shared/namastex-test/requirements.txt"
+        "/Workspace/Shared/namastex-test",
+        "-r /Workspace/Shared/namastex-test/requirements.txt",
     ]
 
 

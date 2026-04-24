@@ -326,7 +326,7 @@ Mapeamento de upload no workflow:
 
 - upload do arquivo Bronze via CLI: `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
 - path consumido pelo job em runtime: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
-- dependencies do job serverless: `-r /Workspace/Shared/namastex-test/requirements.txt`
+- dependencies do job serverless: instala o projeto a partir de `/Workspace/Shared/namastex-test` e depois aplica `-r /Workspace/Shared/namastex-test/requirements.txt`
 - bootstrap do script principal no Databricks: usa `PIPELINE_CONFIG_DIR` para resolver a raiz do projeto quando `__file__` não estiver disponível no runtime
 
 Pré-requisitos operacionais no workspace:
