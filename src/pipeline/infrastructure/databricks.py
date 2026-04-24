@@ -24,6 +24,9 @@ _OPTIONAL_JOB_ENV_VARS = (
     "LANGFUSE_SECRET_KEY",
 )
 
+_INPUT_UPLOAD_MAX_ATTEMPTS = 3
+_INPUT_UPLOAD_RETRY_SECONDS = 5
+
 
 @dataclass(frozen=True)
 class DatabricksDeploymentConfig:
@@ -181,6 +184,17 @@ def _run_command(args: list[str], env: dict[str, str]) -> subprocess.CompletedPr
     return subprocess.run(args, check=True, text=True, capture_output=True, env=env)
 
 
+def _command_failure_details(exc: subprocess.CalledProcessError) -> str:
+    stdout = (exc.stdout or "").strip()
+    stderr = (exc.stderr or "").strip()
+    details = []
+    if stderr:
+        details.append(f"stderr={stderr}")
+    if stdout:
+        details.append(f"stdout={stdout}")
+    return "; ".join(details) if details else "no Databricks CLI output captured"
+
+
 def _databricks_env(config: DatabricksDeploymentConfig) -> dict[str, str]:
     databricks_env = dict(os.environ)
     databricks_env["DATABRICKS_HOST"] = config.host
@@ -292,17 +306,30 @@ def sync_workspace_files(config: DatabricksDeploymentConfig, repo_root: Path) ->
 
 def upload_input_file(config: DatabricksDeploymentConfig) -> None:
     env = _databricks_env(config)
-    _run_command(
-        [
-            "databricks",
-            "fs",
-            "cp",
-            str(config.input_file_local),
-            config.input_file_volume_path,
-            "--overwrite",
-        ],
-        env=env,
-    )
+    args = [
+        "databricks",
+        "fs",
+        "cp",
+        str(config.input_file_local),
+        config.input_file_volume_path,
+        "--overwrite",
+    ]
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(1, _INPUT_UPLOAD_MAX_ATTEMPTS + 1):
+        try:
+            _run_command(args, env=env)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt == _INPUT_UPLOAD_MAX_ATTEMPTS:
+                break
+            time.sleep(_INPUT_UPLOAD_RETRY_SECONDS)
+    assert last_error is not None
+    raise RuntimeError(
+        "Databricks input upload failed after "
+        f"{_INPUT_UPLOAD_MAX_ATTEMPTS} attempts for {config.input_file_volume_path}: "
+        f"{_command_failure_details(last_error)}"
+    ) from last_error
 
 
 def _find_job_id(config: DatabricksDeploymentConfig) -> int | None:

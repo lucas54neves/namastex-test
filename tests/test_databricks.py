@@ -227,6 +227,74 @@ def test_upload_input_file_copies_directly_to_existing_volume(tmp_path: Path, mo
     assert calls[0][1]["DATABRICKS_HOST"] == "https://dbc.example.com"
 
 
+def test_upload_input_file_retries_until_success(tmp_path: Path, monkeypatch) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={"DATABRICKS_HOST": "https://dbc.example.com"},
+    )
+    calls: list[list[str]] = []
+    sleeps: list[int] = []
+
+    def flaky_run_command(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if len(calls) < 3:
+            raise subprocess.CalledProcessError(
+                1,
+                args,
+                output="",
+                stderr="volume path not ready",
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("pipeline.infrastructure.databricks._run_command", flaky_run_command)
+    monkeypatch.setattr("pipeline.infrastructure.databricks.time.sleep", sleeps.append)
+
+    upload_input_file(config)
+
+    assert len(calls) == 3
+    assert sleeps == [5, 5]
+
+
+def test_upload_input_file_raises_runtime_error_with_cli_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={"DATABRICKS_HOST": "https://dbc.example.com"},
+    )
+    sleeps: list[int] = []
+
+    def always_fail(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            1,
+            args,
+            output="cli stdout",
+            stderr="permission denied",
+        )
+
+    monkeypatch.setattr("pipeline.infrastructure.databricks._run_command", always_fail)
+    monkeypatch.setattr("pipeline.infrastructure.databricks.time.sleep", sleeps.append)
+
+    try:
+        upload_input_file(config)
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "Databricks input upload failed after 3 attempts" in message
+        assert config.input_file_volume_path in message
+        assert "stderr=permission denied" in message
+        assert "stdout=cli stdout" in message
+    else:
+        raise AssertionError("Expected RuntimeError")
+
+    assert sleeps == [5, 5]
+
+
 def test_workflow_exists_with_required_triggers_and_databricks_contract() -> None:
     workflow = Path(".github/workflows/databricks-deploy-run.yml").read_text(encoding="utf-8")
 
