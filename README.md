@@ -137,10 +137,18 @@ Publica `data/gold/conversations_gold.parquet` com uma visão analítica por lea
 
 ### Setup local
 
+Crie o ambiente virtual local do repositório e instale todas as dependências Python a partir de `requirements.txt`:
+
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 cp .env.example .env
+```
+
+Se quiser validar a instalação antes de executar o pipeline, rode os testes com o ambiente virtual local:
+
+```bash
+venv/bin/python -m pytest -q
 ```
 
 O arquivo `.env.example` ja vem alinhado ao baseline de validacao local: sem provider externo e com `Langfuse` desabilitado por padrao.
