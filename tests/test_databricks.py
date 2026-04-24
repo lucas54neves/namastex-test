@@ -67,7 +67,9 @@ def test_build_databricks_job_settings_uses_serverless_defaults(tmp_path: Path) 
             "DATABRICKS_SERVERLESS_ENVIRONMENT_VERSION": "2",
             "PIPELINE_ENABLE_LLM_ENRICHMENT": "1",
             "PIPELINE_LLM_OPENAI_MODEL": "gpt-5-mini",
+            "PIPELINE_LLM_ANTHROPIC_MODEL": "claude-sonnet",
             "OPENAI_API_KEY": "sk-test",
+            "ANTHROPIC_API_KEY": "anthropic-test",
             "PIPELINE_ENABLE_LANGFUSE": "1",
             "LANGFUSE_BASE_URL": "https://langfuse.example.com",
             "LANGFUSE_PUBLIC_KEY": "lf_pk_test",
@@ -128,7 +130,9 @@ def test_build_databricks_job_settings_uses_serverless_defaults(tmp_path: Path) 
     )
     assert task["environment_variables"]["PIPELINE_ENABLE_LLM_ENRICHMENT"] == "1"
     assert task["environment_variables"]["PIPELINE_LLM_OPENAI_MODEL"] == "gpt-5-mini"
+    assert task["environment_variables"]["PIPELINE_LLM_ANTHROPIC_MODEL"] == "claude-sonnet"
     assert task["environment_variables"]["OPENAI_API_KEY"] == "sk-test"
+    assert task["environment_variables"]["ANTHROPIC_API_KEY"] == "anthropic-test"
     assert task["environment_variables"]["PIPELINE_ENABLE_LANGFUSE"] == "1"
     assert task["environment_variables"]["LANGFUSE_BASE_URL"] == "https://langfuse.example.com"
     assert task["environment_variables"]["LANGFUSE_PUBLIC_KEY"] == "lf_pk_test"

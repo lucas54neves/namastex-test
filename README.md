@@ -234,6 +234,8 @@ As variáveis estão exemplificadas em [`.env.example`](/home/lucas/projects/luc
 - `PIPELINE_ENABLE_LLM_ENRICHMENT`: habilita ou desabilita enrichment por provider externo.
 - `PIPELINE_POLL_INTERVAL_SECONDS`: intervalo do daemon.
 - `PIPELINE_ENABLE_LANGFUSE`: habilita observabilidade do enrichment.
+- `PIPELINE_LLM_OPENAI_MODEL`: override opcional do modelo OpenAI.
+- `PIPELINE_LLM_ANTHROPIC_MODEL`: override opcional do modelo Anthropic.
 - `OPENAI_API_KEY`: credencial opcional para provider OpenAI.
 - `ANTHROPIC_API_KEY`: credencial opcional para provider Anthropic.
 
@@ -248,6 +250,7 @@ GitHub Secrets:
 | `DATABRICKS_HOST` | Sim | Host HTTPS do workspace Databricks |
 | `DATABRICKS_TOKEN` | Sim | Token usado pelo CLI/API do Databricks |
 | `OPENAI_API_KEY` | Não | Credencial para habilitar enrichment com OpenAI |
+| `ANTHROPIC_API_KEY` | Não | Credencial para habilitar enrichment com Anthropic |
 | `LANGFUSE_PUBLIC_KEY` | Não | Credencial de observabilidade Langfuse |
 | `LANGFUSE_SECRET_KEY` | Não | Credencial de observabilidade Langfuse |
 
@@ -270,6 +273,7 @@ GitHub Variables:
 | `DATABRICKS_RUN_POLL_SECONDS` | Não | Intervalo de polling até o término da run | `10` |
 | `PIPELINE_ENABLE_LLM_ENRICHMENT` | Não | Liga enrichment com provider externo | nenhum |
 | `PIPELINE_LLM_OPENAI_MODEL` | Não | Modelo OpenAI usado no enrichment | nenhum |
+| `PIPELINE_LLM_ANTHROPIC_MODEL` | Não | Modelo Anthropic usado no enrichment | nenhum |
 | `PIPELINE_LLM_TIMEOUT_SECONDS` | Não | Timeout por chamada do runtime LLM | nenhum |
 | `PIPELINE_LLM_MAX_RETRIES` | Não | Máximo de tentativas do runtime LLM | nenhum |
 | `PIPELINE_ENABLE_LANGFUSE` | Não | Liga observabilidade Langfuse | nenhum |
@@ -309,6 +313,12 @@ Para um cenário com OpenAI habilitada no Databricks, configure no GitHub:
 - Secret: `OPENAI_API_KEY`
 - Variable: `PIPELINE_ENABLE_LLM_ENRICHMENT=1`
 - Variable: `PIPELINE_LLM_OPENAI_MODEL=gpt-5-mini`
+
+Para um cenário com Anthropic habilitada no Databricks, configure no GitHub:
+
+- Secret: `ANTHROPIC_API_KEY`
+- Variable: `PIPELINE_ENABLE_LLM_ENRICHMENT=1`
+- Variable: `PIPELINE_LLM_ANTHROPIC_MODEL=claude-sonnet`
 
 Se também quiser Langfuse:
 
