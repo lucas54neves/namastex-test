@@ -39,7 +39,7 @@ class DatabricksDeploymentConfig:
     input_volume_name: str
     output_volume_name: str
     input_file_local: Path
-    input_file_volume_path: str
+    input_file_cli_path: str
     data_dir: str
     reports_dir: str
     state_dir: str
@@ -59,6 +59,10 @@ class DatabricksDeploymentConfig:
     @property
     def output_volume_path(self) -> str:
         return f"/Volumes/{self.catalog_name}/{self.schema_name}/{self.output_volume_name}"
+
+    @property
+    def input_file_volume_path(self) -> str:
+        return self.pipeline_input_file
 
     @property
     def environment(self) -> dict[str, str]:
@@ -132,7 +136,7 @@ def build_databricks_deployment_config(
         input_volume_name=input_volume_name,
         output_volume_name=output_volume_name,
         input_file_local=repo_root / "docs" / "conversations_bronze.parquet",
-        input_file_volume_path=f"{input_volume_path}/{input_filename}",
+        input_file_cli_path=f"dbfs:{input_volume_path}/{input_filename}",
         data_dir=f"{output_volume_path}/data",
         reports_dir=f"{output_volume_path}/reports",
         state_dir=f"{output_volume_path}/state",
@@ -311,7 +315,7 @@ def upload_input_file(config: DatabricksDeploymentConfig) -> None:
         "fs",
         "cp",
         str(config.input_file_local),
-        config.input_file_volume_path,
+        config.input_file_cli_path,
         "--overwrite",
     ]
     last_error: subprocess.CalledProcessError | None = None
@@ -327,7 +331,7 @@ def upload_input_file(config: DatabricksDeploymentConfig) -> None:
     assert last_error is not None
     raise RuntimeError(
         "Databricks input upload failed after "
-        f"{_INPUT_UPLOAD_MAX_ATTEMPTS} attempts for {config.input_file_volume_path}: "
+        f"{_INPUT_UPLOAD_MAX_ATTEMPTS} attempts for {config.input_file_cli_path}: "
         f"{_command_failure_details(last_error)}"
     ) from last_error
 

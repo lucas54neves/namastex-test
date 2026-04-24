@@ -295,7 +295,7 @@ Fluxo do workflow:
 - valida os testes locais relevantes antes do deploy
 - sincroniza o repositório para `Workspace Files`
 - reconcilia catalog, schema, input volume, output volume e job
-- envia `docs/conversations_bronze.parquet` diretamente para o volume de input já reconciliado, com retry curto para acomodar propagação do volume no workspace
+- envia `docs/conversations_bronze.parquet` para o volume de input via Databricks CLI usando `dbfs:/Volumes/...`, com retry curto para acomodar propagação do volume no workspace
 - propaga para o job Databricks apenas as variáveis explícitas de runtime de LLM/Langfuse quando estiverem definidas no workflow
 - dispara o job Databricks e falha o workflow se a run falhar
 
@@ -318,11 +318,16 @@ Mapeamento de runtime no Databricks:
 - input bruto: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
 - outputs persistidos: `/Volumes/<catalog>/<schema>/<output_volume>/{data,reports,state,runtime}`
 
+Mapeamento de upload no workflow:
+
+- upload do arquivo Bronze via CLI: `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
+- path consumido pelo job em runtime: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
+
 Pré-requisitos operacionais no workspace:
 
 - Unity Catalog habilitado
 - permissão do principal usado no GitHub para criar ou atualizar catalogs, schemas, volumes e jobs
-- permissão efetiva de escrita no volume de input configurado, porque o workflow faz upload direto para `/Volumes/<catalog>/<schema>/<input_volume>/...`
+- permissão efetiva de escrita no volume de input configurado, porque o workflow faz upload via `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/...`
 - compute compatível com os parâmetros do job
 
 Diagnóstico operacional:

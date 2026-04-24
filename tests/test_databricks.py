@@ -87,6 +87,9 @@ def test_build_databricks_job_settings_uses_volume_and_workspace_paths(tmp_path:
     assert task["environment_variables"]["PIPELINE_INPUT_FILE"] == (
         "/Volumes/main/ops/bronze_input/conversations_bronze.parquet"
     )
+    assert config.input_file_cli_path == (
+        "dbfs:/Volumes/main/ops/bronze_input/conversations_bronze.parquet"
+    )
     assert task["environment_variables"]["PIPELINE_DATA_DIR"] == (
         "/Volumes/main/ops/pipeline_output/data"
     )
@@ -221,7 +224,7 @@ def test_upload_input_file_copies_directly_to_existing_volume(tmp_path: Path, mo
         "fs",
         "cp",
         str(config.input_file_local),
-        config.input_file_volume_path,
+        config.input_file_cli_path,
         "--overwrite",
     ]
     assert calls[0][1]["DATABRICKS_HOST"] == "https://dbc.example.com"
@@ -286,7 +289,7 @@ def test_upload_input_file_raises_runtime_error_with_cli_output(
     except RuntimeError as exc:
         message = str(exc)
         assert "Databricks input upload failed after 3 attempts" in message
-        assert config.input_file_volume_path in message
+        assert config.input_file_cli_path in message
         assert "stderr=permission denied" in message
         assert "stdout=cli stdout" in message
     else:
