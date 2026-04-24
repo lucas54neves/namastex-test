@@ -143,9 +143,11 @@ venv/bin/pip install -r requirements.txt
 cp .env.example .env
 ```
 
+O arquivo `.env.example` ja vem alinhado ao baseline de validacao local: sem provider externo e com `Langfuse` desabilitado por padrao.
+
 ### Execução local baseline
 
-O caminho baseline do repositório não depende de rede nem de credenciais externas. Ele usa fallback determinístico para o enrichment semântico.
+O caminho baseline do repositório não depende de rede nem de credenciais externas. Ele usa fallback determinístico para o enrichment semântico e mantém `Langfuse` desligado.
 
 ```bash
 PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline.py --force
@@ -410,7 +412,7 @@ Importante:
 
 - Se `PIPELINE_ENABLE_LANGFUSE=1` estiver ativo com credenciais placeholder como `lf_pk_change_me` e `lf_sk_change_me`, o runtime não usa Langfuse de forma real.
 - Nesse caso, o pipeline faz fallback para prompt local e segue executando quando o modo fallback está permitido.
-- Para validação local baseline, o caminho mais previsível continua sendo `PIPELINE_ENABLE_LLM_ENRICHMENT=0`.
+- Para validação local baseline, o caminho mais previsível continua sendo `PIPELINE_ENABLE_LLM_ENRICHMENT=0` com `PIPELINE_ENABLE_LANGFUSE=0`, que ja é o default do `.env.example`.
 - Para validar Langfuse end-to-end localmente, suba primeiro a stack com `docker compose up --build` antes de rodar o pipeline com enrichment habilitado.
 
 ## Testes
