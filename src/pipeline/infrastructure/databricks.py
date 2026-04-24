@@ -292,7 +292,6 @@ def sync_workspace_files(config: DatabricksDeploymentConfig, repo_root: Path) ->
 
 def upload_input_file(config: DatabricksDeploymentConfig) -> None:
     env = _databricks_env(config)
-    _run_command(["databricks", "fs", "mkdir", config.input_volume_path], env=env)
     _run_command(
         [
             "databricks",

@@ -295,7 +295,7 @@ Fluxo do workflow:
 - valida os testes locais relevantes antes do deploy
 - sincroniza o repositório para `Workspace Files`
 - reconcilia catalog, schema, input volume, output volume e job
-- envia `docs/conversations_bronze.parquet` para o volume de input
+- envia `docs/conversations_bronze.parquet` diretamente para o volume de input já reconciliado
 - propaga para o job Databricks apenas as variáveis explícitas de runtime de LLM/Langfuse quando estiverem definidas no workflow
 - dispara o job Databricks e falha o workflow se a run falhar
 

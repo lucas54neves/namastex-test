@@ -9,6 +9,7 @@ from pipeline.infrastructure.databricks import (
     _resource_exists,
     build_databricks_deployment_config,
     build_databricks_job_settings,
+    upload_input_file,
 )
 
 
@@ -192,6 +193,38 @@ def test_api_call_raises_runtime_error_with_databricks_output(tmp_path: Path, mo
         assert "PERMISSION_DENIED" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError")
+
+
+def test_upload_input_file_copies_directly_to_existing_volume(tmp_path: Path, monkeypatch) -> None:
+    input_file = tmp_path / "docs" / "conversations_bronze.parquet"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_bytes(b"PAR1")
+    config = build_databricks_deployment_config(
+        tmp_path,
+        env={"DATABRICKS_HOST": "https://dbc.example.com"},
+    )
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def record_run_command(
+        args: list[str], env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((args, env))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("pipeline.infrastructure.databricks._run_command", record_run_command)
+
+    upload_input_file(config)
+
+    assert len(calls) == 1
+    assert calls[0][0] == [
+        "databricks",
+        "fs",
+        "cp",
+        str(config.input_file_local),
+        config.input_file_volume_path,
+        "--overwrite",
+    ]
+    assert calls[0][1]["DATABRICKS_HOST"] == "https://dbc.example.com"
 
 
 def test_workflow_exists_with_required_triggers_and_databricks_contract() -> None:
