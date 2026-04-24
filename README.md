@@ -142,8 +142,12 @@ Crie o ambiente virtual local do repositório e instale todas as dependências P
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
+venv/bin/python -m pre_commit install
+venv/bin/python -m pre_commit install --hook-type pre-push
 cp .env.example .env
 ```
+
+Os hooks de `git` deste repositório dependem do ambiente virtual local em `venv/`. Se esse diretório não existir, crie o ambiente e reinstale os hooks com os comandos acima antes de tentar `commit` ou `push`.
 
 Se quiser validar a instalação antes de executar o pipeline, rode os testes com o ambiente virtual local:
 
