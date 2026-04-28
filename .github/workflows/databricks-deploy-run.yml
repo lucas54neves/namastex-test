@@ -9,6 +9,17 @@ on:
 jobs:
   deploy-and-run:
     runs-on: ubuntu-latest
+    services:
+      sonarqube:
+        image: sonarqube:community
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd="curl -sf http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"' || exit 1"
+          --health-interval=15s
+          --health-timeout=5s
+          --health-retries=20
+          --health-start-period=90s
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
@@ -63,6 +74,77 @@ jobs:
         run: |
           python -m pytest tests/test_jobs.py -q
           python -m pytest tests/test_databricks.py -q
+
+      - name: Run tests with coverage for SonarQube
+        run: |
+          pip install pytest-cov
+          python -m pytest tests/test_jobs.py tests/test_databricks.py \
+            --cov=src --cov-report=xml:coverage.xml -q
+
+      - name: Configure SonarQube project and generate token
+        id: sonar-setup
+        run: |
+          # Wait for SonarQube to be fully ready
+          echo "Waiting for SonarQube to be ready..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf http://localhost:9000/api/system/status | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
+            if [ "$STATUS" = "UP" ]; then
+              echo "SonarQube is UP"
+              break
+            fi
+            echo "Attempt $i: status='$STATUS', retrying in 10s..."
+            sleep 10
+          done
+
+          # Change default admin password (required by SonarQube 9+)
+          curl -sf -u admin:admin -X POST \
+            "http://localhost:9000/api/users/change_password" \
+            -d "login=admin&previousPassword=admin&password=admin_local" || true
+
+          # Create project
+          curl -sf -u admin:admin_local -X POST \
+            "http://localhost:9000/api/projects/create" \
+            -d "name=Namastex+Pipeline&project=namastex-pipeline" || true
+
+          # Generate analysis token
+          TOKEN=$(curl -sf -u admin:admin_local -X POST \
+            "http://localhost:9000/api/user_tokens/generate" \
+            -d "name=ci-token" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+          echo "::add-mask::$TOKEN"
+          echo "sonar_token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Run SonarQube analysis
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ steps.sonar-setup.outputs.sonar_token }}
+          SONAR_HOST_URL: http://localhost:9000
+
+      - name: Check SonarQube quality gate
+        run: |
+          TASK_ID=$(cat .scannerwork/report-task.txt | grep ceTaskId | cut -d= -f2)
+          echo "Task ID: $TASK_ID"
+
+          # Wait for analysis task to finish
+          for i in $(seq 1 20); do
+            TASK_STATUS=$(curl -sf -u admin:admin_local \
+              "http://localhost:9000/api/ce/task?id=$TASK_ID" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['task']['status'])")
+            echo "Task status: $TASK_STATUS"
+            if [ "$TASK_STATUS" = "SUCCESS" ]; then break; fi
+            if [ "$TASK_STATUS" = "FAILED" ]; then echo "SonarQube analysis task failed"; exit 1; fi
+            sleep 5
+          done
+
+          # Check quality gate
+          GATE=$(curl -sf -u admin:admin_local \
+            "http://localhost:9000/api/qualitygates/project_status?projectKey=namastex-pipeline" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])")
+          echo "Quality Gate: $GATE"
+          if [ "$GATE" != "OK" ]; then
+            echo "Quality Gate FAILED — blocking deploy"
+            exit 1
+          fi
 
       - name: Deploy repository, provision Databricks resources, and run pipeline
         run: python scripts/databricks_deploy_run.py

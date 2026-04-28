@@ -388,8 +388,37 @@ Para a entrega final, o caminho recomendado é o baseline sem provider externo e
 2. Se necessário, ajuste GitHub Variables como `DATABRICKS_WORKSPACE_ROOT`, `DATABRICKS_CATALOG`, `DATABRICKS_SCHEMA`, `DATABRICKS_INPUT_VOLUME` e `DATABRICKS_OUTPUT_VOLUME`. Se nada for definido, o workflow usa os defaults internos.
 3. Garanta que o principal associado ao token tenha permissão para criar ou atualizar schema, volumes e job no workspace alvo, além de escrever no volume de input.
 4. Dispare o workflow `Databricks Deploy And Run` por `workflow_dispatch` ou faça `push` para `main`.
-5. Acompanhe a execução no GitHub Actions. O workflow instala dependências, roda os testes `tests/test_jobs.py` e `tests/test_databricks.py`, sincroniza o repositório para `Workspace Files`, reconcilia recursos no Databricks, faz upload do Bronze e executa o job.
+5. Acompanhe a execução no GitHub Actions. O workflow instala dependências, roda os testes `tests/test_jobs.py` e `tests/test_databricks.py`, executa análise de qualidade com SonarQube (quality gate bloqueia o deploy se não passar), sincroniza o repositório para `Workspace Files`, reconcilia recursos no Databricks, faz upload do Bronze e executa o job.
 6. Considere a entrega validada quando a run do GitHub Actions terminar com sucesso e os artefatos esperados estiverem presentes no volume de output do Databricks.
+
+### Validação de qualidade com SonarQube
+
+O workflow inclui uma etapa de análise estática com SonarQube para aumentar a confiança no código antes de qualquer deploy. O SonarQube é iniciado como um container Docker efêmero diretamente no runner do GitHub Actions — sem infraestrutura externa e sem secrets adicionais.
+
+**Como funciona:**
+
+1. O GitHub Actions sobe `sonarqube:community` como serviço na porta `9000` com health check automático.
+2. Os testes são executados com `pytest-cov` para gerar `coverage.xml`.
+3. O projeto e um token de análise são criados via API do SonarQube local.
+4. O scanner oficial `SonarSource/sonarqube-scan-action` realiza a análise usando `sonar-project.properties` como configuração.
+5. O quality gate é consultado via API: se o status não for `OK`, o workflow falha e o deploy é bloqueado.
+
+**Configuração do projeto (`sonar-project.properties`):**
+
+- fontes analisadas: `src/`
+- testes referenciados: `tests/`
+- cobertura importada de: `coverage.xml`
+- Python: `3.11`
+- exclusões: `venv/`, `__pycache__/`, `*.pyc`
+
+**Características da execução efêmera:**
+
+- Não exige servidor SonarQube externo nem secrets no repositório.
+- Cada execução parte do zero — sem histórico acumulado entre runs.
+- A instância é destruída ao fim do job; nenhum dado persiste além do artefato `coverage.xml` local.
+- O principal valor entregue é o **quality gate por run**: bloqueia o deploy se o código não passar nos critérios de qualidade definidos pelo perfil padrão do SonarQube.
+
+O deploy no Databricks só ocorre se o quality gate retornar `OK`.
 
 ### O que o workflow faz
 
