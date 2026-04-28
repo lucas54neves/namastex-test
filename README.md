@@ -448,26 +448,120 @@ A suíte de aderência cobre explicitamente:
 
 ## Agente operacional
 
-O agente deste projeto continua auditável e restrito, mas agora executa um ciclo explícito de autonomia governada por impacto. O uso de LLM permanece opcional e nunca substitui os gates determinísticos. Suas responsabilidades são:
+O agente executa um ciclo explícito de autonomia governada por impacto. O uso de LLM é opcional e nunca substitui os gates determinísticos. Suas responsabilidades incluem compilar e aplicar a `pipeline_spec.json`, detectar drift, gerar e materializar propostas estruturadas, promover apenas mudanças autorizadas por política, reter mudanças `high impact` em aprovação, diagnosticar falhas, executar playbooks seguros, emitir relatórios e alertas, e restaurar o último estado íntegro em falhas inesperadas.
 
-- compilar e aplicar a `pipeline_spec.json`
-- detectar drift de schema e metadados
-- gerar propostas estruturadas com `impact_class`, `candidate_actions`, evidência e política aplicada
-- materializar candidatos isolados antes de qualquer promoção
-- promover automaticamente apenas mudanças autorizadas por política e gates determinísticos
-- reter mudanças `high impact` em aprovação explícita
-- classificar falhas conhecidas em diagnósticos operacionais
-- executar apenas playbooks seguros permitidos
-- isolar registros inválidos em quarentena quando aplicável
-- emitir relatórios e alertas
-- restaurar o último estado íntegro em falhas inesperadas
+### Módulos da camada agêntica
 
-Principais artefatos operacionais:
+| Módulo | Caminho | Responsabilidade |
+| --- | --- | --- |
+| `agent.py` | `src/pipeline/agent/` | Diagnóstico de falhas de validação e remediação reativa |
+| `autonomy.py` | `src/pipeline/agent/` | Classificação de impacto, materialização de candidatos e promoção de spec |
+| `approval.py` | `src/pipeline/agent/` | Rastreamento do estado de aprovação humana ou de agente |
+| `planner.py` | `src/pipeline/agent/` | Detecção proativa de drift e orquestração do ciclo de propostas |
+| `execution_planner.py` | `src/pipeline/agent/` | Planejamento adaptativo de ordem de execução dos estágios |
+| `llm_advisor.py` | `src/pipeline/agent/` | Auto-revisão por LLM e priorização de propostas |
+| `gold_designer.py` | `src/pipeline/agent/` | Design de colunas analíticas da Gold via LLM |
+| `playbooks.py` | `src/pipeline/agent/` | Definição das ações de remediação disponíveis |
+| `alerts.py` | `src/pipeline/agent/` | Emissão, deduplicação e supressão de alertas de incidente |
+| `operator.py` | `src/pipeline/orchestration/` | Loop ReAct principal — orquestra todos os ciclos |
+
+### Ciclos de execução
+
+O agente opera em dois ciclos distintos por execução.
+
+**Ciclo proativo** (`plan_pipeline_spec`): detecta drift antes da execução principal. Cinco detectores varrem observações do runtime para gerar propostas. Para cada proposta, a spec candidata é materializada de forma isolada, submetida a gates e, se aprovada, promovida automaticamente ou retida para aprovação. O output é `reports/monitoring/latest_plan_report.json`.
+
+**Ciclo reativo** (`run_cycle` / loop ReAct): executa até 15 iterações para processar os estágios Bronze → Silver → Gold. Em cada iteração, valida o estágio atual e, em caso de falha, chama `diagnose_validation_failures` seguido de `attempt_auto_remediation`. Se a remediação resolve o problema, o loop continua; caso contrário, o estágio é reexecutado ou o loop é interrompido. Exceptions não tratadas acionam fallback para o último estado íntegro.
+
+### Classificação de impacto
+
+A política canônica fica em `config/agent_autonomy_policy.json` e define o comportamento por família de mutação.
+
+| Família | Impacto padrão | Auto-promovível | Exige aprovação |
+| --- | --- | --- | --- |
+| `schema_update` | `high` | não | sim |
+| `segmentation_adjustment` | `high` | não | sim |
+| `transformation_rule_change` | `medium` | não | sim |
+| `derived_column_addition` | `medium` | sim | não |
+| `validation_enhancement` | `low` | sim | não |
+
+### Ciclo de vida das propostas
+
+```
+Detecção (planner.py)
+  └─> Fingerprint SHA-1 da proposta → proposal_id único
+      └─> apply_proposal_to_spec()
+          └─> evaluate_candidate() → gate_results + diff
+              ├─ gate: contract_validation
+              ├─ gate: backward_compatibility
+              ├─ gate: privacy_scan
+              └─ gate: targeted_tests
+          └─> persist_candidate_artifacts() → runtime/candidates/{proposal_id}/
+              ├─> Se requires_approval:
+              │     └─> agent_self_review_proposal() (LLM)
+              │           ├─ confidence >= threshold → approve_proposal("agent") → PROMOVIDA
+              │           └─ confidence < threshold  → AWAITING_APPROVAL (aguarda humano)
+              ├─> Se safe_auto_promote:
+              │     └─> promote_candidate_spec() → pipeline_spec.json + spec_history.json → PROMOVIDA
+              └─> Demais casos → CANDIDATE_MATERIALIZED (retida para revisão)
+```
+
+Propostas rejeitadas por gate ou por baixa confiança de LLM ficam com status `validation_failed` ou `awaiting_approval` e nunca alteram a spec de produção.
+
+### Artefatos de um candidato materializado
+
+Cada proposta que passa pelos gates produz um diretório isolado:
+
+```
+runtime/candidates/{proposal_id}/
+├── candidate_spec.json           # spec após a mutação proposta
+├── candidate_run_report.json     # status de validação e resultados dos gates
+├── candidate_agent_report.json   # impact_class e necessidade de aprovação
+├── candidate_diff.json           # diff de schema, privacidade e qualidade
+├── candidate_metrics.json        # contadores de pass/fail de validação
+└── candidate_test_report.json    # resultado dos testes direcionados
+```
+
+Remediações reativas geram um diretório análogo em `runtime/candidates/reactive_{incident_id}/`.
+
+### Pontos de decisão com LLM
+
+Todos os pontos de LLM têm fallback determinístico e nunca bloqueiam a execução.
+
+| Decisão | Módulo | LLM opcional? | Fallback |
+| --- | --- | --- | --- |
+| Ordenação de estágios | `execution_planner.py` | sim | ordem baseada em presença de artefatos |
+| Design de colunas Gold | `gold_designer.py` | sim | 6 colunas analíticas fixas |
+| Priorização de propostas | `planner.py` + `llm_advisor.py` | sim | ordem determinística dos detectores |
+| Auto-aprovação de proposta | `llm_advisor.py` | sim | retém proposta em `awaiting_approval` |
+| Diagnóstico de falha desconhecida | `agent.py` | sim | mapa estático `VALIDATION_CHECK_MAP` |
+
+### Circuit breakers e limites de segurança
+
+- **Loop ReAct**: máximo de 15 iterações (`_MAX_REACT_ITERATIONS`).
+- **Reexecução de estágio**: interrompida após 2 falhas consecutivas do mesmo estágio.
+- **Circuit breaker de LLM**: após 3 falhas consecutivas de chamada de LLM para diagnóstico, as chamadas são suspensas e o fallback determinístico é usado para os checks restantes.
+- **Gates de promoção**: todas as quatro validações (contrato, compatibilidade retroativa, privacidade, testes) precisam passar para qualquer promoção.
+- **Auto-aprovação por LLM**: requer `confidence >= threshold` configurado por família (padrão: 0.90 para `schema_update`, 0.85 para `transformation_rule_change`) e `severity != critical`.
+
+### Playbooks de remediação reativa
+
+| Playbook | Auto-aplicável | Risco |
+| --- | --- | --- |
+| `rebuild_silver_from_bronze` | sim | médio |
+| `rebuild_gold_from_silver` | sim | baixo |
+| `quarantine_invalid_records` | sim | baixo |
+| `fallback_to_last_successful_artifacts` | sim | médio |
+| `update_pipeline_spec` | não | alto |
+
+### Principais artefatos operacionais
 
 - `reports/monitoring/latest_run_report.json`
 - `reports/monitoring/latest_agent_report.json`
 - `reports/monitoring/latest_plan_report.json`
 - `reports/monitoring/agent_autonomy_metrics.json`
+- `reports/monitoring/latest_execution_plan.json`
+- `reports/monitoring/latest_gold_column_plan.json`
 - `reports/alerts/`
 - `reports/agent_decisions/latest_agent_decision.json`
 - `reports/agent_decisions/proposals/`
@@ -535,6 +629,17 @@ Essa divisão melhora manutenção, testes e legibilidade da entrega.
 - O modo com provider externo depende de credenciais, rede e disponibilidade do serviço.
 - O planner autônomo ainda restringe a promoção ao conjunto inicial de famílias suportadas e validadas deterministicamente.
 - O projeto foi otimizado para o dataset e o escopo do teste, não como plataforma multi-tenant completa.
+- A camada Gold produz apenas visão por lead; visão macro agregada da base está especificada mas não implementada (`spec-architecture-gold-macro-view.md`).
+- Alertas do agente são relatórios JSON locais; canal externo via webhook está especificado mas não implementado (`spec-architecture-agent-webhook-alert-channel.md`).
+- Módulos `silver.py` e `operator.py` possuem alta complexidade ciclomática; decomposição está especificada mas não implementada (`spec-architecture-module-cyclomatic-decomposition.md`).
+
+## Especificações pendentes de implementação
+
+| Spec | Lacuna endereçada |
+| --- | --- |
+| [`spec-architecture-gold-macro-view.md`](spec/spec-architecture-gold-macro-view.md) | Visão macro agregada da base na camada Gold |
+| [`spec-architecture-agent-webhook-alert-channel.md`](spec/spec-architecture-agent-webhook-alert-channel.md) | Canal real de notificação externa para alertas do agente |
+| [`spec-architecture-module-cyclomatic-decomposition.md`](spec/spec-architecture-module-cyclomatic-decomposition.md) | Decomposição de `silver.py` e `operator.py` em submódulos coesos |
 
 ## Referências
 
