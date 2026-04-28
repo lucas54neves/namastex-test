@@ -242,6 +242,8 @@ venv/bin/python scripts/plan_pipeline.py
 
 ### Canal de webhook para alertas
 
+O agente opera de forma autônoma: detecta drift, classifica impacto, materializa candidatos, executa remediações e promove mudanças sem intervenção humana constante. Esse nível de autonomia exige um mecanismo de governança que garanta visibilidade ao responsável pelo projeto quando o agente encontra situações que estão fora do seu envelope seguro de atuação — falhas não remediáveis, validações críticas que não puderam ser resolvidas automaticamente ou estados que exigem decisão humana explícita. O canal de webhook cobre exatamente esse papel: transformar o pipeline em um sistema observável externamente, garantindo que nenhuma falha crítica passe despercebida mesmo quando ninguém está acompanhando os logs ou os relatórios locais.
+
 O agente emite alertas quando detecta falhas de validação, status não remediáveis ou intervenção manual necessária. Por padrão esses alertas são persistidos localmente em `reports/alerts/`. Quando `PIPELINE_ALERT_WEBHOOK_URL` está configurado, o agente entrega o alerta via HTTP POST para qualquer endpoint que aceite JSON — Slack, Discord, Microsoft Teams, PagerDuty, n8n ou endpoint próprio.
 
 **Ativação:** basta definir `PIPELINE_ALERT_WEBHOOK_URL`. Sem a variável, o comportamento local é preservado sem nenhuma alteração.
