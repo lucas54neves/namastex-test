@@ -237,6 +237,10 @@ def _extract_llm_diagnoses(agent_diagnoses: list[dict[str, Any]]) -> list[dict[s
 
 
 def _get_llm_call() -> Any:
+    from pipeline.runtime.env import env_flag
+
+    if not env_flag("PIPELINE_ENABLE_LLM_AGENT", True):
+        return None
     try:
         from pipeline.runtime.llm_runtime import call_llm
 
