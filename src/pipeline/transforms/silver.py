@@ -1,218 +1,192 @@
+# GUD-001 EXCEPTION: This file exceeds 400 lines. Justification: REQ-106 explicitly defers
+# migration of build_gold and its Gold-segmentation helpers to a future spec; those functions
+# (~400 lines combined) must remain here until gold.py becomes the canonical owner. All other
+# symbols have been extracted to silver_patterns, silver_masking, silver_signals, silver_context,
+# and silver_dedup; this module now serves exclusively as the retrocompatible entry point.
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-import unicodedata
-from collections.abc import Iterable
 from typing import Any, cast
 
 import pandas as pd
 
 from pipeline.orchestration.compiler import get_default_compiled_plan
 
-EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
-PHONE_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_])(?:\+55\s?)?(?:\(?\d{2}\)?\s?)?(?:9?\d{4})-?\d{4}(?![A-Za-z0-9_])"
+# Reexports — retrocompatibility (noqa: F401 suppresses unused-import warnings)
+from pipeline.transforms.silver_context import (  # noqa: F401
+    _stable_hash_token,
+    add_conversation_context,
+    add_lead_context,
 )
-CPF_PATTERN = re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
-CEP_PATTERN = re.compile(r"\b\d{5}-?\d{3}\b")
-PLATE_PATTERN = re.compile(r"\b[A-Z]{3}[0-9][A-Z0-9][0-9]{2}\b", re.IGNORECASE)
-YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
-PRICE_PATTERN = re.compile(r"r\$\s?(\d[\d.]*(?:,\d{2})?)", re.IGNORECASE)
-PRICE_OBJECTION_PATTERN = re.compile(
-    r"\b(caro|cara|preco alto|muito caro|acima do orçamento|acima do orcamento|desconto|"
-    r"parcel[ao]s?|mensalidade|cotacao|cotação|orcamento|orçamento)\b",
-    re.IGNORECASE,
+from pipeline.transforms.silver_dedup import deduplicate_events  # noqa: F401
+from pipeline.transforms.silver_masking import (  # noqa: F401
+    _is_masked_email,
+    _is_masked_plate,
+    _mask_alpha_numeric,
+    _mask_digits,
+    _mask_email,
+    _mask_known_names,
+    _mask_name_token,
+    detect_sensitive_classes,
+    detect_unmasked_sensitive_classes,
+    mask_message_body,
+    mask_sender_name,
 )
-URGENCY_STRONG_PATTERN = re.compile(
-    r"\b(urgente|hoje mesmo|agora|imediat|quanto antes|pra hoje|para hoje|fechar hoje)\b",
-    re.IGNORECASE,
+from pipeline.transforms.silver_patterns import (  # noqa: F401
+    CEP_PATTERN,
+    COMPETITOR_COMPARISON_PATTERN,
+    COMPETITOR_PATTERNS,
+    CONVERSATION_SENTIMENT_LABELS,
+    CONVERSATION_SENTIMENT_SUPPORT_LEVELS,
+    CPF_PATTERN,
+    EMAIL_PATTERN,
+    EMAIL_PROVIDER_DOMAIN_PATTERN,
+    NEGATIVE_TONE_PATTERNS,
+    PHONE_PATTERN,
+    PLATE_PATTERN,
+    POSITIVE_TONE_PATTERNS,
+    PRICE_OBJECTION_PATTERN,
+    PRICE_PATTERN,
+    SENSITIVE_PATTERNS,
+    SINISTRO_PATTERNS,
+    STATUS_PRIORITY,
+    URGENCY_MODERATE_PATTERN,
+    URGENCY_STRONG_PATTERN,
+    VEHICLE_MAKES,
+    VEHICLE_MODELS,
+    YEAR_PATTERN,
+    _normalize_ascii,
+    _normalize_for_match,
+    _safe_float,
+    _safe_int,
+    _safe_string,
 )
-URGENCY_MODERATE_PATTERN = re.compile(
-    r"\b(essa semana|esta semana|amanha|amanhã|rapido|rápido|prioridade|preciso logo)\b",
-    re.IGNORECASE,
+from pipeline.transforms.silver_signals import (  # noqa: F401
+    _count_tone_hits,
+    _directional_bool_signal,
+    _directional_int_signal,
+    _directional_value_signal,
+    _extract_competitor,
+    _extract_competitor_comparison_signal,
+    _extract_email_provider,
+    _extract_first,
+    _extract_price,
+    _extract_price_objection_signal,
+    _extract_sinistro_type,
+    _extract_urgency_strength,
+    _extract_vehicle_make,
+    _extract_vehicle_model,
+    _extract_vehicle_year,
+    add_message_signals,
+    derive_conversation_sentiment_label,
+    derive_conversation_sentiment_support,
 )
-COMPETITOR_COMPARISON_PATTERN = re.compile(
-    r"\b(cobriu|cobrou|melhor que|mais barato|mais caro|compar|concorrente|outra seguradora)\b",
-    re.IGNORECASE,
-)
-EMAIL_PROVIDER_DOMAIN_PATTERN = re.compile(
-    r"\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b",
-    re.IGNORECASE,
-)
-COMPETITOR_PATTERNS = {
-    "porto_seguro": re.compile(r"\bporto seguro\b", re.IGNORECASE),
-    "azul_seguros": re.compile(r"\bazul(?: seguros)?\b", re.IGNORECASE),
-    "bradesco_seguros": re.compile(r"\bbradesco seguros\b", re.IGNORECASE),
-    "sulamerica": re.compile(r"\bsul\s?america\b", re.IGNORECASE),
-    "liberty_seguros": re.compile(r"\bliberty(?: seguros)?\b", re.IGNORECASE),
-    "allianz": re.compile(r"\ballianz\b", re.IGNORECASE),
-    "hdi_seguros": re.compile(r"\bhdi(?: seguros)?\b", re.IGNORECASE),
-}
-SINISTRO_PATTERNS = {
-    "enchente": re.compile(r"\benchente|alagamento\b", re.IGNORECASE),
-    "colisao": re.compile(r"\bbati\b|\bbatida\b|\bcolis[aã]o\b", re.IGNORECASE),
-    "roubo_furto": re.compile(r"\broubaram\b|\bfurto\b|\broubo\b", re.IGNORECASE),
-    "perda_total": re.compile(r"\bperda total\b", re.IGNORECASE),
-    "sinistro_generico": re.compile(r"\bsinistro\b", re.IGNORECASE),
-}
-VEHICLE_MAKES = (
-    "chevrolet",
-    "volkswagen",
-    "fiat",
-    "ford",
-    "toyota",
-    "honda",
-    "hyundai",
-    "jeep",
-    "renault",
-    "nissan",
-    "peugeot",
-    "citroen",
-    "mitsubishi",
-    "kia",
-    "bmw",
-    "mercedes",
-    "audi",
-    "volvo",
-    "byd",
-    "gwm",
-)
-VEHICLE_MODELS = (
-    "onix",
-    "gol",
-    "civic",
-    "hb20",
-    "corolla",
-    "compass",
-    "hr-v",
-    "hrv",
-    "kwid",
-    "208",
-    "toro",
-    "argo",
-    "mobi",
-    "creta",
-    "t cross",
-    "t-cross",
-    "nivus",
-    "tracker",
-    "pulse",
-    "kicks",
-)
-STATUS_PRIORITY = {"failed": 0, "sent": 1, "delivered": 2, "read": 3}
-SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
-    "email": EMAIL_PATTERN,
-    "phone": PHONE_PATTERN,
-    "cpf": CPF_PATTERN,
-    "cep": CEP_PATTERN,
-    "plate": PLATE_PATTERN,
-}
-POSITIVE_TONE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bobrigad[oa]s?\b"),
-    re.compile(r"\b(valeu|agradeco|agradeco demais)\b"),
-    re.compile(r"\b(perfeito|excelente|otim[oa]|maravilha|top)\b"),
-    re.compile(r"\b(gostei|bom demais|muito bom)\b"),
-    re.compile(r"\b(pode seguir|pode prosseguir|vamos seguir|quero seguir)\b"),
-    re.compile(r"\b(vamos fechar|quero fechar|pode fechar|fechado|combinado)\b"),
-    re.compile(r"\b(aprovado|aprovada|de acordo|ok pode)\b"),
-)
-NEGATIVE_TONE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(nao tenho interesse|sem interesse|nao quero|nao vou fechar)\b"),
-    re.compile(r"\b(cancelar|cancelamento|desist\w*)\b"),
-    re.compile(r"\b(reclam\w*|insatisfeit\w*|ruim|pessim\w*|horrivel)\b"),
-    re.compile(r"\b(absurdo|um absurdo|surreal)\b"),
-    re.compile(r"\b(desconfiad\w*|nao confio|falta de confianca)\b"),
-    re.compile(r"\b(enrola\w*|enrolacao|demora demais|muito demorado)\b"),
-    re.compile(r"\b(caro demais|muito caro)\b"),
-)
-CONVERSATION_SENTIMENT_LABELS = frozenset({"positivo", "neutro", "negativo", "sem_evidencia"})
-CONVERSATION_SENTIMENT_SUPPORT_LEVELS = frozenset({"fraco", "moderado", "forte", "sem_evidencia"})
+
+__all__ = [
+    # patterns
+    "EMAIL_PATTERN",
+    "PHONE_PATTERN",
+    "CPF_PATTERN",
+    "CEP_PATTERN",
+    "PLATE_PATTERN",
+    "YEAR_PATTERN",
+    "PRICE_PATTERN",
+    "PRICE_OBJECTION_PATTERN",
+    "URGENCY_STRONG_PATTERN",
+    "URGENCY_MODERATE_PATTERN",
+    "COMPETITOR_COMPARISON_PATTERN",
+    "EMAIL_PROVIDER_DOMAIN_PATTERN",
+    "COMPETITOR_PATTERNS",
+    "SINISTRO_PATTERNS",
+    "VEHICLE_MAKES",
+    "VEHICLE_MODELS",
+    "STATUS_PRIORITY",
+    "SENSITIVE_PATTERNS",
+    "POSITIVE_TONE_PATTERNS",
+    "NEGATIVE_TONE_PATTERNS",
+    "CONVERSATION_SENTIMENT_LABELS",
+    "CONVERSATION_SENTIMENT_SUPPORT_LEVELS",
+    # utility functions (patterns module)
+    "_normalize_ascii",
+    "_normalize_for_match",
+    "_safe_string",
+    "_safe_float",
+    "_safe_int",
+    # masking
+    "_mask_digits",
+    "_mask_email",
+    "_mask_alpha_numeric",
+    "_mask_name_token",
+    "_mask_known_names",
+    "_is_masked_email",
+    "_is_masked_plate",
+    "mask_sender_name",
+    "mask_message_body",
+    "detect_sensitive_classes",
+    "detect_unmasked_sensitive_classes",
+    # signals
+    "_extract_first",
+    "_extract_competitor",
+    "_extract_sinistro_type",
+    "_extract_vehicle_make",
+    "_extract_vehicle_model",
+    "_extract_vehicle_year",
+    "_extract_price",
+    "_extract_email_provider",
+    "_extract_price_objection_signal",
+    "_extract_urgency_strength",
+    "_extract_competitor_comparison_signal",
+    "_count_tone_hits",
+    "derive_conversation_sentiment_label",
+    "derive_conversation_sentiment_support",
+    "add_message_signals",
+    "_directional_bool_signal",
+    "_directional_int_signal",
+    "_directional_value_signal",
+    # context
+    "_stable_hash_token",
+    "add_conversation_context",
+    "add_lead_context",
+    # dedup
+    "deduplicate_events",
+    # silver entry point
+    "load_bronze_frame",
+    "parse_metadata",
+    "build_silver",
+    "build_silver_leads",
+    "add_gold_segments",
+    "build_gold",
+    # aggregation helpers
+    "_first_non_empty",
+    "_json_sorted_unique",
+    "_first_non_null",
+    "_last_non_null",
+    "_max_or_false",
+    "_bool_series_or_default",
+    "_int_series_or_default",
+    "_value_series_or_default",
+    # gold helpers
+    "_canonical_audience_for_persona",
+    "_parse_json_list",
+    "_normalize_outcome_group",
+    "_response_latency_band",
+    "_price_objection_intensity",
+    "_commercial_urgency_signal",
+    "_competitor_pressure_level",
+]
 
 
-def _normalize_ascii(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value or "")
-    return normalized.encode("ascii", errors="ignore").decode("ascii")
+def load_bronze_frame(source_path: str) -> pd.DataFrame:
+    df = pd.read_parquet(source_path).copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    return df
 
 
-def _normalize_for_match(value: str) -> str:
-    normalized = _normalize_ascii(value).lower()
-    normalized = re.sub(r"[^a-z0-9 ]+", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
-
-
-def _mask_digits(raw: str) -> str:
-    return "".join("X" if char.isdigit() else char for char in raw)
-
-
-def _mask_email(raw: str) -> str:
-    return re.sub(r"[A-Za-z0-9]", "x", raw)
-
-
-def _mask_alpha_numeric(raw: str) -> str:
-    masked = []
-    for char in raw:
-        if char.isalpha():
-            masked.append("X")
-        elif char.isdigit():
-            masked.append("9")
-        else:
-            masked.append(char)
-    return "".join(masked)
-
-
-def _mask_name_token(raw: str) -> str:
-    return "".join("X" if char.isalpha() else char for char in raw)
-
-
-def _safe_string(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and pd.isna(value):
-        return ""
-    return str(value)
-
-
-def _safe_float(value: object) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, float) and pd.isna(value):
-        return None
-    try:
-        return float(cast(float | int | str, value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_int(value: object) -> int:
-    converted = _safe_float(value)
-    if converted is None:
-        return 0
-    return int(converted)
-
-
-def _canonical_audience_for_persona(persona_profile: object) -> str:
-    persona = _safe_string(persona_profile).strip()
-    if persona == "cliente_pos_sinistro":
-        return "retencao_pos_sinistro"
-    if persona == "cotador_comparador":
-        return "oferta_competitiva"
-    if persona == "lead_engajado_com_dados":
-        return "close_comercial"
-    if persona == "lead_frio":
-        return "nutricao_basica"
-    return ""
-
-
-def _stable_hash_token(*parts: object, prefix: str) -> str:
-    normalized_parts = [_normalize_for_match(_safe_string(part)) for part in parts]
-    joined = "|".join(part for part in normalized_parts if part)
-    if not joined:
-        joined = "unknown"
-    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}_{digest}"
+def parse_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    metadata = df["metadata"].map(json.loads)
+    metadata_df = pd.json_normalize(metadata)
+    metadata_df.columns = [f"metadata_{column}" for column in metadata_df.columns]
+    return pd.concat([df.drop(columns=["metadata"]), metadata_df], axis=1)
 
 
 def _first_non_empty(values: pd.Series) -> str:
@@ -246,19 +220,6 @@ def _last_non_null(values: pd.Series) -> object:
 
 def _max_or_false(values: pd.Series) -> bool:
     return bool(values.fillna(False).astype(bool).max())
-
-
-def _directional_bool_signal(signal: pd.Series, direction: pd.Series, expected: str) -> pd.Series:
-    return signal.fillna(False).astype(bool) & direction.eq(expected)
-
-
-def _directional_int_signal(signal: pd.Series, direction: pd.Series, expected: str) -> pd.Series:
-    values = pd.to_numeric(signal, errors="coerce").fillna(0).astype(int)
-    return values.where(direction.eq(expected), 0)
-
-
-def _directional_value_signal(signal: pd.Series, direction: pd.Series, expected: str) -> pd.Series:
-    return signal.where(direction.eq(expected))
 
 
 def _bool_series_or_default(
@@ -305,245 +266,17 @@ def _value_series_or_default(
     return pd.Series([None] * len(frame), index=frame.index, dtype=object)
 
 
-def detect_sensitive_classes(value: object, classes: Iterable[str] | None = None) -> set[str]:
-    text = _safe_string(value)
-    requested = set(classes) if classes is not None else set(SENSITIVE_PATTERNS)
-    return {
-        name
-        for name, pattern in SENSITIVE_PATTERNS.items()
-        if name in requested and pattern.search(text)
-    }
-
-
-def _is_masked_email(value: str) -> bool:
-    return bool(re.fullmatch(r"[xX._%+-]+@[xX.-]+\.[xX]{2,}", value))
-
-
-def _is_masked_plate(value: str) -> bool:
-    normalized = value.upper()
-    return bool(normalized) and set(normalized) <= {"X", "9", "-"}
-
-
-def detect_unmasked_sensitive_classes(
-    value: object, classes: Iterable[str] | None = None
-) -> set[str]:
-    text = _safe_string(value)
-    requested = set(classes) if classes is not None else set(SENSITIVE_PATTERNS)
-    matches: set[str] = set()
-    for name, pattern in SENSITIVE_PATTERNS.items():
-        if name not in requested:
-            continue
-        for match in pattern.finditer(text):
-            token = match.group(0)
-            if name == "email" and _is_masked_email(token):
-                continue
-            if name == "plate" and _is_masked_plate(token):
-                continue
-            matches.add(name)
-            break
-    return matches
-
-
-def load_bronze_frame(source_path: str) -> pd.DataFrame:
-    df = pd.read_parquet(source_path).copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    return df
-
-
-def parse_metadata(df: pd.DataFrame) -> pd.DataFrame:
-    metadata = df["metadata"].map(json.loads)
-    metadata_df = pd.json_normalize(metadata)
-    metadata_df.columns = [f"metadata_{column}" for column in metadata_df.columns]
-    return pd.concat([df.drop(columns=["metadata"]), metadata_df], axis=1)
-
-
-def mask_sender_name(name: object) -> str:
-    raw_name = _safe_string(name)
-    return "".join("X" if char.isalpha() else char for char in raw_name)
-
-
-def _mask_known_names(text: str, names: Iterable[str]) -> str:
-    masked = text
-    for name in names:
-        normalized = _normalize_for_match(name)
-        if not normalized or len(normalized) < 3:
-            continue
-        tokens = [token for token in normalized.split(" ") if len(token) >= 2]
-        if not tokens:
-            continue
-        pattern = re.compile(r"\b" + r"\s+".join(map(re.escape, tokens)) + r"\b", re.IGNORECASE)
-        masked = pattern.sub(lambda match: _mask_name_token(match.group(0)), masked)
-    return masked
-
-
-def mask_message_body(row: pd.Series) -> str:
-    text = _safe_string(row["message_body"])
-    masked = text
-    masked = EMAIL_PATTERN.sub(lambda match: _mask_email(match.group(0)), masked)
-    masked = CPF_PATTERN.sub(lambda match: _mask_digits(match.group(0)), masked)
-    masked = CEP_PATTERN.sub(lambda match: _mask_digits(match.group(0)), masked)
-    masked = PHONE_PATTERN.sub(lambda match: _mask_digits(match.group(0)), masked)
-    masked = PLATE_PATTERN.sub(lambda match: _mask_alpha_numeric(match.group(0).upper()), masked)
-    known_names = {
-        row.get("sender_name", ""),
-        row.get("conversation_lead_name", ""),
-        row.get("conversation_agent_name", ""),
-    }
-    masked = _mask_known_names(masked, known_names)
-    return masked
-
-
-def _extract_first(pattern: re.Pattern[str], text: str) -> str | None:
-    match = pattern.search(text)
-    return match.group(0) if match else None
-
-
-def _extract_competitor(text: str) -> str | None:
-    for competitor, pattern in COMPETITOR_PATTERNS.items():
-        if pattern.search(text):
-            return competitor
-    return None
-
-
-def _extract_sinistro_type(text: str, direction: str) -> str | None:
-    normalized = text.lower()
-    if direction != "inbound":
-        return None
-    if "cobertura" in normalized and "tive" not in normalized and "bati" not in normalized:
-        return None
-    for label, pattern in SINISTRO_PATTERNS.items():
-        if pattern.search(normalized):
-            return label
-    return None
-
-
-def _extract_vehicle_make(text: str) -> str | None:
-    normalized = _normalize_for_match(text)
-    for make in VEHICLE_MAKES:
-        if re.search(rf"\b{re.escape(make)}\b", normalized):
-            return make
-    return None
-
-
-def _extract_vehicle_model(text: str) -> str | None:
-    normalized = _normalize_for_match(text).replace("t cross", "t-cross")
-    for model in VEHICLE_MODELS:
-        normalized_model = model.replace(" ", "-")
-        if normalized_model in normalized:
-            return model
-    return None
-
-
-def _extract_vehicle_year(text: str) -> str | None:
-    raw_text = _safe_string(text)
-    normalized = _normalize_for_match(raw_text)
-    contextual_patterns = [
-        re.compile(r"\bano\s+(19\d{2}|20\d{2})\b", re.IGNORECASE),
-        re.compile(r"\b(19\d{2}|20\d{2})/(19\d{2}|20\d{2})\b", re.IGNORECASE),
-    ]
-    for pattern in contextual_patterns:
-        match = pattern.search(normalized)
-        if match:
-            return match.group(1)
-    if (
-        _extract_vehicle_make(raw_text)
-        or _extract_vehicle_model(raw_text)
-        or PLATE_PATTERN.search(raw_text)
-    ):
-        match = YEAR_PATTERN.search(normalized)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _extract_price(text: str) -> float | None:
-    match = PRICE_PATTERN.search(text)
-    if not match:
-        return None
-    raw_value = match.group(1).replace(".", "").replace(",", ".")
-    try:
-        return float(raw_value)
-    except ValueError:
-        return None
-
-
-def _extract_email_provider(text: str) -> str | None:
-    match = EMAIL_PROVIDER_DOMAIN_PATTERN.search(text)
-    if not match:
-        return None
-    domain = match.group(1).lower()
-    if domain.endswith("gmail.com"):
-        return "gmail"
-    if domain.endswith(("hotmail.com", "outlook.com", "live.com", "msn.com")):
-        return "outlook"
-    if domain.endswith(("yahoo.com", "yahoo.com.br")):
-        return "yahoo"
-    if domain.endswith(("icloud.com", "me.com")):
-        return "icloud"
-    if domain.endswith("uol.com.br"):
-        return "uol"
-    if domain.endswith("bol.com.br"):
-        return "bol"
-    if domain.endswith("terra.com.br"):
-        return "terra"
-    return "other"
-
-
-def _extract_price_objection_signal(text: str) -> bool:
-    return bool(PRICE_OBJECTION_PATTERN.search(text))
-
-
-def _extract_urgency_strength(text: str) -> int:
-    if URGENCY_STRONG_PATTERN.search(text):
-        return 2
-    if URGENCY_MODERATE_PATTERN.search(text):
-        return 1
-    return 0
-
-
-def _extract_competitor_comparison_signal(text: str) -> bool:
-    return bool(COMPETITOR_COMPARISON_PATTERN.search(text))
-
-
-def _count_tone_hits(text: object, patterns: tuple[re.Pattern[str], ...]) -> int:
-    normalized = _normalize_for_match(_safe_string(text))
-    if not normalized:
-        return 0
-    return sum(1 for pattern in patterns if pattern.search(normalized))
-
-
-def derive_conversation_sentiment_label(
-    positive_tone_hits: object, negative_tone_hits: object
-) -> str:
-    positive_hits = _safe_int(positive_tone_hits)
-    negative_hits = _safe_int(negative_tone_hits)
-    total_hits = positive_hits + negative_hits
-    balance = positive_hits - negative_hits
-
-    if total_hits == 0:
-        return "sem_evidencia"
-    if balance >= 2 or (positive_hits >= 2 and negative_hits == 0):
-        return "positivo"
-    if balance <= -2 or (negative_hits >= 2 and positive_hits == 0):
-        return "negativo"
-    return "neutro"
-
-
-def derive_conversation_sentiment_support(
-    positive_tone_hits: object, negative_tone_hits: object
-) -> str:
-    positive_hits = _safe_int(positive_tone_hits)
-    negative_hits = _safe_int(negative_tone_hits)
-    total_hits = positive_hits + negative_hits
-    balance_magnitude = abs(positive_hits - negative_hits)
-
-    if total_hits == 0:
-        return "sem_evidencia"
-    if max(positive_hits, negative_hits) >= 2 or balance_magnitude >= 3:
-        return "forte"
-    if total_hits >= 2 or balance_magnitude >= 1:
-        return "moderado"
-    return "fraco"
+def _canonical_audience_for_persona(persona_profile: object) -> str:
+    persona = _safe_string(persona_profile).strip()
+    if persona == "cliente_pos_sinistro":
+        return "retencao_pos_sinistro"
+    if persona == "cotador_comparador":
+        return "oferta_competitiva"
+    if persona == "lead_engajado_com_dados":
+        return "close_comercial"
+    if persona == "lead_frio":
+        return "nutricao_basica"
+    return ""
 
 
 def _parse_json_list(raw: object) -> list[str]:
@@ -637,168 +370,6 @@ def _competitor_pressure_level(
     if comparisons >= 1 or mentions >= 2:
         return "alta"
     return "leve"
-
-
-def deduplicate_events(
-    df: pd.DataFrame, compiled_plan: dict[str, object] | None = None
-) -> pd.DataFrame:
-    plan = compiled_plan or get_default_compiled_plan()
-    dedupe_keys = cast(list[str], plan["dedupe_keys"])
-    ranked = df.copy()
-    ranked["status_priority"] = ranked["status"].map(STATUS_PRIORITY).fillna(-1).astype(int)
-    ranked["duplicate_event_group_size"] = ranked.groupby(dedupe_keys, dropna=False)[
-        "message_id"
-    ].transform("size")
-    ranked["had_status_duplication"] = ranked["duplicate_event_group_size"].gt(1)
-    ranked = ranked.sort_values(
-        ["conversation_id", "timestamp", "status_priority", "message_id"],
-        ascending=[True, True, False, True],
-    )
-    deduped = ranked.drop_duplicates(subset=dedupe_keys, keep="first").copy()
-    deduped["dropped_duplicate_events"] = deduped["duplicate_event_group_size"] - 1
-    return deduped.drop(columns=["status_priority"]).reset_index(drop=True)
-
-
-def add_conversation_context(df: pd.DataFrame) -> pd.DataFrame:
-    enriched = df.copy()
-    lead_name = (
-        enriched["sender_name"]
-        .where(enriched["direction"].eq("inbound"))
-        .groupby(enriched["conversation_id"])
-        .transform("first")
-        .fillna("")
-    )
-    agent_name = (
-        enriched["sender_name"]
-        .where(enriched["direction"].eq("outbound"))
-        .groupby(enriched["conversation_id"])
-        .transform("first")
-        .fillna("")
-    )
-    sender_phone = (
-        enriched["sender_phone"]
-        if "sender_phone" in enriched.columns
-        else pd.Series("", index=enriched.index, dtype="object")
-    )
-    lead_phone = (
-        sender_phone.where(enriched["direction"].eq("inbound"))
-        .groupby(enriched["conversation_id"])
-        .transform("first")
-        .fillna("")
-    )
-    enriched["conversation_lead_name"] = lead_name
-    enriched["conversation_agent_name"] = agent_name
-    enriched["conversation_lead_phone"] = lead_phone
-    return enriched
-
-
-def add_lead_context(df: pd.DataFrame) -> pd.DataFrame:
-    enriched = df.copy()
-    enriched["lead_phone_raw"] = enriched["conversation_lead_phone"].map(_safe_string)
-    enriched["lead_phone_masked"] = enriched["lead_phone_raw"].map(_mask_digits)
-    enriched["lead_name_raw"] = enriched["conversation_lead_name"].map(_safe_string)
-    enriched["lead_key"] = [
-        _stable_hash_token(
-            phone if phone else name,
-            city,
-            state,
-            prefix="lead",
-        )
-        for phone, name, city, state in zip(
-            enriched["lead_phone_raw"],
-            enriched["lead_name_raw"],
-            enriched.get("metadata_city", pd.Series("", index=enriched.index)),
-            enriched.get("metadata_state", pd.Series("", index=enriched.index)),
-            strict=False,
-        )
-    ]
-    return enriched
-
-
-def add_message_signals(df: pd.DataFrame) -> pd.DataFrame:
-    message_body = df["message_body"].fillna("")
-    normalized_name = df["sender_name"].fillna("").map(_normalize_for_match)
-    direction = df["direction"].fillna("")
-
-    enriched = df.copy()
-    enriched["sender_name_normalized"] = normalized_name
-    enriched["sender_name_masked"] = enriched["sender_name"].map(mask_sender_name)
-    enriched["sender_phone_masked"] = enriched["sender_phone"].map(_mask_digits)
-    enriched["message_body_masked"] = enriched.apply(mask_message_body, axis=1)
-    enriched["message_length"] = message_body.str.len()
-    enriched["word_count"] = message_body.str.split().str.len()
-    enriched["is_empty_message"] = message_body.str.strip().eq("")
-    enriched["contains_email"] = message_body.str.contains(EMAIL_PATTERN, na=False)
-    enriched["contains_phone"] = message_body.str.contains(PHONE_PATTERN, na=False)
-    enriched["contains_cpf"] = message_body.str.contains(CPF_PATTERN, na=False)
-    enriched["contains_cep"] = message_body.str.contains(CEP_PATTERN, na=False)
-    enriched["contains_plate"] = message_body.str.contains(PLATE_PATTERN, na=False)
-    enriched["vehicle_year"] = message_body.map(_extract_vehicle_year)
-    enriched["vehicle_make"] = message_body.map(_extract_vehicle_make)
-    enriched["vehicle_model"] = message_body.map(_extract_vehicle_model)
-    enriched["competitor_mentioned"] = message_body.map(_extract_competitor)
-    enriched["email_provider"] = message_body.map(_extract_email_provider)
-    enriched["quoted_price"] = message_body.map(_extract_price)
-    enriched["price_objection_signal"] = message_body.map(_extract_price_objection_signal)
-    enriched["urgency_strength"] = message_body.map(_extract_urgency_strength)
-    enriched["competitor_comparison_signal"] = message_body.map(
-        _extract_competitor_comparison_signal
-    )
-    enriched["sinistro_type"] = [
-        _extract_sinistro_type(text, direction)
-        for text, direction in zip(message_body, enriched["direction"], strict=False)
-    ]
-    enriched["mentions_vehicle"] = (
-        enriched["vehicle_make"].notna()
-        | enriched["vehicle_model"].notna()
-        | enriched["vehicle_year"].notna()
-        | enriched["contains_plate"]
-    )
-    enriched["mentions_competitor"] = enriched["competitor_mentioned"].notna()
-    enriched["mentions_sinistro"] = enriched["sinistro_type"].notna()
-    enriched["price_objection_signal_inbound"] = _directional_bool_signal(
-        enriched["price_objection_signal"],
-        direction,
-        "inbound",
-    )
-    enriched["price_objection_signal_outbound"] = _directional_bool_signal(
-        enriched["price_objection_signal"],
-        direction,
-        "outbound",
-    )
-    enriched["urgency_strength_inbound"] = _directional_int_signal(
-        enriched["urgency_strength"],
-        direction,
-        "inbound",
-    )
-    enriched["urgency_strength_outbound"] = _directional_int_signal(
-        enriched["urgency_strength"],
-        direction,
-        "outbound",
-    )
-    enriched["competitor_comparison_signal_inbound"] = _directional_bool_signal(
-        enriched["competitor_comparison_signal"],
-        direction,
-        "inbound",
-    )
-    enriched["competitor_comparison_signal_outbound"] = _directional_bool_signal(
-        enriched["competitor_comparison_signal"],
-        direction,
-        "outbound",
-    )
-    enriched["competitor_mentioned_inbound"] = _directional_value_signal(
-        enriched["competitor_mentioned"],
-        direction,
-        "inbound",
-    )
-    enriched["competitor_mentioned_outbound"] = _directional_value_signal(
-        enriched["competitor_mentioned"],
-        direction,
-        "outbound",
-    )
-    enriched["mentions_competitor_inbound"] = enriched["competitor_mentioned_inbound"].notna()
-    enriched["mentions_competitor_outbound"] = enriched["competitor_mentioned_outbound"].notna()
-    return enriched
 
 
 def build_silver(df: pd.DataFrame, compiled_plan: dict[str, object] | None = None) -> pd.DataFrame:

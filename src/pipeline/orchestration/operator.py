@@ -1,9 +1,13 @@
+# GUD-001 EXCEPTION: This file exceeds 400 lines. Justification: run_cycle() must call
+# load_bronze_frame, build_silver, build_gold, and validate_gold directly from this module's
+# namespace so that existing tests can monkeypatch them via pipeline.orchestration.operator
+# (CON-004). Delegating those calls to operator_stages would break the patches. All auxiliary
+# logic has been extracted to operator_artifacts, operator_reports, and operator_stages; only
+# run_cycle() and build_monitor_snapshot() are defined here.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, cast
 
 from pipeline.agent.agent import (
@@ -11,7 +15,6 @@ from pipeline.agent.agent import (
     diagnose_exception,
     diagnose_validation_failures,
 )
-from pipeline.agent.alerts import handle_alerting
 from pipeline.agent.execution_planner import (
     VALID_STAGES,
     ExecutionPlan,
@@ -20,11 +23,35 @@ from pipeline.agent.execution_planner import (
     build_observation,
     decide_loop_action,
 )
-from pipeline.agent.gold_designer import design_gold_columns
 from pipeline.agent.planner import plan_pipeline_spec
 from pipeline.config import PipelinePaths, ensure_directories
-from pipeline.io.parquet_io import read_json, read_parquet, write_json, write_parquet
+from pipeline.io.parquet_io import read_json, read_parquet, write_parquet
 from pipeline.orchestration.compiler import compile_pipeline_spec
+from pipeline.orchestration.operator_artifacts import (  # noqa: F401
+    PipelineArtifacts,
+    _skip_artifacts,
+    _success_artifacts,
+    agent_report_file,
+    alert_report_file,
+    plan_report_file,
+    state_file,
+    validation_report_file,
+)
+from pipeline.orchestration.operator_reports import (  # noqa: F401
+    _build_agent_report,
+    _build_alert_report,
+    _extract_llm_diagnoses,
+    _planner_report_summary,
+    _run_record,
+    _utc_now_iso,
+    _write_reports,
+)
+from pipeline.orchestration.operator_stages import (  # noqa: F401
+    _run_bronze_stage,
+    _run_gold_stage,
+    _run_silver_stage,
+    _run_validation_stage,
+)
 from pipeline.quality.publication import sanitize_for_publication
 from pipeline.quality.quality import (
     ValidationResult,
@@ -52,195 +79,41 @@ from pipeline.transforms.gold import build_gold
 from pipeline.transforms.gold_macro import build_gold_macro
 from pipeline.transforms.silver import build_silver, build_silver_leads
 
+__all__ = [
+    "PipelineArtifacts",
+    "run_cycle",
+    "build_monitor_snapshot",
+    "state_file",
+    "validation_report_file",
+    "agent_report_file",
+    "alert_report_file",
+    "plan_report_file",
+    "_skip_artifacts",
+    "_success_artifacts",
+    "_build_agent_report",
+    "_build_alert_report",
+    "_write_reports",
+    "_run_record",
+    "_planner_report_summary",
+    "_utc_now_iso",
+    "_extract_llm_diagnoses",
+    "_run_bronze_stage",
+    "_run_silver_stage",
+    "_run_gold_stage",
+    "_run_validation_stage",
+    "_run_validation_suite",
+    # patchable names used by tests (imported at module level)
+    "load_bronze_frame",
+    "build_silver",
+    "build_gold",
+    "validate_gold",
+]
+
 _MAX_REACT_ITERATIONS = 15  # 5 stages × up to 3 iterations each
-
-
-@dataclass(frozen=True)
-class PipelineArtifacts:
-    bronze_path: str
-    silver_path: str
-    silver_messages_path: str
-    silver_conversations_llm_path: str
-    gold_path: str
-    gold_macro_path: str
-    state_path: str
-    validation_report_path: str
-    agent_report_path: str
-    alert_report_path: str
-    executed: bool
-    status: str
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def state_file(paths: PipelinePaths) -> Path:
-    return paths.state / "pipeline_state.json"
-
-
-def validation_report_file(paths: PipelinePaths) -> Path:
-    return paths.monitoring / "latest_run_report.json"
-
-
-def agent_report_file(paths: PipelinePaths) -> Path:
-    return paths.monitoring / "latest_agent_report.json"
-
-
-def alert_report_file(paths: PipelinePaths) -> Path:
-    return paths.monitoring / "latest_alert_report.json"
-
-
-def plan_report_file(paths: PipelinePaths) -> Path:
-    return paths.monitoring / "latest_plan_report.json"
-
-
-def _planner_report_summary(paths: PipelinePaths, planner_report: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "report_path": str(plan_report_file(paths)),
-        "proposal_id": planner_report.get("proposal_id"),
-        "proposal_count": len(planner_report.get("proposals", [])),
-        "requires_approval": planner_report.get("requires_approval", False),
-        "approved": planner_report.get("approved", False),
-        "applied": planner_report.get("applied", False),
-        "promoted_proposal_ids": planner_report.get("promoted_proposal_ids", []),
-        "applied_proposal_ids": planner_report.get("applied_proposal_ids", []),
-        "applied_proposal_types": planner_report.get("applied_proposal_types", []),
-        "autonomy_policy_path": planner_report.get("autonomy_policy_path"),
-        "autonomy_metrics_path": planner_report.get("autonomy_metrics_path"),
-    }
 
 
 def _incident_id() -> str:
     return f"incident_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
-
-
-def _run_record(
-    source_fingerprint: dict[str, Any],
-    executed: bool,
-    status: str,
-    validation_summary: dict[str, Any] | None = None,
-    details: dict[str, Any] | None = None,
-    agent_summary: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "run_at_utc": _utc_now_iso(),
-        "executed": executed,
-        "status": status,
-        "source_fingerprint": source_fingerprint,
-        "validation_summary": validation_summary or {},
-        "agent_summary": agent_summary or {},
-        "details": details or {},
-    }
-
-
-def _skip_artifacts(paths: PipelinePaths) -> PipelineArtifacts:
-    return PipelineArtifacts(
-        bronze_path=str(paths.bronze / "conversations.parquet"),
-        silver_path=str(paths.silver / "silver_leads.parquet"),
-        silver_messages_path=str(paths.silver / "silver_messages.parquet"),
-        silver_conversations_llm_path=str(paths.silver / "silver_conversations_llm.parquet"),
-        gold_path=str(paths.gold / "conversations_gold.parquet"),
-        gold_macro_path=str(paths.gold / "conversations_gold_macro.parquet"),
-        state_path=str(state_file(paths)),
-        validation_report_path=str(validation_report_file(paths)),
-        agent_report_path=str(agent_report_file(paths)),
-        alert_report_path=str(alert_report_file(paths)),
-        executed=False,
-        status="skipped_no_source_change",
-    )
-
-
-def _build_agent_report(
-    incident_id: str,
-    status: str,
-    diagnoses: list[dict[str, Any]],
-    auto_remediation: dict[str, Any] | None = None,
-    fallback: dict[str, Any] | None = None,
-    exception: str | None = None,
-    decisions: list[dict[str, Any]] | None = None,
-    planner_report: dict[str, Any] | None = None,
-    quarantine_report: dict[str, Any] | None = None,
-    llm_diagnoses: list[dict[str, Any]] | None = None,
-    execution_plan: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "generated_at_utc": _utc_now_iso(),
-        "incident_id": incident_id,
-        "status": status,
-        "diagnoses": diagnoses,
-        "auto_remediation": auto_remediation or {},
-        "fallback": fallback or {},
-        "decisions": decisions or [],
-        "planner_report": planner_report or {},
-        "quarantine_report": quarantine_report or {},
-        "exception": exception,
-        "llm_diagnoses": llm_diagnoses or [],
-        "execution_plan": execution_plan or {},
-    }
-
-
-def _write_reports(
-    validation_summary: dict[str, Any],
-    agent_report: dict[str, Any],
-    alert_report: dict[str, Any],
-    validation_report_path: Path,
-    agent_report_path: Path,
-    alert_report_path: Path,
-    decisions_dir: Path,
-) -> None:
-    write_json(validation_summary, validation_report_path)
-    write_json(agent_report, agent_report_path)
-    write_json(alert_report, alert_report_path)
-    decision_path = decisions_dir / "latest_agent_decision.json"
-    write_json(
-        {
-            "generated_at_utc": agent_report["generated_at_utc"],
-            "status": agent_report["status"],
-            "decisions": agent_report.get("decisions", []),
-        },
-        decision_path,
-    )
-
-
-def _success_artifacts(paths: PipelinePaths, status: str) -> PipelineArtifacts:
-    return PipelineArtifacts(
-        bronze_path=str(paths.bronze / "conversations.parquet"),
-        silver_path=str(paths.silver / "silver_leads.parquet"),
-        silver_messages_path=str(paths.silver / "silver_messages.parquet"),
-        silver_conversations_llm_path=str(paths.silver / "silver_conversations_llm.parquet"),
-        gold_path=str(paths.gold / "conversations_gold.parquet"),
-        gold_macro_path=str(paths.gold / "conversations_gold_macro.parquet"),
-        state_path=str(state_file(paths)),
-        validation_report_path=str(validation_report_file(paths)),
-        agent_report_path=str(agent_report_file(paths)),
-        alert_report_path=str(alert_report_file(paths)),
-        executed=True,
-        status=status,
-    )
-
-
-def _build_alert_report(
-    paths: PipelinePaths,
-    run_record: dict[str, Any],
-    agent_report: dict[str, Any],
-    validation_summary: dict[str, Any],
-) -> dict[str, Any]:
-    return handle_alerting(
-        alerts_dir=paths.alerts,
-        run_record=run_record,
-        agent_report=agent_report,
-        validation_report=validation_summary,
-    )
-
-
-def _extract_llm_diagnoses(agent_diagnoses: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result = []
-    for d in agent_diagnoses:
-        source = d.get("source", {})
-        if isinstance(source, dict) and "llm_diagnosis" in source:
-            result.append(source["llm_diagnosis"])
-    return result
 
 
 def _get_llm_call() -> Any:
@@ -548,6 +421,8 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
             elif stage == "gold":
                 # Decision 2: Dynamic Gold Designer
                 current_stage = "gold_design"
+                from pipeline.agent.gold_designer import design_gold_columns
+
                 gold_column_plan = design_gold_columns(
                     silver_leads_df=silver_runtime_df,
                     silver_messages_df=silver_messages_runtime_df,
