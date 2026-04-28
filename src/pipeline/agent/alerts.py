@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from urllib import error, request
 
+from pipeline.agent.alert_channels import DeliveryResult, deliver_alert
 from pipeline.io.parquet_io import read_json, write_json
 
 ALERTABLE_AGENT_STATUSES = {
@@ -147,33 +146,6 @@ def append_alert_history(
     return history_path
 
 
-def deliver_webhook(event: AlertEvent) -> dict[str, Any]:
-    webhook_url = os.getenv("PIPELINE_ALERT_WEBHOOK_URL", "").strip()
-    if not webhook_url:
-        return {"attempted": False, "delivered": False, "reason": "webhook_not_configured"}
-
-    body = json.dumps(event.as_dict()).encode("utf-8")
-    req = request.Request(
-        webhook_url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=10) as response:  # noqa: S310
-            return {
-                "attempted": True,
-                "delivered": True,
-                "status_code": response.status,
-            }
-    except error.URLError as exc:
-        return {
-            "attempted": True,
-            "delivered": False,
-            "reason": str(exc),
-        }
-
-
 def _find_recent_matching_event(alerts_dir: Path, event: AlertEvent) -> dict[str, Any] | None:
     history_path = alerts_dir / "alert_history.json"
     history = read_json(history_path, default={"events": []})
@@ -227,9 +199,13 @@ def handle_alerting(
     event = build_alert_event(run_record, agent_report, validation_report)
     incident_path = persist_incident(alerts_dir, event)
     suppression = evaluate_suppression(alerts_dir, event)
-    delivery = {"attempted": False, "delivered": False, "suppressed": suppression["suppressed"]}
     if event.should_alert and not suppression["suppressed"]:
-        delivery = deliver_webhook(event) | {"suppressed": False}
+        delivery_result = deliver_alert(event.as_dict())
+    else:
+        delivery_result = DeliveryResult(
+            channel="none", status="skipped", attempts=0, http_status_code=None, error=None
+        )
+    delivery = delivery_result.as_dict()
     history_path = append_alert_history(alerts_dir, event, incident_path, suppression, delivery)
     return {
         "event": event.as_dict(),

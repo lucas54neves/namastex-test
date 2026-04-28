@@ -305,6 +305,12 @@ GitHub Variables:
 | `PIPELINE_LANGFUSE_PROMPT_LABEL` | Não | Label do prompt no Langfuse | nenhum |
 | `PIPELINE_LANGFUSE_TRACE_NAME` | Não | Nome base dos traces | nenhum |
 | `LANGFUSE_BASE_URL` | Não | Base URL da instância Langfuse | nenhum |
+| `PIPELINE_ALERT_WEBHOOK_URL` | Não | URL HTTPS do endpoint receptor de alertas. Vazio = desabilitado | nenhum |
+| `PIPELINE_ALERT_WEBHOOK_TOKEN` | Não | Bearer token para autenticação no webhook | nenhum |
+| `PIPELINE_ALERT_WEBHOOK_TIMEOUT_SECONDS` | Não | Timeout por tentativa HTTP em segundos (clampado em 1–30) | `5` |
+| `PIPELINE_ALERT_WEBHOOK_MAX_RETRIES` | Não | Máximo de tentativas de entrega (clampado em 1–5) | `2` |
+| `PIPELINE_ALERT_MIN_SEVERITY` | Não | Severidade mínima para entrega (`low`, `medium`, `high`, `critical`) | `medium` |
+| `PIPELINE_ALERT_DETAILS_URL` | Não | URL de detalhes incluída no payload do webhook | nenhum |
 
 Defaults internos:
 
@@ -473,6 +479,7 @@ O agente executa um ciclo explícito de autonomia governada por impacto. O uso d
 | `gold_designer.py` | `src/pipeline/agent/` | Design de colunas analíticas da Gold via LLM |
 | `playbooks.py` | `src/pipeline/agent/` | Definição das ações de remediação disponíveis |
 | `alerts.py` | `src/pipeline/agent/` | Emissão, deduplicação e supressão de alertas de incidente |
+| `alert_channels.py` | `src/pipeline/agent/` | Entrega de alertas para canal externo via HTTP webhook |
 | `operator.py` | `src/pipeline/orchestration/` | Loop ReAct principal — orquestra todos os ciclos |
 
 ### Ciclos de execução
@@ -640,7 +647,7 @@ Essa divisão melhora manutenção, testes e legibilidade da entrega.
 - O planner autônomo ainda restringe a promoção ao conjunto inicial de famílias suportadas e validadas deterministicamente.
 - O projeto foi otimizado para o dataset e o escopo do teste, não como plataforma multi-tenant completa.
 - A camada Gold produz visão por lead (`conversations_gold.parquet`) e visão macro agregada (`conversations_gold_macro.parquet`).
-- Alertas do agente são relatórios JSON locais; canal externo via webhook está especificado mas não implementado (`spec-architecture-agent-webhook-alert-channel.md`).
+- Alertas do agente são persistidos localmente e entregues via HTTP webhook quando `PIPELINE_ALERT_WEBHOOK_URL` está configurado (Slack, Discord, Teams, PagerDuty ou qualquer endpoint que aceite POST JSON).
 - Módulos `silver.py` e `operator.py` possuem alta complexidade ciclomática; decomposição está especificada mas não implementada (`spec-architecture-module-cyclomatic-decomposition.md`).
 
 

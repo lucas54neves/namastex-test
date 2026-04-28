@@ -67,7 +67,8 @@ def test_handle_alerting_persists_incident_and_history(tmp_path: Path, monkeypat
 
     assert incident["should_alert"] is True
     assert incident["severity"] == "critical"
-    assert result["delivery"]["attempted"] is False
+    assert result["delivery"]["status"] == "skipped"
+    assert result["delivery"]["channel"] == "none"
     assert result["suppression"]["suppressed"] is False
     assert history["events"][-1]["incident_id"] == incident["incident_id"]
 
@@ -102,7 +103,8 @@ def test_handle_alerting_suppresses_duplicate_alert_within_window(
 
     assert first["suppression"]["suppressed"] is False
     assert second["suppression"]["suppressed"] is True
-    assert second["delivery"]["suppressed"] is True
+    assert second["delivery"]["status"] == "skipped"
+    assert second["delivery"]["channel"] == "none"
     assert second["suppression"]["matched_incident_id"] == first["event"]["incident_id"]
     assert len(history["events"]) == 2
 

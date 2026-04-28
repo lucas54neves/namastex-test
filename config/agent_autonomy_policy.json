@@ -1,4 +1,14 @@
 {
+  "alert_channels": {
+    "webhook": {
+      "enabled_when": "PIPELINE_ALERT_WEBHOOK_URL is set and non-empty",
+      "default_min_severity": "medium",
+      "default_timeout_seconds": 5,
+      "default_max_retries": 2,
+      "https_required": true,
+      "non_blocking": true
+    }
+  },
   "mutation_families": {
     "schema_update": {
       "default_impact_class": "high",
