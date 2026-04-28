@@ -84,10 +84,10 @@ jobs:
       - name: Configure SonarQube project and generate token
         id: sonar-setup
         run: |
-          # Wait for SonarQube to be fully ready
           echo "Waiting for SonarQube to be ready..."
           for i in $(seq 1 30); do
-            STATUS=$(curl -sf http://localhost:9000/api/system/status | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
+            STATUS=$(curl -s http://localhost:9000/api/system/status \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
             if [ "$STATUS" = "UP" ]; then
               echo "SonarQube is UP"
               break
@@ -96,20 +96,33 @@ jobs:
             sleep 10
           done
 
-          # Change default admin password (required by SonarQube 9+)
-          curl -sf -u admin:admin -X POST \
+          # Attempt password change and detect which credentials are working.
+          # -f is intentionally omitted so HTTP errors don't produce empty output.
+          PW_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u admin:admin -X POST \
             "http://localhost:9000/api/users/change_password" \
-            -d "login=admin&previousPassword=admin&password=admin_local" || true
+            -d "login=admin&previousPassword=admin&password=AdminLocal123")
+          echo "Password change HTTP status: $PW_STATUS"
+
+          if [ "$PW_STATUS" = "204" ] || [ "$PW_STATUS" = "200" ]; then
+            SONAR_ADMIN_PASS="AdminLocal123"
+          else
+            SONAR_ADMIN_PASS="admin"
+          fi
+          echo "SONAR_ADMIN_PASS=$SONAR_ADMIN_PASS" >> "$GITHUB_ENV"
 
           # Create project
-          curl -sf -u admin:admin_local -X POST \
+          curl -s -u "admin:$SONAR_ADMIN_PASS" -X POST \
             "http://localhost:9000/api/projects/create" \
-            -d "name=Namastex+Pipeline&project=namastex-pipeline" || true
+            -d "name=Namastex+Pipeline&project=namastex-pipeline"
 
           # Generate analysis token
-          TOKEN=$(curl -sf -u admin:admin_local -X POST \
+          RESPONSE=$(curl -s -u "admin:$SONAR_ADMIN_PASS" -X POST \
             "http://localhost:9000/api/user_tokens/generate" \
-            -d "name=ci-token" \
+            -d "name=ci-token")
+          echo "Token response length: ${#RESPONSE}"
+
+          TOKEN=$(echo "$RESPONSE" \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
           echo "::add-mask::$TOKEN"
           echo "sonar_token=$TOKEN" >> "$GITHUB_OUTPUT"
@@ -127,7 +140,7 @@ jobs:
 
           # Wait for analysis task to finish
           for i in $(seq 1 20); do
-            TASK_STATUS=$(curl -sf -u admin:admin_local \
+            TASK_STATUS=$(curl -s -u "admin:$SONAR_ADMIN_PASS" \
               "http://localhost:9000/api/ce/task?id=$TASK_ID" \
               | python3 -c "import sys,json; print(json.load(sys.stdin)['task']['status'])")
             echo "Task status: $TASK_STATUS"
@@ -137,7 +150,7 @@ jobs:
           done
 
           # Check quality gate
-          GATE=$(curl -sf -u admin:admin_local \
+          GATE=$(curl -s -u "admin:$SONAR_ADMIN_PASS" \
             "http://localhost:9000/api/qualitygates/project_status?projectKey=namastex-pipeline" \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])")
           echo "Quality Gate: $GATE"
