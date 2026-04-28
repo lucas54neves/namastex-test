@@ -8,7 +8,7 @@ from typing import Any, Literal, TypedDict, cast
 
 import pandas as pd
 
-from pipeline.agent.playbooks import get_playbook, safe_auto_apply_playbooks
+from pipeline.agent.playbooks import PLAYBOOKS, get_playbook, safe_auto_apply_playbooks
 from pipeline.quality.publication import sanitize_for_publication
 from pipeline.quality.quality import (
     summarize_validation_results,
@@ -106,6 +106,45 @@ class ValidationCheckConfig(TypedDict):
     severity: str
     playbook_id: str | None
     suggested_action: str
+
+
+LLM_KIND_TO_PLAYBOOK_MAP: dict[str, str] = {
+    "unknown_validation_failure": "rebuild_silver_from_bronze",
+    "pii_masking_leak": "rebuild_silver_from_bronze",
+    "silver_schema_break": "rebuild_silver_from_bronze",
+    "silver_lead_identity_break": "rebuild_silver_from_bronze",
+    "silver_timestamp_parse_failure": "quarantine_invalid_records",
+    "silver_aggregate_corruption": "rebuild_silver_from_bronze",
+    "silver_deduplication_failure": "rebuild_silver_from_bronze",
+    "silver_feature_inconsistency": "rebuild_silver_from_bronze",
+    "silver_publication_policy_violation": "rebuild_silver_from_bronze",
+    "silver_publication_schema_break": "rebuild_silver_from_bronze",
+    "gold_schema_break": "rebuild_gold_from_silver",
+    "gold_aggregation_duplication": "rebuild_gold_from_silver",
+    "gold_metric_corruption": "rebuild_gold_from_silver",
+    "gold_publication_policy_violation": "rebuild_gold_from_silver",
+    "gold_bucket_invalid": "rebuild_gold_from_silver",
+}
+
+_LLM_KIND_PREFIX_MAP: list[tuple[str, str]] = [
+    ("silver_", "rebuild_silver_from_bronze"),
+    ("gold_", "rebuild_gold_from_silver"),
+]
+
+_PLAYBOOK_ACTION_PREFIX: dict[str, str] = {
+    "rebuild_silver_from_bronze": "rebuild_silver",
+    "rebuild_gold_from_silver": "rebuild_gold",
+    "quarantine_invalid_records": "quarantine",
+}
+
+
+def _resolve_llm_kind_playbook(kind: str) -> str | None:
+    if kind in LLM_KIND_TO_PLAYBOOK_MAP:
+        return LLM_KIND_TO_PLAYBOOK_MAP[kind]
+    for prefix, playbook_id in _LLM_KIND_PREFIX_MAP:
+        if kind.startswith(prefix):
+            return playbook_id
+    return None
 
 
 VALIDATION_CHECK_MAP = {
@@ -418,10 +457,17 @@ def diagnose_validation_failures(
             source_info["llm_diagnosis"] = llm_diag.as_dict()
             source_info["diagnosis_source"] = llm_diag.source
 
+            mapped_playbook = _resolve_llm_kind_playbook(llm_diag.kind)
+            mapped_safe = (
+                mapped_playbook is not None
+                and PLAYBOOKS.get(mapped_playbook) is not None
+                and PLAYBOOKS[mapped_playbook].safe_auto_apply
+            )
             auto_remediable = (
                 llm_diag.is_safe_to_auto_apply
                 and llm_diag.confidence >= 0.80
                 and llm_diag.severity != "critical"
+                and mapped_safe
             )
             diagnoses.append(
                 AgentDiagnosis(
@@ -491,6 +537,7 @@ def attempt_auto_remediation(
     gold_df: pd.DataFrame,
     failed_checks: list[dict[str, Any]],
     compiled_plan: dict[str, Any],
+    llm_diagnoses: list[AgentDiagnosis] | None = None,
 ) -> dict[str, Any]:
     repaired_silver_runtime = silver_df
     repaired_silver_messages_runtime = silver_messages_df
@@ -531,6 +578,42 @@ def attempt_auto_remediation(
             actions.append(f"rebuild_silver_after_quarantine_for_{check}")
             touched_silver = True
         if playbook_id == "rebuild_gold_from_silver":
+            touched_gold = True
+
+    # GAP-02: apply LLM kind → playbook mapping for diagnoses without a playbook_id
+    for diag in llm_diagnoses or []:
+        if diag.playbook_id is not None or not diag.auto_remediable:
+            continue
+        mapped_pid = _resolve_llm_kind_playbook(diag.kind)
+        if mapped_pid is None:
+            continue
+        mapped_playbook = PLAYBOOKS.get(mapped_pid)
+        if mapped_playbook is None or not mapped_playbook.safe_auto_apply:
+            continue
+        if mapped_pid not in safe_playbooks:
+            continue
+        action_prefix = _PLAYBOOK_ACTION_PREFIX.get(mapped_pid, mapped_pid)
+        action_name = f"{action_prefix}_for_llm_kind_{diag.kind}_via_llm_kind_map"
+        decisions.append(
+            {
+                "playbook": mapped_playbook.as_dict(),
+                "llm_kind": diag.kind,
+                "selected": True,
+                "via": "llm_kind_map",
+            }
+        )
+        if mapped_pid == "rebuild_silver_from_bronze":
+            repaired_silver_messages_runtime = build_silver(bronze_df, compiled_plan=compiled_plan)
+            repaired_silver_runtime = build_silver_leads(repaired_silver_messages_runtime)
+            actions.append(action_name)
+            touched_silver = True
+        elif mapped_pid == "quarantine_invalid_records":
+            repaired_silver_messages_runtime = build_silver(bronze_df, compiled_plan=compiled_plan)
+            repaired_silver_runtime = build_silver_leads(repaired_silver_messages_runtime)
+            actions.append(action_name)
+            touched_silver = True
+        elif mapped_pid == "rebuild_gold_from_silver":
+            actions.append(action_name)
             touched_gold = True
 
     if touched_gold and not touched_silver:

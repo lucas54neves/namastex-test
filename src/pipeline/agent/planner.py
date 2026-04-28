@@ -531,11 +531,54 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         detected_contexts.extend(contexts)
         proposals.extend(generated_proposals)
 
+    # GAP-04: call LLM Advisor before evaluation to reorder/defer proposals
+    compiled_plan = compile_pipeline_spec(spec)
+    llm_advice = get_llm_advice(
+        {
+            "observed_columns": observed_columns,
+            "observed_metadata_fields": observed_metadata_fields,
+            "detected_contexts": detected_contexts,
+            "proposals": [
+                {
+                    "proposal_type": p["proposal_type"],
+                    "proposal_family": p["proposal_family"],
+                    "expected_impact": p["expected_impact"],
+                }
+                for p in proposals
+            ],
+        },
+        compiled_plan,
+    )
+
+    priority_types: list[str] = llm_advice.get("priority_proposals", [])
+    deferred_types: set[str] = set(llm_advice.get("deferred_proposals", []))
+
+    # Partition: priority first (in LLM-supplied order), then non-priority, deferred last
+    priority_order = {pt: i for i, pt in enumerate(priority_types)}
+    priority_proposals_list = sorted(
+        [p for p in proposals if p["proposal_type"] in priority_types],
+        key=lambda p: priority_order.get(p["proposal_type"], 999),
+    )
+    normal_proposals_list = [
+        p
+        for p in proposals
+        if p["proposal_type"] not in priority_types and p["proposal_type"] not in deferred_types
+    ]
+    deferred_proposals_list = [p for p in proposals if p["proposal_type"] in deferred_types]
+
+    # Mark deferred proposals as closed (no evaluation)
+    for proposal in deferred_proposals_list:
+        proposal["status"] = PROPOSAL_STATUS_CLOSED_NO_ACTION
+        proposal["decision_reason"] = "deferred_by_llm_advisor"
+        persist_proposal_record(paths, proposal)
+
+    proposals_to_evaluate = priority_proposals_list + normal_proposals_list
+
     approval_status_by_proposal = {
         str(proposal["proposal_id"]): get_proposal_approval_status(
             paths, str(proposal["proposal_id"])
         )
-        for proposal in proposals
+        for proposal in proposals_to_evaluate
     }
     approved_proposal_ids = sorted(
         proposal_id
@@ -547,7 +590,9 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         for proposal_id, status in approval_status_by_proposal.items()
         if status == APPROVAL_STATUS_REJECTED
     )
-    requires_approval = any(bool(proposal["requires_approval"]) for proposal in proposals)
+    requires_approval = any(
+        bool(proposal["requires_approval"]) for proposal in proposals_to_evaluate
+    )
 
     applied_proposal_types: list[str] = []
     applied_proposal_ids: list[str] = []
@@ -555,7 +600,7 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
     active_spec = spec
     promotion_enabled = paths.pipeline_spec.parent.resolve() == paths.config.resolve()
 
-    for proposal in proposals:
+    for proposal in proposals_to_evaluate:
         proposal_id = str(proposal["proposal_id"])
         approval_status = approval_status_by_proposal[proposal_id]
         proposal["candidate_actions"] = build_candidate_actions(proposal)
@@ -707,19 +752,12 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             },
         )
 
-    compiled_plan = compile_pipeline_spec(active_spec)
-    llm_advice = get_llm_advice(
-        {
-            "observed_columns": observed_columns,
-            "observed_metadata_fields": observed_metadata_fields,
-            "detected_contexts": detected_contexts,
-            "proposals": proposals,
-        },
-        compiled_plan,
-    )
-    approved = bool(proposals) and all(
+    # All proposals (evaluated + deferred) for the report
+    all_proposals = proposals_to_evaluate + deferred_proposals_list
+
+    approved = bool(proposals_to_evaluate) and all(
         proposal["status"] in {PROPOSAL_STATUS_PROMOTED, PROPOSAL_STATUS_APPROVED}
-        for proposal in proposals
+        for proposal in proposals_to_evaluate
         if proposal["requires_approval"]
     )
 
@@ -729,8 +767,8 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         "detected_contexts": detected_contexts,
         "observed_columns": observed_columns,
         "observed_metadata_fields": observed_metadata_fields,
-        "proposals": proposals,
-        "changes": proposals,
+        "proposals": all_proposals,
+        "changes": all_proposals,
         "requires_approval": requires_approval,
         "approved": approved,
         "approved_proposal_ids": approved_proposal_ids,
@@ -743,40 +781,48 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         "autonomy_metrics_path": str(paths.autonomy_metrics),
         "llm_advice": llm_advice,
         "summary": {
-            "proposal_count": len(proposals),
+            "proposal_count": len(all_proposals),
             "context_count": len(detected_contexts),
-            "families": sorted({str(proposal["proposal_family"]) for proposal in proposals}),
+            "families": sorted({str(proposal["proposal_family"]) for proposal in all_proposals}),
             "status_counts": {
                 PROPOSAL_STATUS_PROPOSED: sum(
-                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_PROPOSED
+                    1
+                    for proposal in all_proposals
+                    if proposal["status"] == PROPOSAL_STATUS_PROPOSED
                 ),
                 PROPOSAL_STATUS_CANDIDATE_MATERIALIZED: sum(
                     1
-                    for proposal in proposals
+                    for proposal in all_proposals
                     if proposal["status"] == PROPOSAL_STATUS_CANDIDATE_MATERIALIZED
                 ),
                 PROPOSAL_STATUS_AWAITING_APPROVAL: sum(
                     1
-                    for proposal in proposals
+                    for proposal in all_proposals
                     if proposal["status"] == PROPOSAL_STATUS_AWAITING_APPROVAL
                 ),
                 PROPOSAL_STATUS_APPROVED: sum(
-                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_APPROVED
+                    1
+                    for proposal in all_proposals
+                    if proposal["status"] == PROPOSAL_STATUS_APPROVED
                 ),
                 PROPOSAL_STATUS_PROMOTED: sum(
-                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_PROMOTED
+                    1
+                    for proposal in all_proposals
+                    if proposal["status"] == PROPOSAL_STATUS_PROMOTED
                 ),
                 PROPOSAL_STATUS_REJECTED: sum(
-                    1 for proposal in proposals if proposal["status"] == PROPOSAL_STATUS_REJECTED
+                    1
+                    for proposal in all_proposals
+                    if proposal["status"] == PROPOSAL_STATUS_REJECTED
                 ),
                 PROPOSAL_STATUS_VALIDATION_FAILED: sum(
                     1
-                    for proposal in proposals
+                    for proposal in all_proposals
                     if proposal["status"] == PROPOSAL_STATUS_VALIDATION_FAILED
                 ),
                 PROPOSAL_STATUS_CLOSED_NO_ACTION: sum(
                     1
-                    for proposal in proposals
+                    for proposal in all_proposals
                     if proposal["status"] == PROPOSAL_STATUS_CLOSED_NO_ACTION
                 ),
             },

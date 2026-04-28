@@ -13,6 +13,8 @@ from pipeline.agent.agent import (
 )
 from pipeline.agent.alerts import handle_alerting
 from pipeline.agent.execution_planner import (
+    VALID_STAGES,
+    ExecutionPlan,
     LoopAction,
     build_execution_plan,
     build_observation,
@@ -48,7 +50,7 @@ from pipeline.transforms.conversation_enrichment import build_conversation_enric
 from pipeline.transforms.gold import build_gold
 from pipeline.transforms.silver import build_silver, build_silver_leads
 
-_MAX_REACT_ITERATIONS = 3
+_MAX_REACT_ITERATIONS = 15  # 5 stages × up to 3 iterations each
 
 
 @dataclass(frozen=True)
@@ -327,6 +329,17 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
         confidence=execution_plan.confidence,
     )
 
+    # When forced with an empty plan, override to run all stages
+    if force and not execution_plan.stages:
+        execution_plan = ExecutionPlan(
+            stages=list(VALID_STAGES),
+            rationale="Forced execution of all stages.",
+            confidence=1.0,
+            source="deterministic_fallback",
+            generated_at_utc=_utc_now_iso(),
+        )
+        log_event(logging.INFO, "execution_plan_forced", stages=execution_plan.stages)
+
     if not force and not changed and not execution_plan.stages:
         agent_report = _build_agent_report(
             incident_id=_incident_id(),
@@ -384,96 +397,23 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
     current_stage = "initialization"
 
     try:
-        # --- Bronze ---
-        current_stage = "bronze_load"
-        bronze_df = load_bronze_frame(str(paths.raw_bronze_source))
-        log_event(logging.INFO, "bronze_loaded", rows=int(len(bronze_df)))
+        # Initialize all stage variables (populated inside the ReAct loop)
+        bronze_df: Any = None
+        silver_df: Any = None
+        silver_messages_df: Any = None
+        silver_runtime_df: Any = None
+        silver_messages_runtime_df: Any = None
+        silver_conversations_llm_df: Any = None
+        silver_conversations_llm_runtime_df: Any = None
+        gold_df: Any = None
+        gold_runtime_df: Any = None
+        gold_column_plan: Any = None
+        quarantine: dict[str, Any] = {"clean_df": None, "report": {"quarantined_rows": 0}}
+        quarantine_report: dict[str, Any] = {"quarantined_rows": 0}
 
-        current_stage = "quarantine_processing"
-        quarantine = quarantine_bronze_records(bronze_df, paths.quarantine, compiled_plan)
-        bronze_df = cast(Any, quarantine["clean_df"])
-        quarantine_report = cast(dict[str, Any], quarantine["report"])
-        log_event(
-            logging.INFO,
-            "quarantine_completed",
-            quarantined_rows=quarantine_report.get("quarantined_rows", 0),
-            clean_rows=int(len(bronze_df)),
-        )
-
-        current_stage = "bronze_persist"
-        write_parquet(bronze_df, bronze_path)
-
-        # --- Silver ---
-        current_stage = "silver_build"
-        silver_messages_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
-        silver_runtime_df = build_silver_leads(silver_messages_runtime_df)
-        silver_df = sanitize_for_publication(silver_runtime_df, "silver")
-        silver_messages_df = sanitize_for_publication(silver_messages_runtime_df, "silver_messages")
-        log_event(
-            logging.INFO,
-            "silver_completed",
-            silver_rows=int(len(silver_df)),
-            silver_messages_rows=int(len(silver_messages_df)),
-        )
-
-        current_stage = "enrichment_build"
-        existing_enrichment = (
-            read_parquet(silver_conversations_llm_path)
-            if silver_conversations_llm_path.exists()
-            else None
-        )
-        silver_conversations_llm_runtime_df = build_conversation_enrichment(
-            silver_messages_runtime_df,
-            compiled_plan=compiled_plan,
-            existing_enrichment=existing_enrichment,
-        )
-        silver_conversations_llm_df = sanitize_for_publication(
-            silver_conversations_llm_runtime_df, "silver_conversations_llm"
-        )
-        log_event(
-            logging.INFO,
-            "enrichment_completed",
-            silver_conversations_llm_rows=int(len(silver_conversations_llm_df)),
-        )
-
-        current_stage = "silver_persist"
-        write_parquet(silver_df, silver_path)
-        write_parquet(silver_messages_df, silver_messages_path)
-        write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
-
-        # Decision 2: Dynamic Gold Designer
-        current_stage = "gold_design"
-        gold_column_plan = design_gold_columns(
-            silver_leads_df=silver_runtime_df,
-            silver_messages_df=silver_messages_runtime_df,
-            spec=spec,
-            paths=paths,
-            llm_call=llm_call,
-            compiled_plan=compiled_plan,
-        )
-        log_event(
-            logging.INFO,
-            "gold_column_plan_designed",
-            source=gold_column_plan.source,
-            column_count=len(gold_column_plan.columns),
-        )
-
-        # --- Gold ---
-        current_stage = "gold_build"
-        gold_runtime_df = build_gold(
-            silver_runtime_df,
-            silver_messages_runtime_df,
-            silver_conversations_llm_runtime_df,
-            compiled_plan=compiled_plan,
-            gold_column_plan=gold_column_plan,
-        )
-        gold_df = sanitize_for_publication(gold_runtime_df, "gold")
-
-        current_stage = "gold_persist"
-        write_parquet(gold_df, gold_path)
-        log_event(logging.INFO, "gold_completed", gold_rows=int(len(gold_df)))
-
-        # --- ReAct loop: validation + remediation ---
+        # --- ReAct loop: stage execution + validation + remediation ---
+        executed_stages: set[str] = set()
+        failed_stage: str | None = None
         stage_failure_counts: dict[str, int] = {}
         all_diagnoses: list[dict[str, Any]] = []
         all_llm_diagnoses: list[dict[str, Any]] = []
@@ -489,9 +429,18 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
         run_status = "success"
         final_loop_action: LoopAction | None = None
         validation_passed = False
+        validation_summary = {
+            "status": "pending",
+            "checks": [],
+            "failed_checks": [],
+            "executed_at_utc": _utc_now_iso(),
+            "source_fingerprint": current_fingerprint,
+            "pipeline_spec_path": str(paths.pipeline_spec),
+        }
+        row_counts: dict[str, Any] = {}
 
         for iteration in range(_MAX_REACT_ITERATIONS):
-            current_stage = "validation"
+            current_stage = f"loop_iteration_{iteration}"
             current_obs = build_observation(paths, state, changed)
 
             loop_action = decide_loop_action(
@@ -500,138 +449,111 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                 stage_failure_counts=stage_failure_counts,
                 iteration=iteration,
                 validation_passed=validation_passed,
-                failed_stage=None,
+                executed_stages=executed_stages,
+                failed_stage=failed_stage,
             )
+            log_event(
+                logging.INFO,
+                "react_loop_action",
+                kind=loop_action.kind,
+                stage=loop_action.stage,
+                reason=loop_action.reason,
+                iteration=iteration,
+            )
+            final_loop_action = loop_action
 
             if loop_action.kind == "complete":
-                final_loop_action = loop_action
                 break
 
-            validation_results = _run_validation_suite(
-                bronze_df,
-                silver_df,
-                silver_messages_df,
-                silver_conversations_llm_df,
-                gold_df,
-                compiled_plan,
-            )
-            validation_summary = summarize_validation_results(validation_results)
-            validation_summary["executed_at_utc"] = _utc_now_iso()
-            validation_summary["row_counts"] = {
-                "bronze": int(len(bronze_df)),
-                "silver": int(len(silver_df)),
-                "silver_messages": int(len(silver_messages_df)),
-                "silver_conversations_llm": int(len(silver_conversations_llm_df)),
-                "gold": int(len(gold_df)),
-            }
-            validation_summary["source_fingerprint"] = current_fingerprint
-            validation_summary["pipeline_spec_path"] = str(paths.pipeline_spec)
+            if loop_action.kind == "halt":
+                if run_status not in ("halted_critical_failure",):
+                    run_status = "halted_stage_failure"
+                    agent_status = "halted_stage_failure"
+                break
 
-            failed_checks = cast(list[dict[str, Any]], validation_summary["failed_checks"])
-            row_counts = cast(dict[str, Any], validation_summary["row_counts"])
-            log_event(
-                logging.INFO,
-                "validation_completed",
-                status=validation_summary["status"],
-                failed_check_count=len(failed_checks),
-                iteration=iteration,
-            )
+            stage = loop_action.stage
+            assert stage is not None
+            failed_stage = None  # reset; set only on failure
 
-            if validation_summary["status"] == "passed":
-                validation_passed = True
-                final_loop_action = LoopAction(
-                    kind="complete", stage=None, reason="validation_passed"
+            if stage == "bronze":
+                current_stage = "bronze_load"
+                bronze_df = load_bronze_frame(str(paths.raw_bronze_source))
+                log_event(logging.INFO, "bronze_loaded", rows=int(len(bronze_df)))
+
+                current_stage = "quarantine_processing"
+                quarantine = quarantine_bronze_records(bronze_df, paths.quarantine, compiled_plan)
+                bronze_df = cast(Any, quarantine["clean_df"])
+                quarantine_report = cast(dict[str, Any], quarantine["report"])
+                log_event(
+                    logging.INFO,
+                    "quarantine_completed",
+                    quarantined_rows=quarantine_report.get("quarantined_rows", 0),
+                    clean_rows=int(len(bronze_df)),
                 )
-                break
+                current_stage = "bronze_persist"
+                write_parquet(bronze_df, bronze_path)
+                executed_stages.add("bronze")
 
-            # Decision 3: Diagnose failures (with LLM for unknown checks)
-            diagnoses_list = diagnose_validation_failures(
-                failed_checks, compiled_plan, llm_call=llm_call
-            )
-            iteration_diagnoses = [d.as_dict() for d in diagnoses_list]
-            all_diagnoses.extend(iteration_diagnoses)
-            iteration_llm_diagnoses = _extract_llm_diagnoses(iteration_diagnoses)
-            all_llm_diagnoses.extend(iteration_llm_diagnoses)
-
-            # Check for critical diagnosis (REQ-025)
-            critical_found = any(d.get("severity") == "critical" for d in iteration_diagnoses)
-            if critical_found:
-                log_event(logging.ERROR, "critical_diagnosis_halt", iteration=iteration)
-                final_loop_action = LoopAction(kind="halt", stage=None, reason="critical_diagnosis")
-                run_status = "halted_critical_failure"
-                agent_status = "halted_critical_failure"
-                break
-
-            # Attempt auto-remediation
-            rem = attempt_auto_remediation(
-                bronze_df=bronze_df,
-                silver_df=silver_df,
-                silver_messages_df=silver_messages_df,
-                gold_df=gold_df,
-                failed_checks=failed_checks,
-                compiled_plan=compiled_plan,
-            )
-            decisions.extend(cast(list[dict[str, Any]], rem["decisions"]))
-
-            if rem["resolved"]:
-                silver_df = rem["silver_df"]
-                silver_messages_df = rem["silver_messages_df"]
-                gold_df = rem["gold_df"]
-                write_parquet(silver_df, silver_path)
-                write_parquet(silver_messages_df, silver_messages_path)
-                write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
-                write_parquet(gold_df, gold_path)
-                remediation = {
-                    "classification": "auto_remediated",
-                    "attempted": True,
-                    "applied": bool(rem["actions"]),
-                    "actions": rem["actions"],
-                    "resolved": True,
-                }
-                validation_passed = True
-                agent_status = "auto_remediated"
-                run_status = "success_after_auto_remediation"
-                final_loop_action = LoopAction(
-                    kind="complete", stage=None, reason="auto_remediation_resolved"
-                )
-                break
-
-            # Remediation didn't resolve — determine retry stage
-            retry_stage = _determine_retry_stage(failed_checks, stage_failure_counts)
-            if retry_stage is None:
-                final_loop_action = LoopAction(
-                    kind="halt", stage=None, reason="no_recoverable_stage"
-                )
-                break
-
-            stage_failure_counts[retry_stage] = stage_failure_counts.get(retry_stage, 0) + 1
-            if stage_failure_counts[retry_stage] >= 2:
-                final_loop_action = LoopAction(
-                    kind="halt",
-                    stage=retry_stage,
-                    reason=f"repeated_stage_failure:{retry_stage}",
-                )
-                break
-
-            # Rebuild the failing stage for next iteration
-            log_event(
-                logging.INFO,
-                "react_retry_stage",
-                stage=retry_stage,
-                iteration=iteration,
-                failure_count=stage_failure_counts[retry_stage],
-            )
-            if retry_stage in ("bronze", "silver"):
+            elif stage == "silver":
+                current_stage = "silver_build"
                 silver_messages_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
                 silver_runtime_df = build_silver_leads(silver_messages_runtime_df)
                 silver_df = sanitize_for_publication(silver_runtime_df, "silver")
                 silver_messages_df = sanitize_for_publication(
                     silver_messages_runtime_df, "silver_messages"
                 )
+                log_event(
+                    logging.INFO,
+                    "silver_completed",
+                    silver_rows=int(len(silver_df)),
+                    silver_messages_rows=int(len(silver_messages_df)),
+                )
+
+                current_stage = "enrichment_build"
+                existing_enrichment = (
+                    read_parquet(silver_conversations_llm_path)
+                    if silver_conversations_llm_path.exists()
+                    else None
+                )
+                silver_conversations_llm_runtime_df = build_conversation_enrichment(
+                    silver_messages_runtime_df,
+                    compiled_plan=compiled_plan,
+                    existing_enrichment=existing_enrichment,
+                )
+                silver_conversations_llm_df = sanitize_for_publication(
+                    silver_conversations_llm_runtime_df, "silver_conversations_llm"
+                )
+                log_event(
+                    logging.INFO,
+                    "enrichment_completed",
+                    silver_conversations_llm_rows=int(len(silver_conversations_llm_df)),
+                )
+                current_stage = "silver_persist"
                 write_parquet(silver_df, silver_path)
                 write_parquet(silver_messages_df, silver_messages_path)
+                write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
+                executed_stages.add("silver")
+                executed_stages.discard("gold")
+                executed_stages.discard("validation")
 
-            if retry_stage in ("bronze", "silver", "gold"):
+            elif stage == "gold":
+                # Decision 2: Dynamic Gold Designer
+                current_stage = "gold_design"
+                gold_column_plan = design_gold_columns(
+                    silver_leads_df=silver_runtime_df,
+                    silver_messages_df=silver_messages_runtime_df,
+                    spec=spec,
+                    paths=paths,
+                    llm_call=llm_call,
+                    compiled_plan=compiled_plan,
+                )
+                log_event(
+                    logging.INFO,
+                    "gold_column_plan_designed",
+                    source=gold_column_plan.source,
+                    column_count=len(gold_column_plan.columns),
+                )
+                current_stage = "gold_build"
                 gold_runtime_df = build_gold(
                     silver_runtime_df,
                     silver_messages_runtime_df,
@@ -640,48 +562,160 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                     gold_column_plan=gold_column_plan,
                 )
                 gold_df = sanitize_for_publication(gold_runtime_df, "gold")
+                current_stage = "gold_persist"
                 write_parquet(gold_df, gold_path)
+                log_event(logging.INFO, "gold_completed", gold_rows=int(len(gold_df)))
+                executed_stages.add("gold")
+                executed_stages.discard("validation")
 
-            remediation = {
-                "classification": "unresolved_manual_action"
-                if any(bool(d.get("auto_remediable")) for d in iteration_diagnoses)
-                else "not_auto_remediable",
-                "attempted": True,
-                "applied": bool(rem["actions"]),
-                "actions": rem["actions"],
-                "resolved": False,
-            }
+            elif stage == "validation":
+                current_stage = "validation"
+                validation_results = _run_validation_suite(
+                    bronze_df,
+                    silver_df,
+                    silver_messages_df,
+                    silver_conversations_llm_df,
+                    gold_df,
+                    compiled_plan,
+                )
+                validation_summary = summarize_validation_results(validation_results)
+                validation_summary["executed_at_utc"] = _utc_now_iso()
+                validation_summary["row_counts"] = {
+                    "bronze": int(len(bronze_df)),
+                    "silver": int(len(silver_df)),
+                    "silver_messages": int(len(silver_messages_df)),
+                    "silver_conversations_llm": int(len(silver_conversations_llm_df)),
+                    "gold": int(len(gold_df)),
+                }
+                validation_summary["source_fingerprint"] = current_fingerprint
+                validation_summary["pipeline_spec_path"] = str(paths.pipeline_spec)
+
+                failed_checks = cast(list[dict[str, Any]], validation_summary["failed_checks"])
+                row_counts = cast(dict[str, Any], validation_summary["row_counts"])
+                log_event(
+                    logging.INFO,
+                    "validation_completed",
+                    status=validation_summary["status"],
+                    failed_check_count=len(failed_checks),
+                    iteration=iteration,
+                )
+
+                if validation_summary["status"] == "passed":
+                    validation_passed = True
+                    executed_stages.add("validation")
+                    final_loop_action = LoopAction(
+                        kind="complete", stage=None, reason="validation_passed"
+                    )
+                    break
+
+                # Decision 3: Diagnose failures (with LLM for unknown checks)
+                diagnoses_list = diagnose_validation_failures(
+                    failed_checks, compiled_plan, llm_call=llm_call
+                )
+                iteration_diagnoses = [d.as_dict() for d in diagnoses_list]
+                all_diagnoses.extend(iteration_diagnoses)
+                iteration_llm_diagnoses = _extract_llm_diagnoses(iteration_diagnoses)
+                all_llm_diagnoses.extend(iteration_llm_diagnoses)
+
+                critical_found = any(d.get("severity") == "critical" for d in iteration_diagnoses)
+                if critical_found:
+                    log_event(logging.ERROR, "critical_diagnosis_halt", iteration=iteration)
+                    final_loop_action = LoopAction(
+                        kind="halt", stage=None, reason="critical_diagnosis"
+                    )
+                    run_status = "halted_critical_failure"
+                    agent_status = "halted_critical_failure"
+                    executed_stages.add("validation")
+                    break
+
+                # Attempt auto-remediation (GAP-02: pass llm_diagnoses)
+                rem = attempt_auto_remediation(
+                    bronze_df=bronze_df,
+                    silver_df=silver_df,
+                    silver_messages_df=silver_messages_df,
+                    gold_df=gold_df,
+                    failed_checks=failed_checks,
+                    compiled_plan=compiled_plan,
+                    llm_diagnoses=diagnoses_list,
+                )
+                decisions.extend(cast(list[dict[str, Any]], rem["decisions"]))
+
+                if rem["resolved"]:
+                    silver_df = rem["silver_df"]
+                    silver_messages_df = rem["silver_messages_df"]
+                    gold_df = rem["gold_df"]
+                    write_parquet(silver_df, silver_path)
+                    write_parquet(silver_messages_df, silver_messages_path)
+                    write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
+                    write_parquet(gold_df, gold_path)
+                    remediation = {
+                        "classification": "auto_remediated",
+                        "attempted": True,
+                        "applied": bool(rem["actions"]),
+                        "actions": rem["actions"],
+                        "resolved": True,
+                    }
+                    validation_passed = True
+                    agent_status = "auto_remediated"
+                    run_status = "success_after_auto_remediation"
+                    final_loop_action = LoopAction(
+                        kind="complete", stage=None, reason="auto_remediation_resolved"
+                    )
+                    executed_stages.add("validation")
+                    break
+
+                # Remediation didn't resolve — determine retry stage
+                retry_stage = _determine_retry_stage(failed_checks, stage_failure_counts)
+                if retry_stage is None:
+                    final_loop_action = LoopAction(
+                        kind="halt", stage=None, reason="no_recoverable_stage"
+                    )
+                    break
+
+                stage_failure_counts[retry_stage] = stage_failure_counts.get(retry_stage, 0) + 1
+                if stage_failure_counts[retry_stage] >= 2:
+                    final_loop_action = LoopAction(
+                        kind="halt",
+                        stage=retry_stage,
+                        reason=f"repeated_stage_failure:{retry_stage}",
+                    )
+                    break
+
+                log_event(
+                    logging.INFO,
+                    "react_retry_stage",
+                    stage=retry_stage,
+                    iteration=iteration,
+                    failure_count=stage_failure_counts[retry_stage],
+                )
+                # Cascade-remove the failing stage and all downstream from executed_stages
+                _stage_cascade_order = ["bronze", "silver", "gold", "validation"]
+                retry_idx = (
+                    _stage_cascade_order.index(retry_stage)
+                    if retry_stage in _stage_cascade_order
+                    else -1
+                )
+                if retry_idx >= 0:
+                    for _s in _stage_cascade_order[retry_idx:]:
+                        executed_stages.discard(_s)
+
+                remediation = {
+                    "classification": "unresolved_manual_action"
+                    if any(bool(d.get("auto_remediable")) for d in iteration_diagnoses)
+                    else "not_auto_remediable",
+                    "attempted": True,
+                    "applied": bool(rem["actions"]),
+                    "actions": rem["actions"],
+                    "resolved": False,
+                }
+
+            elif stage == "planning":
+                # Planning already ran before the loop
+                executed_stages.add("planning")
 
         else:
             # Max iterations reached without break
             final_loop_action = LoopAction(kind="halt", stage=None, reason="max_iterations_reached")
-
-        # Final validation pass if not already completed
-        if not validation_passed and run_status not in (
-            "halted_critical_failure",
-            "success_after_auto_remediation",
-        ):
-            validation_results = _run_validation_suite(
-                bronze_df,
-                silver_df,
-                silver_messages_df,
-                silver_conversations_llm_df,
-                gold_df,
-                compiled_plan,
-            )
-            validation_summary = summarize_validation_results(validation_results)
-            validation_summary["executed_at_utc"] = _utc_now_iso()
-            validation_summary["row_counts"] = {
-                "bronze": int(len(bronze_df)),
-                "silver": int(len(silver_df)),
-                "silver_messages": int(len(silver_messages_df)),
-                "silver_conversations_llm": int(len(silver_conversations_llm_df)),
-                "gold": int(len(gold_df)),
-            }
-            validation_summary["source_fingerprint"] = current_fingerprint
-            validation_summary["pipeline_spec_path"] = str(paths.pipeline_spec)
-            failed_checks = cast(list[dict[str, Any]], validation_summary["failed_checks"])
-            row_counts = cast(dict[str, Any], validation_summary["row_counts"])
 
         if run_status == "success":
             if validation_summary.get("status") != "passed":
@@ -701,7 +735,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
             fallback={"applied": False},
             decisions=decisions,
             planner_report=planner_summary,
-            quarantine_report=cast(dict[str, Any], quarantine["report"]),
+            quarantine_report=quarantine_report,
             llm_diagnoses=all_llm_diagnoses,
             execution_plan=execution_plan.as_dict(),
         )

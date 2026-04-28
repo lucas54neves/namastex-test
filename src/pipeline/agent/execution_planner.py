@@ -204,30 +204,58 @@ def decide_loop_action(
     stage_failure_counts: dict[str, int],
     iteration: int,
     validation_passed: bool,
+    executed_stages: set[str] | None = None,
     failed_stage: str | None = None,
 ) -> LoopAction:
     if validation_passed:
         return LoopAction(kind="complete", stage=None, reason="all_stages_passed_validation")
 
-    if iteration == 0:
-        if not execution_plan.stages:
-            return LoopAction(kind="complete", stage=None, reason="no_stages_in_plan")
-        first = execution_plan.stages[0]
-        return LoopAction(kind="run_stage", stage=first, reason="executing_execution_plan")
+    if executed_stages is None:
+        # Backward-compatible path (no executed_stages tracking)
+        if iteration == 0:
+            if not execution_plan.stages:
+                return LoopAction(kind="complete", stage=None, reason="no_stages_in_plan")
+            first = execution_plan.stages[0]
+            return LoopAction(kind="run_stage", stage=first, reason="executing_execution_plan")
 
-    if failed_stage is None:
-        return LoopAction(kind="complete", stage=None, reason="no_failed_stage_to_retry")
+        if failed_stage is None:
+            return LoopAction(kind="complete", stage=None, reason="no_failed_stage_to_retry")
 
-    count = stage_failure_counts.get(failed_stage, 0)
-    if count >= 2:
+        count = stage_failure_counts.get(failed_stage, 0)
+        if count >= 2:
+            return LoopAction(
+                kind="halt",
+                stage=failed_stage,
+                reason=f"repeated_stage_failure:{failed_stage}",
+            )
         return LoopAction(
-            kind="halt",
+            kind="retry_stage",
             stage=failed_stage,
-            reason=f"repeated_stage_failure:{failed_stage}",
+            reason=f"retrying_{failed_stage}_after_validation_failure",
         )
 
-    return LoopAction(
-        kind="retry_stage",
-        stage=failed_stage,
-        reason=f"retrying_{failed_stage}_after_validation_failure",
-    )
+    # New path: consume ExecutionPlan iteratively with executed_stages tracking
+    if not execution_plan.stages:
+        return LoopAction(kind="complete", stage=None, reason="no_stages_in_plan")
+
+    if all(s in executed_stages for s in execution_plan.stages):
+        return LoopAction(kind="complete", stage=None, reason="all_stages_executed")
+
+    for stage in execution_plan.stages:
+        if stage not in executed_stages:
+            return LoopAction(kind="run_stage", stage=stage, reason=f"executing_stage:{stage}")
+        if failed_stage == stage:
+            count = stage_failure_counts.get(stage, 0)
+            if count >= 2:
+                return LoopAction(
+                    kind="halt",
+                    stage=stage,
+                    reason=f"repeated_stage_failure:{stage}",
+                )
+            return LoopAction(
+                kind="retry_stage",
+                stage=stage,
+                reason=f"retrying_{stage}_after_failure",
+            )
+
+    return LoopAction(kind="complete", stage=None, reason="all_stages_executed")

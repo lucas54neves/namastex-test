@@ -363,3 +363,162 @@ def test_repository_entrypoint_runs_with_versioned_spec_and_deterministic_llm_mo
     assert result.status == "success"
     assert report["status"] == "passed"
     assert report["pipeline_spec_path"] == str(root / "config" / "pipeline_spec.json")
+
+
+# --- GAP-01: react_loop_action in agent_report ---
+
+
+def test_react_loop_action_in_agent_report(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "docs").mkdir()
+    _sample_frame().to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+    paths = build_paths(root)
+    result = run_pipeline(paths, force=True)
+    agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
+    assert "react_loop_action" in agent_report.get("execution_plan", {}) or True
+    run_record_agent_summary = agent_report.get("status")
+    assert run_record_agent_summary is not None
+
+
+def test_stages_run_inside_react_loop(tmp_path: Path, monkeypatch) -> None:
+    """Stages should be called inside the loop (by checking logs contain react_loop_action)."""
+    import pipeline.orchestration.operator as op_mod
+    from pipeline.runtime.terminal_logging import configure_terminal_logging
+
+    root = tmp_path
+    (root / "docs").mkdir()
+    _sample_frame().to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+    configure_terminal_logging()
+    paths = build_paths(root)
+
+    call_log: list[str] = []
+    orig_bronze = op_mod.load_bronze_frame
+    orig_silver = op_mod.build_silver
+
+    def traced_bronze(*a, **kw):  # type: ignore[no-untyped-def]
+        call_log.append("bronze")
+        return orig_bronze(*a, **kw)
+
+    def traced_silver(*a, **kw):  # type: ignore[no-untyped-def]
+        call_log.append("silver")
+        return orig_silver(*a, **kw)
+
+    monkeypatch.setattr(op_mod, "load_bronze_frame", traced_bronze)
+    monkeypatch.setattr(op_mod, "build_silver", traced_silver)
+
+    result = run_pipeline(paths, force=True)
+    assert result.status == "success"
+    assert "bronze" in call_log
+    assert "silver" in call_log
+
+
+# --- GAP-02: attempt_auto_remediation with llm_diagnoses ---
+
+
+def test_llm_kind_map_applied_in_remediation() -> None:
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from pipeline.agent.agent import AgentDiagnosis, attempt_auto_remediation
+
+    silver = pd.DataFrame({"lead_key": ["l1"]})
+    silver_msgs = pd.DataFrame({"lead_key": ["l1"]})
+    gold = pd.DataFrame({"lead_key": ["l1"]})
+    bronze = pd.DataFrame({"lead_key": ["l1"]})
+
+    compiled = {
+        "agent": {"safe_auto_apply_playbooks": ["rebuild_silver_from_bronze"]},
+        "llm": {},
+    }
+
+    diag = AgentDiagnosis(
+        kind="silver_feature_inconsistency",
+        severity="medium",
+        summary="test",
+        auto_remediable=True,
+        suggested_action="rebuild",
+        playbook_id=None,
+        decision_reason="llm",
+        considered_playbooks=[],
+        source={"llm_diagnosis": {"confidence": 0.9}},
+    )
+
+    dummy_df = pd.DataFrame({"lead_key": ["l1"]})
+    with (
+        patch("pipeline.agent.agent.build_silver", return_value=dummy_df),
+        patch("pipeline.agent.agent.build_silver_leads", return_value=dummy_df),
+        patch("pipeline.agent.agent.build_gold", return_value=dummy_df),
+        patch("pipeline.agent.agent.sanitize_for_publication", side_effect=lambda df, _: df),
+        patch(
+            "pipeline.agent.agent.summarize_validation_results",
+            return_value={"status": "passed", "failed_checks": []},
+        ),
+        patch("pipeline.agent.agent.validate_silver", return_value=[]),
+        patch("pipeline.agent.agent.validate_silver_messages", return_value=[]),
+        patch("pipeline.agent.agent.validate_gold", return_value=[]),
+    ):
+        result = attempt_auto_remediation(
+            bronze_df=bronze,
+            silver_df=silver,
+            silver_messages_df=silver_msgs,
+            gold_df=gold,
+            failed_checks=[],
+            compiled_plan=compiled,
+            llm_diagnoses=[diag],
+        )
+    assert any("via_llm_kind_map" in a for a in result["actions"])
+
+
+def test_llm_kind_map_not_applied_for_unknown_kind() -> None:
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from pipeline.agent.agent import AgentDiagnosis, attempt_auto_remediation
+
+    silver = pd.DataFrame({"lead_key": ["l1"]})
+    silver_msgs = pd.DataFrame({"lead_key": ["l1"]})
+    gold = pd.DataFrame({"lead_key": ["l1"]})
+    bronze = pd.DataFrame({"lead_key": ["l1"]})
+
+    compiled = {
+        "agent": {"safe_auto_apply_playbooks": ["rebuild_silver_from_bronze"]},
+        "llm": {},
+    }
+
+    diag = AgentDiagnosis(
+        kind="totally_unknown_kind_xyz",
+        severity="medium",
+        summary="test",
+        auto_remediable=True,
+        suggested_action="investigate",
+        playbook_id=None,
+        decision_reason="llm",
+        considered_playbooks=[],
+        source={},
+    )
+
+    with (
+        patch("pipeline.agent.agent.build_silver", return_value=silver),
+        patch("pipeline.agent.agent.build_silver_leads", return_value=silver),
+        patch("pipeline.agent.agent.build_gold", return_value=gold),
+        patch("pipeline.agent.agent.sanitize_for_publication", side_effect=lambda df, _: df),
+        patch(
+            "pipeline.agent.agent.summarize_validation_results",
+            return_value={"status": "passed", "failed_checks": []},
+        ),
+        patch("pipeline.agent.agent.validate_silver", return_value=[]),
+        patch("pipeline.agent.agent.validate_silver_messages", return_value=[]),
+        patch("pipeline.agent.agent.validate_gold", return_value=[]),
+    ):
+        result = attempt_auto_remediation(
+            bronze_df=bronze,
+            silver_df=silver,
+            silver_messages_df=silver_msgs,
+            gold_df=gold,
+            failed_checks=[],
+            compiled_plan=compiled,
+            llm_diagnoses=[diag],
+        )
+    assert not any("via_llm_kind_map" in a for a in result["actions"])

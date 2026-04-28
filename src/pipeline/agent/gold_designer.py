@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +14,165 @@ import pandas as pd
 from pipeline.config import PipelinePaths
 from pipeline.io.parquet_io import write_json
 from pipeline.runtime.terminal_logging import log_event
+
+_SAFE_EVAL_BLOCKLIST = frozenset(
+    {
+        "import",
+        "exec",
+        "eval",
+        "__",
+        "lambda",
+        "open",
+        "os",
+        "sys",
+        "subprocess",
+        "globals",
+        "locals",
+        "getattr",
+        "setattr",
+        "delattr",
+    }
+)
+
+_SAFE_EVAL_ALLOWED_NODES = (
+    ast.Expression,
+    ast.BoolOp,
+    ast.And,
+    ast.Or,
+    ast.UnaryOp,
+    ast.Not,
+    ast.Compare,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.In,
+    ast.NotIn,
+    ast.Name,
+    ast.Constant,
+    ast.List,
+    ast.Load,
+)
+
+
+def _eval_node(node: ast.AST, df: pd.DataFrame) -> Any:
+    if isinstance(node, ast.BoolOp):
+        parts = [_eval_node(v, df) for v in node.values]
+        result = parts[0]
+        if isinstance(node.op, ast.And):
+            for p in parts[1:]:
+                result = result & p if isinstance(result, pd.Series) else (result and p)
+        else:
+            for p in parts[1:]:
+                result = result | p if isinstance(result, pd.Series) else (result or p)
+        return result
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        val = _eval_node(node.operand, df)
+        return ~val if isinstance(val, pd.Series) else not val
+
+    if isinstance(node, ast.Compare):
+        left = _eval_node(node.left, df)
+        op = node.ops[0]
+        right = _eval_node(node.comparators[0], df)
+        if isinstance(op, ast.Eq):
+            return left == right
+        if isinstance(op, ast.NotEq):
+            return left != right
+        if isinstance(op, ast.Lt):
+            return left < right
+        if isinstance(op, ast.LtE):
+            return left <= right
+        if isinstance(op, ast.Gt):
+            return left > right
+        if isinstance(op, ast.GtE):
+            return left >= right
+        if isinstance(op, ast.In):
+            if isinstance(right, list):
+                return left.isin(right) if isinstance(left, pd.Series) else left in right
+        if isinstance(op, ast.NotIn):
+            if isinstance(right, list):
+                return (~left.isin(right)) if isinstance(left, pd.Series) else left not in right
+        raise ValueError(f"unsupported_operator:{type(op).__name__}")
+
+    if isinstance(node, ast.Name):
+        name = node.id
+        if name in df.columns:
+            return df[name]
+        raise KeyError(name)
+
+    if isinstance(node, ast.Constant):
+        return node.value
+
+    if isinstance(node, ast.List):
+        return [_eval_node(elt, df) for elt in node.elts]
+
+    raise ValueError(f"unsupported_node:{type(node).__name__}")
+
+
+def safe_eval_condition(expr: str, df: pd.DataFrame) -> pd.Series:
+    """
+    Evaluate a restricted boolean expression over a pandas DataFrame.
+    Returns pd.Series[bool]. Returns all-False on invalid or unsafe expressions.
+    Never calls eval() or exec().
+    """
+    expr = re.sub(r"\s+", " ", expr.strip())
+
+    for token in _SAFE_EVAL_BLOCKLIST:
+        if token in expr:
+            log_event(
+                logging.WARNING,
+                "gold_plan_unsafe_expr_rejected",
+                reason=f"blocklist:{token}",
+                expr=expr[:120],
+            )
+            return pd.Series(False, index=df.index)
+
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as exc:
+        log_event(
+            logging.WARNING,
+            "gold_plan_unsafe_expr_rejected",
+            reason=f"syntax_error:{exc}",
+            expr=expr[:120],
+        )
+        return pd.Series(False, index=df.index)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _SAFE_EVAL_ALLOWED_NODES):
+            log_event(
+                logging.WARNING,
+                "gold_plan_unsafe_expr_rejected",
+                reason=f"disallowed_node:{type(node).__name__}",
+                expr=expr[:120],
+            )
+            return pd.Series(False, index=df.index)
+
+    try:
+        result = _eval_node(tree.body, df)
+        if isinstance(result, pd.Series):
+            return result.astype(bool)
+        return pd.Series(bool(result), index=df.index)
+    except KeyError as exc:
+        log_event(
+            logging.WARNING,
+            "gold_plan_missing_column",
+            column=str(exc),
+            expr=expr[:120],
+        )
+        return pd.Series(False, index=df.index)
+    except Exception as exc:
+        log_event(
+            logging.WARNING,
+            "gold_plan_unsafe_expr_rejected",
+            reason=str(exc),
+            expr=expr[:120],
+        )
+        return pd.Series(False, index=df.index)
+
 
 _SAMPLE_ROWS = 50
 _GOLD_DESIGNER_PROMPT = """
@@ -461,7 +622,7 @@ def apply_gold_column_plan(
                 when_conditions = [c for c in conditions if "when" in c and "then" in c]
                 for cond in reversed(when_conditions):
                     try:
-                        mask = result.eval(cond["when"])
+                        mask = safe_eval_condition(cond["when"], result)
                         series[mask] = cond["then"]
                     except Exception:
                         pass

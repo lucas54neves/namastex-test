@@ -331,3 +331,121 @@ def test_observation_as_dict() -> None:
     assert d["source_changed"] is True
     assert "layer_artifacts" in d
     assert "bronze" in d["layer_artifacts"]
+
+
+# --- GAP-01: decide_loop_action with executed_stages ---
+
+
+def _make_plan(stages: list[str]) -> ExecutionPlan:
+    return ExecutionPlan(
+        stages=stages,
+        rationale="test",
+        confidence=1.0,
+        source="deterministic_fallback",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+    )
+
+
+def test_decide_with_executed_stages_run_first_pending() -> None:
+    obs = _make_observation()
+    plan = _make_plan(["bronze", "silver", "gold", "validation"])
+    action = decide_loop_action(
+        execution_plan=plan,
+        observation=obs,
+        stage_failure_counts={},
+        iteration=0,
+        validation_passed=False,
+        executed_stages=set(),
+    )
+    assert action.kind == "run_stage"
+    assert action.stage == "bronze"
+
+
+def test_decide_with_executed_stages_skips_done_runs_next() -> None:
+    obs = _make_observation()
+    plan = _make_plan(["bronze", "silver", "gold", "validation"])
+    action = decide_loop_action(
+        execution_plan=plan,
+        observation=obs,
+        stage_failure_counts={},
+        iteration=1,
+        validation_passed=False,
+        executed_stages={"bronze"},
+    )
+    assert action.kind == "run_stage"
+    assert action.stage == "silver"
+
+
+def test_decide_with_executed_stages_retry_when_failed_stage() -> None:
+    obs = _make_observation()
+    plan = _make_plan(["silver", "gold", "validation"])
+    action = decide_loop_action(
+        execution_plan=plan,
+        observation=obs,
+        stage_failure_counts={"silver": 1},
+        iteration=2,
+        validation_passed=False,
+        executed_stages={"silver"},
+        failed_stage="silver",
+    )
+    assert action.kind == "retry_stage"
+    assert action.stage == "silver"
+
+
+def test_decide_with_executed_stages_halt_on_count_ge_2() -> None:
+    obs = _make_observation()
+    plan = _make_plan(["silver", "gold", "validation"])
+    action = decide_loop_action(
+        execution_plan=plan,
+        observation=obs,
+        stage_failure_counts={"silver": 2},
+        iteration=3,
+        validation_passed=False,
+        executed_stages={"silver"},
+        failed_stage="silver",
+    )
+    assert action.kind == "halt"
+    assert action.stage == "silver"
+    assert "repeated_stage_failure" in action.reason
+
+
+def test_decide_with_executed_stages_complete_when_all_done() -> None:
+    obs = _make_observation()
+    plan = _make_plan(["bronze", "silver", "gold", "validation"])
+    action = decide_loop_action(
+        execution_plan=plan,
+        observation=obs,
+        stage_failure_counts={},
+        iteration=4,
+        validation_passed=False,
+        executed_stages={"bronze", "silver", "gold", "validation"},
+    )
+    assert action.kind == "complete"
+
+
+def test_decide_with_executed_stages_complete_on_validation_passed() -> None:
+    obs = _make_observation()
+    plan = _make_plan(["bronze", "silver"])
+    action = decide_loop_action(
+        execution_plan=plan,
+        observation=obs,
+        stage_failure_counts={},
+        iteration=2,
+        validation_passed=True,
+        executed_stages={"bronze", "silver"},
+    )
+    assert action.kind == "complete"
+
+
+def test_decide_with_executed_stages_empty_plan_returns_complete() -> None:
+    obs = _make_observation()
+    plan = _make_plan([])
+    action = decide_loop_action(
+        execution_plan=plan,
+        observation=obs,
+        stage_failure_counts={},
+        iteration=0,
+        validation_passed=False,
+        executed_stages=set(),
+    )
+    assert action.kind == "complete"

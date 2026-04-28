@@ -13,6 +13,7 @@ from pipeline.agent.gold_designer import (
     _validate_plan,
     apply_gold_column_plan,
     design_gold_columns,
+    safe_eval_condition,
 )
 
 
@@ -428,3 +429,126 @@ def test_gold_column_plan_as_dict() -> None:
     assert isinstance(d["columns"], list)
     assert d["source"] == "deterministic_fallback"
     assert "generated_at_utc" in d
+
+
+# --- GAP-03: safe_eval_condition tests ---
+
+
+def _bool_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "mentioned_sinistro": [True, False, True],
+            "contains_cpf": [False, True, True],
+            "engagement_bucket": ["lead_frio", "media", "longa"],
+            "data_shared_score": [0, 2, 3],
+            "message_count": [2, 8, 25],
+        }
+    )
+
+
+def test_safe_eval_simple_equality() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("engagement_bucket == 'lead_frio'", df)
+    assert list(result) == [True, False, False]
+
+
+def test_safe_eval_compound_and() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("mentioned_sinistro and contains_cpf", df)
+    expected = df["mentioned_sinistro"] & df["contains_cpf"]
+    assert list(result) == list(expected)
+
+
+def test_safe_eval_in_operator() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("engagement_bucket in ['media', 'longa']", df)
+    assert list(result) == [False, True, True]
+
+
+def test_safe_eval_numeric_comparison() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("message_count > 20", df)
+    assert list(result) == [False, False, True]
+
+
+def test_safe_eval_compound_and_or() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("engagement_bucket == 'lead_frio' and data_shared_score == 0", df)
+    assert list(result) == [True, False, False]
+
+
+def test_safe_eval_blocked_dunder() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("__class__.__bases__[0]", df)
+    assert result.all() is False or list(result) == [False, False, False]
+
+
+def test_safe_eval_blocked_lambda() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("lambda x: x", df)
+    assert list(result) == [False, False, False]
+
+
+def test_safe_eval_blocked_import() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("__import__('os').system('echo')", df)
+    assert list(result) == [False, False, False]
+
+
+def test_safe_eval_missing_column_returns_false() -> None:
+    df = _bool_df()
+    result = safe_eval_condition("coluna_inexistente == 'valor'", df)
+    assert list(result) == [False, False, False]
+
+
+def test_safe_eval_no_eval_or_exec_in_source() -> None:
+    from pathlib import Path
+
+    src = (Path(__file__).parent.parent / "src/pipeline/agent/gold_designer.py").read_text()
+    # Strip docstrings/comments — check only code lines
+    code_lines = [
+        line
+        for line in src.splitlines()
+        if not line.lstrip().startswith('"""')
+        and not line.lstrip().startswith("#")
+        and "safe_eval" not in line
+    ]
+    code_body = "\n".join(code_lines)
+    assert "result.eval(" not in code_body, "DataFrame.eval() must not be used"
+    assert ".eval(" not in code_body or "safe_eval" in code_body
+
+
+def test_apply_plan_fallback_uses_safe_eval() -> None:
+    """End-to-end: apply_gold_column_plan conditional_bucket uses safe_eval_condition."""
+    df = pd.DataFrame(
+        {
+            "lead_key": ["a", "b", "c"],
+            "message_count": [2, 8, 25],
+            "engagement_bucket": ["lead_frio", "media", "longa"],
+            "data_shared_score": [0, 2, 3],
+        }
+    )
+    col = GoldColumnDefinition(
+        name="tier",
+        data_type="string",
+        derivation_logic={
+            "type": "conditional_bucket",
+            "conditions": [
+                {"when": "message_count > 20", "then": "high"},
+                {"when": "message_count > 5", "then": "medium"},
+                {"else": "low"},
+            ],
+        },
+        rationale="test",
+        segment_values=["low", "medium", "high"],
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    result = apply_gold_column_plan(df, plan)
+    assert result.loc[result["message_count"] == 25, "tier"].iloc[0] == "high"
+    assert result.loc[result["message_count"] == 8, "tier"].iloc[0] == "medium"
+    assert result.loc[result["message_count"] == 2, "tier"].iloc[0] == "low"
