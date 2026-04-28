@@ -201,6 +201,7 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
         _silver_messages: pd.DataFrame,
         _silver_conversations_llm: pd.DataFrame | None = None,
         compiled_plan=None,
+        gold_column_plan=None,
     ) -> pd.DataFrame:
         raise RuntimeError("boom")
 
@@ -233,6 +234,7 @@ def test_run_pipeline_emits_terminal_log_for_failure_stage(
         _silver_messages: pd.DataFrame,
         _silver_conversations_llm: pd.DataFrame | None = None,
         compiled_plan=None,
+        gold_column_plan=None,
     ) -> pd.DataFrame:
         raise RuntimeError("boom")
 

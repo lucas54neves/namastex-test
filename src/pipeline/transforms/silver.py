@@ -991,6 +991,7 @@ def build_gold(
     silver_messages: pd.DataFrame,
     silver_conversations_llm: pd.DataFrame | None = None,
     compiled_plan: dict[str, object] | None = None,
+    gold_column_plan: object | None = None,
 ) -> pd.DataFrame:
     if silver_conversations_llm is not None:
         from pipeline.transforms.conversation_enrichment import consolidate_gold_semantics
@@ -1254,7 +1255,7 @@ def build_gold(
         gold["contains_email"],
         None,
     )
-    return (
+    base_gold = (
         gold.drop(
             columns=[
                 "quoted_price_mentions",
@@ -1269,3 +1270,9 @@ def build_gold(
         .sort_values("lead_key")
         .reset_index(drop=True)
     )
+    if gold_column_plan is not None:
+        from pipeline.agent.gold_designer import GoldColumnPlan, apply_gold_column_plan
+
+        if isinstance(gold_column_plan, GoldColumnPlan) and gold_column_plan.source == "llm":
+            base_gold = apply_gold_column_plan(base_gold, gold_column_plan)
+    return base_gold

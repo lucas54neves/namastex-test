@@ -789,3 +789,39 @@ def run_conversation_enrichment_graph(
         return result
     finally:
         close_langfuse_run(langfuse_context)
+
+
+def call_llm(
+    prompt: str,
+    compiled_plan: dict[str, Any] | None = None,
+    timeout: float | None = None,
+) -> str:
+    """Single-shot LLM call returning raw text. Tries Anthropic then OpenAI.
+
+    Raises RuntimeError if all providers fail.
+    """
+    config = resolve_runtime_config(compiled_plan or {})
+    effective_timeout = int(timeout) if timeout is not None else config["timeout_seconds"]
+    errors: list[str] = []
+
+    for provider in ("anthropic", "openai"):
+        readiness = _provider_ready(config, provider)
+        if readiness:
+            errors.append(f"{provider}:{readiness}")
+            continue
+        provider_cfg = config["providers"][provider]
+        model_class = ChatAnthropic if provider == "anthropic" else ChatOpenAI
+        if model_class is None:
+            errors.append(f"{provider}:library_unavailable")
+            continue
+        try:
+            response = model_class(
+                model=provider_cfg["model"],
+                timeout=effective_timeout,
+                max_retries=provider_cfg["max_retries"],
+            ).invoke(prompt)
+            return _response_text(response)
+        except Exception as exc:
+            errors.append(f"{provider}:{type(exc).__name__}:{exc}")
+
+    raise RuntimeError(f"call_llm_all_providers_failed: {'; '.join(errors)}")

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import pandas as pd
 
@@ -13,8 +16,63 @@ from pipeline.quality.quality import (
     validate_silver,
     validate_silver_messages,
 )
+from pipeline.runtime.terminal_logging import log_event
 from pipeline.transforms.gold import build_gold
 from pipeline.transforms.silver import build_silver, build_silver_leads
+
+
+@dataclass(frozen=True)
+class LLMDiagnosis:
+    kind: str
+    severity: Literal["low", "medium", "high", "critical"]
+    summary: str
+    suggested_action: str
+    is_safe_to_auto_apply: bool
+    confidence: float
+    rationale: str
+    source: Literal["llm", "deterministic_fallback"]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "severity": self.severity,
+            "summary": self.summary,
+            "suggested_action": self.suggested_action,
+            "is_safe_to_auto_apply": self.is_safe_to_auto_apply,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
+            "source": self.source,
+        }
+
+
+_DIAGNOSIS_PROMPT = """
+You are a data pipeline validation expert.
+A pipeline validation check failed and is NOT in the known check map.
+Diagnose the failure and recommend a structured action.
+
+## Failed Check
+Layer: {layer}
+Check name: {check_name}
+Failing records sample (message_body truncated to 60 chars):
+{failing_sample}
+
+## Pipeline Spec (relevant excerpt)
+{spec_excerpt}
+
+## Known Check Map (for context)
+{known_checks}
+
+## Output Format (JSON only, no prose)
+{{
+  "kind": "<failure_kind>",
+  "severity": "<low|medium|high|critical>",
+  "summary": "<one-sentence summary>",
+  "suggested_action": "<actionable recommendation>",
+  "is_safe_to_auto_apply": <true|false>,
+  "confidence": <0.0-1.0>,
+  "rationale": "<reasoning>"
+}}
+"""
 
 
 @dataclass(frozen=True)
@@ -220,49 +278,165 @@ VALIDATION_CHECK_MAP = {
 }
 
 
+def _llm_diagnose_failure(
+    failed: dict[str, Any],
+    compiled_plan: dict[str, Any],
+    llm_call: Callable[..., str],
+) -> LLMDiagnosis:
+    layer = str(failed.get("layer", "unknown"))
+    check_name = str(failed.get("check", "unknown"))
+
+    failing_records = failed.get("detail", {})
+    sample_rows = failing_records if isinstance(failing_records, list) else [failing_records]
+    sample_rows = sample_rows[:20]
+    for row in sample_rows:
+        if isinstance(row, dict) and "message_body" in row:
+            row["message_body"] = str(row["message_body"])[:60]
+
+    known_checks = [f"{k[0]}.{k[1]}" for k in VALIDATION_CHECK_MAP]
+    spec_excerpt = json.dumps(
+        {k: v for k, v in compiled_plan.items() if "forbidden" in k or "required" in k},
+        ensure_ascii=False,
+    )[:2000]
+
+    prompt = _DIAGNOSIS_PROMPT.format(
+        layer=layer,
+        check_name=check_name,
+        failing_sample=json.dumps(sample_rows, ensure_ascii=False),
+        spec_excerpt=spec_excerpt,
+        known_checks=json.dumps(known_checks),
+    )
+    text = llm_call(prompt, compiled_plan, 20.0)
+    raw = text.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else raw
+        if raw.startswith("json"):
+            raw = raw[4:]
+    parsed = json.loads(raw.strip())
+    return LLMDiagnosis(
+        kind=str(parsed.get("kind", "unknown_validation_failure")),
+        severity=parsed.get("severity", "medium"),
+        summary=str(parsed.get("summary", "")),
+        suggested_action=str(parsed.get("suggested_action", "")),
+        is_safe_to_auto_apply=bool(parsed.get("is_safe_to_auto_apply", False)),
+        confidence=float(parsed.get("confidence", 0.5)),
+        rationale=str(parsed.get("rationale", "")),
+        source="llm",
+    )
+
+
+def _fallback_llm_diagnosis(failed: dict[str, Any]) -> LLMDiagnosis:
+    layer = str(failed.get("layer", "unknown"))
+    check = str(failed.get("check", "unknown"))
+    return LLMDiagnosis(
+        kind="unknown_validation_failure",
+        severity="medium",
+        summary=f"Unknown validation failure in {layer}.{check}",
+        suggested_action="Manual investigation required — check not recognized by static map",
+        is_safe_to_auto_apply=False,
+        confidence=0.0,
+        rationale="Check not found in VALIDATION_CHECK_MAP; deterministic fallback applied.",
+        source="deterministic_fallback",
+    )
+
+
 def diagnose_validation_failures(
-    failed_checks: list[dict[str, Any]], compiled_plan: dict[str, Any]
+    failed_checks: list[dict[str, Any]],
+    compiled_plan: dict[str, Any],
+    llm_call: Callable[..., str] | None = None,
 ) -> list[AgentDiagnosis]:
     diagnoses: list[AgentDiagnosis] = []
     safe_playbooks = safe_auto_apply_playbooks(compiled_plan)
+    circuit_breaker_fails = 0
+
     for failed in failed_checks:
         layer = str(failed.get("layer", "unknown"))
         check = str(failed.get("check", "unknown"))
-        mapped = cast(
-            ValidationCheckConfig,
-            VALIDATION_CHECK_MAP.get(
-                (layer, check),
-                {
-                    "kind": "unknown_validation_failure",
-                    "severity": "high",
-                    "playbook_id": None,
-                    "suggested_action": (
-                        "Inspecionar a falha manualmente e revisar o contrato da camada afetada."
-                    ),
-                },
-            ),
-        )
-        playbook_id = mapped["playbook_id"]
-        auto_remediable = bool(playbook_id and playbook_id in safe_playbooks)
-        considered_playbooks = [playbook_id] if playbook_id else []
-        decision_reason = (
-            f"Falha {layer}.{check} mapeada para playbook {playbook_id}."
-            if playbook_id
-            else f"Falha {layer}.{check} sem playbook seguro configurado."
-        )
-        diagnoses.append(
-            AgentDiagnosis(
-                kind=str(mapped["kind"]),
-                severity=str(mapped["severity"]),
-                summary=f"Falha de validação em {layer}.{check}",
-                auto_remediable=auto_remediable,
-                suggested_action=str(mapped["suggested_action"]),
-                playbook_id=str(playbook_id) if playbook_id else None,
-                decision_reason=decision_reason,
-                considered_playbooks=considered_playbooks,
-                source=failed,
+        key = (layer, check)
+
+        if key in VALIDATION_CHECK_MAP:
+            mapped = cast(ValidationCheckConfig, VALIDATION_CHECK_MAP[key])
+            playbook_id = mapped["playbook_id"]
+            auto_remediable = bool(playbook_id and playbook_id in safe_playbooks)
+            considered_playbooks = [playbook_id] if playbook_id else []
+            decision_reason = (
+                f"Falha {layer}.{check} mapeada para playbook {playbook_id}."
+                if playbook_id
+                else f"Falha {layer}.{check} sem playbook seguro configurado."
             )
-        )
+            source_info: dict[str, Any] = dict(failed)
+            diagnoses.append(
+                AgentDiagnosis(
+                    kind=str(mapped["kind"]),
+                    severity=str(mapped["severity"]),
+                    summary=f"Falha de validação em {layer}.{check}",
+                    auto_remediable=auto_remediable,
+                    suggested_action=str(mapped["suggested_action"]),
+                    playbook_id=str(playbook_id) if playbook_id else None,
+                    decision_reason=decision_reason,
+                    considered_playbooks=considered_playbooks,
+                    source=source_info,
+                )
+            )
+        else:
+            # Unknown check — use LLM diagnosis (REQ-020)
+            if llm_call is not None and circuit_breaker_fails < 3:
+                try:
+                    llm_diag = _llm_diagnose_failure(failed, compiled_plan, llm_call)
+                    log_event(
+                        logging.INFO,
+                        "llm_diagnosis_completed",
+                        layer=layer,
+                        check=check,
+                        severity=llm_diag.severity,
+                        confidence=llm_diag.confidence,
+                    )
+                    circuit_breaker_fails = 0
+                except Exception as exc:
+                    circuit_breaker_fails += 1
+                    log_event(
+                        logging.WARNING,
+                        "llm_diagnosis_failed",
+                        layer=layer,
+                        check=check,
+                        error=str(exc),
+                        circuit_breaker_count=circuit_breaker_fails,
+                    )
+                    llm_diag = _fallback_llm_diagnosis(failed)
+            else:
+                llm_diag = _fallback_llm_diagnosis(failed)
+                if circuit_breaker_fails >= 3:
+                    log_event(
+                        logging.WARNING,
+                        "llm_diagnosis_circuit_breaker_active",
+                        layer=layer,
+                        check=check,
+                    )
+
+            source_info = dict(failed)
+            source_info["llm_diagnosis"] = llm_diag.as_dict()
+            source_info["diagnosis_source"] = llm_diag.source
+
+            auto_remediable = (
+                llm_diag.is_safe_to_auto_apply
+                and llm_diag.confidence >= 0.80
+                and llm_diag.severity != "critical"
+            )
+            diagnoses.append(
+                AgentDiagnosis(
+                    kind=llm_diag.kind,
+                    severity=llm_diag.severity,
+                    summary=llm_diag.summary,
+                    auto_remediable=auto_remediable,
+                    suggested_action=llm_diag.suggested_action,
+                    playbook_id=None,
+                    decision_reason=llm_diag.rationale,
+                    considered_playbooks=[],
+                    source=source_info,
+                )
+            )
+
     return diagnoses
 
 
