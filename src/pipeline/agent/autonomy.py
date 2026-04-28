@@ -38,6 +38,7 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
             "requires_approval": True,
             "requires_backward_compatibility": True,
             "requires_privacy_scan": True,
+            "agent_auto_approve_if_confidence_ge": 0.90,
         },
         "validation_enhancement": {
             "default_impact_class": IMPACT_LOW,
@@ -59,6 +60,7 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
             "requires_approval": True,
             "requires_backward_compatibility": True,
             "requires_privacy_scan": False,
+            "agent_auto_approve_if_confidence_ge": 0.90,
         },
         "transformation_rule_change": {
             "default_impact_class": IMPACT_MEDIUM,
@@ -66,6 +68,7 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
             "requires_approval": True,
             "requires_backward_compatibility": True,
             "requires_privacy_scan": False,
+            "agent_auto_approve_if_confidence_ge": 0.85,
         },
     }
 }
@@ -575,6 +578,15 @@ def persist_proposal_record(paths: PipelinePaths, proposal: dict[str, Any]) -> N
 
 def persist_autonomy_decision(paths: PipelinePaths, decision: dict[str, Any]) -> None:
     write_json(decision, autonomy_decision_path(paths))
+
+
+def get_agent_auto_approve_threshold(paths: PipelinePaths, proposal_family: str) -> float | None:
+    policy = load_autonomy_policy(paths)
+    family_policy = policy.get("mutation_families", {}).get(proposal_family, {})
+    threshold = family_policy.get("agent_auto_approve_if_confidence_ge")
+    if threshold is None:
+        return None
+    return float(threshold)
 
 
 def promote_candidate_spec(

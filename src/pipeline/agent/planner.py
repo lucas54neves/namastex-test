@@ -12,6 +12,7 @@ import pandas as pd
 from pipeline.agent.approval import (
     APPROVAL_STATUS_APPROVED,
     APPROVAL_STATUS_REJECTED,
+    approve_proposal,
     get_proposal_approval_record,
     get_proposal_approval_status,
 )
@@ -31,13 +32,14 @@ from pipeline.agent.autonomy import (
     build_candidate_actions,
     classify_proposal,
     evaluate_candidate,
+    get_agent_auto_approve_threshold,
     persist_autonomy_decision,
     persist_candidate_artifacts,
     persist_proposal_record,
     promote_candidate_spec,
     update_autonomy_metrics,
 )
-from pipeline.agent.llm_advisor import get_llm_advice
+from pipeline.agent.llm_advisor import agent_self_review_proposal, get_llm_advice
 from pipeline.config import PipelinePaths
 from pipeline.io.parquet_io import write_json
 from pipeline.orchestration.compiler import compile_pipeline_spec
@@ -680,6 +682,21 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         )
         decision = DECISION_REJECT
         decision_reason = "Candidate gates failed."
+
+        # Agent self-review: auto-approve high-confidence structural proposals
+        if (
+            gate_passed
+            and proposal["requires_approval"]
+            and approval_status != APPROVAL_STATUS_APPROVED
+        ):
+            threshold = get_agent_auto_approve_threshold(paths, str(proposal["proposal_family"]))
+            if threshold is not None:
+                review = agent_self_review_proposal(proposal, gate_results, diff, compiled_plan)
+                if review["should_approve"] and float(review["confidence"]) >= threshold:
+                    approve_proposal(paths, proposal_id, "agent")
+                    approval_status = APPROVAL_STATUS_APPROVED
+                    proposal["approval_context"] = get_proposal_approval_record(paths, proposal_id)
+
         if (
             gate_passed
             and proposal["requires_approval"]

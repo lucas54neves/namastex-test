@@ -293,6 +293,89 @@ def test_planner_persists_candidate_artifacts_and_metrics_for_auto_promoted_chan
     assert metrics["proposal_count_total"] >= 1
 
 
+def test_planner_auto_approves_structural_proposal_when_agent_self_review_confident(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path
+    _write_bronze(
+        root,
+        [
+            _base_row(
+                metadata=json.dumps(
+                    {
+                        "device": "android",
+                        "city": "Sao Paulo",
+                        "state": "SP",
+                        "response_time_sec": 10,
+                        "lead_source": "google_ads",
+                        "score_band": "alto",
+                    }
+                )
+            )
+        ],
+    )
+    paths = build_paths(root)
+
+    monkeypatch.setattr(
+        "pipeline.agent.planner.agent_self_review_proposal",
+        lambda *args, **kwargs: {"should_approve": True, "confidence": 0.95, "rationale": "ok"},
+    )
+
+    report = plan_pipeline_spec(paths)
+    proposal = next(
+        item
+        for item in report["proposals"]
+        if item["proposal_type"] == "silver_metadata_fields_addition"
+    )
+    spec_after = json.loads(paths.pipeline_spec.read_text(encoding="utf-8"))
+
+    assert proposal["status"] == "promoted"
+    assert proposal["approval_context"]["approved_by"] == "agent"
+    assert "score_band" in spec_after["silver"]["metadata_fields"]
+
+
+def test_planner_does_not_auto_approve_when_agent_self_review_confidence_below_threshold(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path
+    _write_bronze(
+        root,
+        [
+            _base_row(
+                metadata=json.dumps(
+                    {
+                        "device": "android",
+                        "city": "Sao Paulo",
+                        "state": "SP",
+                        "response_time_sec": 10,
+                        "lead_source": "google_ads",
+                        "score_band": "alto",
+                    }
+                )
+            )
+        ],
+    )
+    paths = build_paths(root)
+
+    monkeypatch.setattr(
+        "pipeline.agent.planner.agent_self_review_proposal",
+        lambda *args, **kwargs: {
+            "should_approve": True,
+            "confidence": 0.50,
+            "rationale": "uncertain",
+        },
+    )
+
+    report = plan_pipeline_spec(paths)
+    proposal = next(
+        item
+        for item in report["proposals"]
+        if item["proposal_type"] == "silver_metadata_fields_addition"
+    )
+
+    assert proposal["status"] == "awaiting_approval"
+
+
 def test_planner_holds_high_impact_change_for_approval_with_candidate_artifacts(
     tmp_path: Path,
 ) -> None:
