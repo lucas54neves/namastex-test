@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -394,13 +395,96 @@ def build_spec_diff(
     }
 
 
+def _run_targeted_tests_gate(
+    proposal: dict[str, Any],
+    compiled_plan: dict[str, Any],
+    diff: dict[str, Any],
+    baseline_spec: dict[str, Any],
+    candidate_spec: dict[str, Any],
+) -> dict[str, Any]:
+    agent_cfg = compiled_plan.get("agent", {})
+    test_paths = list(agent_cfg.get("targeted_test_paths", []))
+    timeout_sec = int(agent_cfg.get("targeted_tests_timeout_sec", 120))
+
+    # CON-102: skip for low-impact validation_enhancement — regression risk is minimal
+    mutation_family = str(proposal.get("proposal_family", ""))
+    impact_class = str(proposal.get("impact_class", ""))
+    if mutation_family == "validation_enhancement" and impact_class == "low":
+        return {
+            "passed": True,
+            "executed": False,
+            "returncode": None,
+            "reason": "low_impact_validation_enhancement_skipped",
+            "test_paths_run": [],
+        }
+
+    # REQ-105: no test paths configured → safe opt-in default
+    if not test_paths:
+        return {
+            "passed": True,
+            "executed": False,
+            "returncode": None,
+            "reason": "no_targeted_tests_configured",
+            "test_paths_run": [],
+        }
+
+    # REQ-101: only run when candidate touches required_columns or validation_rules
+    schema_diff = diff.get("schema_diff", {})
+    required_col_changed = any(
+        schema_diff.get(k, {}).get("added") or schema_diff.get(k, {}).get("removed")
+        for k in (
+            "bronze.required_columns",
+            "silver.metadata_fields",
+            "gold.required_columns",
+            "gold.valid_intent_stages",
+        )
+    )
+    validation_rules_changed = baseline_spec.get("quality", {}).get(
+        "validation_rules"
+    ) != candidate_spec.get("quality", {}).get("validation_rules")
+
+    if not required_col_changed and not validation_rules_changed:
+        return {
+            "passed": True,
+            "executed": False,
+            "returncode": None,
+            "reason": "no_relevant_changes_in_candidate",
+            "test_paths_run": [],
+        }
+
+    # REQ-102/CON-101: execute in a separate process to isolate test state
+    try:
+        proc = subprocess.run(
+            ["venv/bin/python", "-m", "pytest"] + test_paths,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+        passed = proc.returncode == 0
+        return {
+            "passed": passed,
+            "executed": True,
+            "returncode": proc.returncode,
+            "reason": "tests_passed" if passed else "tests_failed",
+            "test_paths_run": test_paths,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "passed": False,
+            "executed": True,
+            "returncode": None,
+            "reason": "timeout",
+            "test_paths_run": test_paths,
+        }
+
+
 def evaluate_candidate(
     proposal: dict[str, Any],
     baseline_spec: dict[str, Any],
     candidate_spec: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_pipeline_spec(candidate_spec)
-    compile_pipeline_spec(candidate_spec)
+    compiled_plan = compile_pipeline_spec(candidate_spec)
     diff = build_spec_diff(baseline_spec, candidate_spec)
     removed_fields: list[str] = []
     for section_diff in diff["schema_diff"].values():
@@ -412,15 +496,12 @@ def evaluate_candidate(
         requires_privacy_scan
         and str(proposal.get("privacy_impact", "none")) == "sensitive_detection"
     )
+    targeted_tests_gate = _run_targeted_tests_gate(
+        proposal, compiled_plan, diff, baseline_spec, candidate_spec
+    )
     gate_results = {
         "contract_validation": {"passed": True},
-        "targeted_tests": {
-            "passed": True,
-            "executed": False,
-            "reason": (
-                "Initial autonomy scope validates candidate contracts and diffs deterministically."
-            ),
-        },
+        "targeted_tests": targeted_tests_gate,
         "backward_compatibility": {
             "passed": not removed_fields,
             "removed_fields": removed_fields,

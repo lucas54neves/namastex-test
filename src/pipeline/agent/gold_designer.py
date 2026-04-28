@@ -590,18 +590,7 @@ def apply_gold_column_plan(
             if logic_type == "aggregation":
                 source_col = logic.get("source_col", "")
                 agg_fn = logic.get("agg_fn", "sum")
-                if source_col and source_col in result.columns:
-                    if agg_fn == "sum":
-                        result[col_def.name] = result[source_col]
-                    elif agg_fn in ("mean", "avg"):
-                        result[col_def.name] = result[source_col]
-                    elif agg_fn == "max":
-                        result[col_def.name] = result[source_col]
-                    elif agg_fn == "min":
-                        result[col_def.name] = result[source_col]
-                    else:
-                        result[col_def.name] = result[source_col]
-                else:
+                if source_col not in result.columns:
                     log_event(
                         logging.WARNING,
                         "gold_plan_missing_source_col",
@@ -609,6 +598,31 @@ def apply_gold_column_plan(
                         source_col=source_col,
                     )
                     result[col_def.name] = None
+                    continue
+                # Gold is already aggregated per lead from Silver; agg_fn documents original
+                # semantic — do not re-aggregate scalar values
+                if agg_fn in ("sum", "count", "max", "min"):
+                    result[col_def.name] = result[source_col]
+                elif agg_fn in ("mean", "avg"):
+                    count_col = source_col + "_count"
+                    if count_col in result.columns:
+                        result[col_def.name] = result[source_col] / result[count_col].replace(0, 1)
+                    else:
+                        log_event(
+                            logging.WARNING,
+                            "gold_agg_mean_no_denominator",
+                            column=col_def.name,
+                            source_col=source_col,
+                        )
+                        result[col_def.name] = result[source_col]
+                else:
+                    log_event(
+                        logging.WARNING,
+                        "gold_agg_unknown_fn",
+                        agg_fn=agg_fn,
+                        column=col_def.name,
+                    )
+                    result[col_def.name] = result[source_col]
 
             elif logic_type == "conditional_bucket":
                 conditions = logic.get("conditions", [])

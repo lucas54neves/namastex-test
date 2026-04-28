@@ -423,6 +423,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
             "applied": False,
             "actions": [],
             "resolved": False,
+            "candidate_path": None,
         }
         decisions: list[dict[str, Any]] = []
         agent_status = "healthy"
@@ -628,7 +629,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                     executed_stages.add("validation")
                     break
 
-                # Attempt auto-remediation (GAP-02: pass llm_diagnoses)
+                # Attempt auto-remediation (GAP-02: llm_diagnoses; QUAL-03: incident/paths)
                 rem = attempt_auto_remediation(
                     bronze_df=bronze_df,
                     silver_df=silver_df,
@@ -637,6 +638,8 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                     failed_checks=failed_checks,
                     compiled_plan=compiled_plan,
                     llm_diagnoses=diagnoses_list,
+                    incident_id=_incident_id(),
+                    paths=paths,
                 )
                 decisions.extend(cast(list[dict[str, Any]], rem["decisions"]))
 
@@ -654,6 +657,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                         "applied": bool(rem["actions"]),
                         "actions": rem["actions"],
                         "resolved": True,
+                        "candidate_path": rem.get("candidate_path"),
                     }
                     validation_passed = True
                     agent_status = "auto_remediated"
@@ -707,6 +711,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                     "applied": bool(rem["actions"]),
                     "actions": rem["actions"],
                     "resolved": False,
+                    "candidate_path": rem.get("candidate_path"),
                 }
 
             elif stage == "planning":

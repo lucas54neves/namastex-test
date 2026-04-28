@@ -4,11 +4,13 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict, cast
 
 import pandas as pd
 
 from pipeline.agent.playbooks import PLAYBOOKS, get_playbook, safe_auto_apply_playbooks
+from pipeline.config import PipelinePaths
 from pipeline.quality.publication import sanitize_for_publication
 from pipeline.quality.quality import (
     summarize_validation_results,
@@ -538,7 +540,19 @@ def attempt_auto_remediation(
     failed_checks: list[dict[str, Any]],
     compiled_plan: dict[str, Any],
     llm_diagnoses: list[AgentDiagnosis] | None = None,
+    incident_id: str | None = None,
+    paths: PipelinePaths | None = None,
 ) -> dict[str, Any]:
+    """
+    Reactive remediation: activated after validation failure in the ReAct loop.
+    Operates in memory; when incident_id and paths are provided, materializes an audit
+    artifact at runtime/candidates/reactive_<incident_id>/ (best-effort, non-blocking).
+    Does NOT alter pipeline_spec.json.
+
+    Contrast with the proactive cycle (autonomy.py:plan_pipeline_spec), which detects
+    drift proactively each cycle, proposes structural changes, materializes candidates
+    with full governance audit, and may alter pipeline_spec.json with approval.
+    """
     repaired_silver_runtime = silver_df
     repaired_silver_messages_runtime = silver_messages_df
     repaired_gold_runtime = gold_df
@@ -546,6 +560,7 @@ def attempt_auto_remediation(
     touched_silver = False
     touched_gold = False
     decisions: list[dict[str, Any]] = []
+    playbooks_applied: list[str] = []
     safe_playbooks = safe_auto_apply_playbooks(compiled_plan)
 
     for failed in failed_checks:
@@ -572,13 +587,19 @@ def attempt_auto_remediation(
             repaired_silver_runtime = build_silver_leads(repaired_silver_messages_runtime)
             actions.append(f"rebuild_silver_for_{check}")
             touched_silver = True
+            if playbook_id not in playbooks_applied:
+                playbooks_applied.append(playbook_id)
         if playbook_id == "quarantine_invalid_records":
             repaired_silver_messages_runtime = build_silver(bronze_df, compiled_plan=compiled_plan)
             repaired_silver_runtime = build_silver_leads(repaired_silver_messages_runtime)
             actions.append(f"rebuild_silver_after_quarantine_for_{check}")
             touched_silver = True
+            if playbook_id not in playbooks_applied:
+                playbooks_applied.append(playbook_id)
         if playbook_id == "rebuild_gold_from_silver":
             touched_gold = True
+            if playbook_id not in playbooks_applied:
+                playbooks_applied.append(playbook_id)
 
     # GAP-02: apply LLM kind → playbook mapping for diagnoses without a playbook_id
     for diag in llm_diagnoses or []:
@@ -607,14 +628,20 @@ def attempt_auto_remediation(
             repaired_silver_runtime = build_silver_leads(repaired_silver_messages_runtime)
             actions.append(action_name)
             touched_silver = True
+            if mapped_pid not in playbooks_applied:
+                playbooks_applied.append(mapped_pid)
         elif mapped_pid == "quarantine_invalid_records":
             repaired_silver_messages_runtime = build_silver(bronze_df, compiled_plan=compiled_plan)
             repaired_silver_runtime = build_silver_leads(repaired_silver_messages_runtime)
             actions.append(action_name)
             touched_silver = True
+            if mapped_pid not in playbooks_applied:
+                playbooks_applied.append(mapped_pid)
         elif mapped_pid == "rebuild_gold_from_silver":
             actions.append(action_name)
             touched_gold = True
+            if mapped_pid not in playbooks_applied:
+                playbooks_applied.append(mapped_pid)
 
     if touched_gold and not touched_silver:
         repaired_silver_messages_runtime = build_silver(bronze_df, compiled_plan=compiled_plan)
@@ -639,6 +666,31 @@ def attempt_auto_remediation(
         + validate_silver_messages(repaired_silver_messages, compiled_plan=compiled_plan)
         + validate_gold(repaired_gold, compiled_plan=compiled_plan)
     )
+
+    # REQ-301/CON-302: persist reactive audit artifact (best-effort — never blocks remediation)
+    candidate_path: str | None = None
+    if incident_id and paths is not None and playbooks_applied:
+        try:
+            audit_dir = paths.candidates / f"reactive_{incident_id}"
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            audit_report_path = audit_dir / "reactive_remediation_report.json"
+            audit_report: dict[str, Any] = {
+                "incident_id": incident_id,
+                "persisted_at_utc": datetime.now(UTC).isoformat(),
+                "mechanism": "reactive",
+                "playbooks_applied": playbooks_applied,
+                "failed_checks_input": list(failed_checks),
+                "post_remediation_validation": {
+                    "status": validation_summary["status"],
+                    "failed_checks": list(validation_summary.get("failed_checks", [])),
+                },
+                "actions": actions,
+            }
+            audit_report_path.write_text(json.dumps(audit_report, ensure_ascii=False, indent=2))
+            candidate_path = str(audit_report_path)
+        except Exception:
+            pass
+
     return {
         "silver_df": repaired_silver,
         "silver_messages_df": repaired_silver_messages,
@@ -647,4 +699,5 @@ def attempt_auto_remediation(
         "decisions": decisions,
         "validation_summary": validation_summary,
         "resolved": validation_summary["status"] == "passed",
+        "candidate_path": candidate_path,
     }

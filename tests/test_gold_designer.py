@@ -552,3 +552,216 @@ def test_apply_plan_fallback_uses_safe_eval() -> None:
     assert result.loc[result["message_count"] == 25, "tier"].iloc[0] == "high"
     assert result.loc[result["message_count"] == 8, "tier"].iloc[0] == "medium"
     assert result.loc[result["message_count"] == 2, "tier"].iloc[0] == "low"
+
+
+# --- QUAL-02: aggregation semantic correctness ---
+
+
+def test_apply_plan_agg_mean_with_denominator_computes_ratio() -> None:
+    df = pd.DataFrame(
+        {
+            "lead_key": ["lead_001", "lead_002"],
+            "total_response_time": [450, 200],
+            "total_response_time_count": [5, 2],
+        }
+    )
+    col = GoldColumnDefinition(
+        name="avg_response_time",
+        data_type="float64",
+        derivation_logic={
+            "type": "aggregation",
+            "agg_fn": "mean",
+            "source_col": "total_response_time",
+        },
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    result = apply_gold_column_plan(df, plan)
+    assert "avg_response_time" in result.columns
+    assert (
+        abs(result.loc[result["lead_key"] == "lead_001", "avg_response_time"].iloc[0] - 90.0) < 1e-6
+    )
+    assert (
+        abs(result.loc[result["lead_key"] == "lead_002", "avg_response_time"].iloc[0] - 100.0)
+        < 1e-6
+    )
+
+
+def test_apply_plan_agg_mean_without_denominator_copies_source() -> None:
+    df = pd.DataFrame({"lead_key": ["a"], "total_messages": [10]})
+    col = GoldColumnDefinition(
+        name="avg_messages",
+        data_type="float64",
+        derivation_logic={
+            "type": "aggregation",
+            "agg_fn": "mean",
+            "source_col": "total_messages",
+        },
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    result = apply_gold_column_plan(df, plan)
+    assert "avg_messages" in result.columns
+    assert result["avg_messages"].iloc[0] == 10
+
+
+def test_apply_plan_agg_mean_without_denominator_emits_warning() -> None:
+    from unittest.mock import patch
+
+    df = pd.DataFrame({"lead_key": ["a"], "total_messages": [10]})
+    col = GoldColumnDefinition(
+        name="avg_messages",
+        data_type="float64",
+        derivation_logic={
+            "type": "aggregation",
+            "agg_fn": "mean",
+            "source_col": "total_messages",
+        },
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    with patch("pipeline.agent.gold_designer.log_event") as mock_log:
+        apply_gold_column_plan(df, plan)
+    events = [call.args[1] for call in mock_log.call_args_list]
+    assert "gold_agg_mean_no_denominator" in events
+
+
+def test_apply_plan_agg_mean_zero_denominator_does_not_divide_by_zero() -> None:
+    df = pd.DataFrame(
+        {
+            "lead_key": ["a"],
+            "total_messages": [100],
+            "total_messages_count": [0],
+        }
+    )
+    col = GoldColumnDefinition(
+        name="avg_messages",
+        data_type="float64",
+        derivation_logic={
+            "type": "aggregation",
+            "agg_fn": "mean",
+            "source_col": "total_messages",
+        },
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    result = apply_gold_column_plan(df, plan)
+    # count=0 replaced with 1 → result = 100/1 = 100
+    assert result["avg_messages"].iloc[0] == 100.0
+
+
+def test_apply_plan_agg_avg_alias_uses_mean_logic() -> None:
+    df = pd.DataFrame(
+        {
+            "lead_key": ["a"],
+            "score": [30],
+            "score_count": [3],
+        }
+    )
+    col = GoldColumnDefinition(
+        name="avg_score",
+        data_type="float64",
+        derivation_logic={"type": "aggregation", "agg_fn": "avg", "source_col": "score"},
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    result = apply_gold_column_plan(df, plan)
+    assert abs(result["avg_score"].iloc[0] - 10.0) < 1e-6
+
+
+def test_apply_plan_agg_unknown_fn_copies_source_and_warns() -> None:
+    from unittest.mock import patch
+
+    df = pd.DataFrame({"lead_key": ["a"], "score": [42]})
+    col = GoldColumnDefinition(
+        name="result_col",
+        data_type="float64",
+        derivation_logic={"type": "aggregation", "agg_fn": "stddev", "source_col": "score"},
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    with patch("pipeline.agent.gold_designer.log_event") as mock_log:
+        result = apply_gold_column_plan(df, plan)
+    assert result["result_col"].iloc[0] == 42
+    events = [call.args[1] for call in mock_log.call_args_list]
+    assert "gold_agg_unknown_fn" in events
+
+
+def test_apply_plan_agg_missing_source_col_produces_null_and_warns() -> None:
+    from unittest.mock import patch
+
+    df = pd.DataFrame({"lead_key": ["a"]})
+    col = GoldColumnDefinition(
+        name="phantom",
+        data_type="float64",
+        derivation_logic={"type": "aggregation", "agg_fn": "mean", "source_col": "nonexistent"},
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    with patch("pipeline.agent.gold_designer.log_event") as mock_log:
+        result = apply_gold_column_plan(df, plan)
+    assert result["phantom"].isna().all()
+    events = [call.args[1] for call in mock_log.call_args_list]
+    assert "gold_plan_missing_source_col" in events
+
+
+def test_apply_plan_agg_sum_count_max_min_copy_source_unchanged() -> None:
+    df = pd.DataFrame({"lead_key": ["a", "b"], "metric": [10, 20]})
+    for agg_fn in ("sum", "count", "max", "min"):
+        col = GoldColumnDefinition(
+            name=f"result_{agg_fn}",
+            data_type="int64",
+            derivation_logic={"type": "aggregation", "agg_fn": agg_fn, "source_col": "metric"},
+            rationale="test",
+            segment_values=None,
+        )
+        plan = GoldColumnPlan(
+            columns=[col],
+            source="llm",
+            generated_at_utc="2026-04-27T00:00:00+00:00",
+            llm_rationale=None,
+        )
+        result = apply_gold_column_plan(df.copy(), plan)
+        assert list(result[f"result_{agg_fn}"]) == [10, 20], f"Failed for agg_fn={agg_fn}"
