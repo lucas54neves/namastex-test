@@ -240,6 +240,59 @@ venv/bin/python scripts/plan_pipeline.py
 - Métricas do ciclo autônomo ficam em `reports/monitoring/agent_autonomy_metrics.json`.
 - Mudanças `high impact` nunca são auto-promovidas; ficam em `awaiting_approval` até registro em `state/approval_state.json`.
 
+### Canal de webhook para alertas
+
+O agente emite alertas quando detecta falhas de validação, status não remediáveis ou intervenção manual necessária. Por padrão esses alertas são persistidos localmente em `reports/alerts/`. Quando `PIPELINE_ALERT_WEBHOOK_URL` está configurado, o agente entrega o alerta via HTTP POST para qualquer endpoint que aceite JSON — Slack, Discord, Microsoft Teams, PagerDuty, n8n ou endpoint próprio.
+
+**Ativação:** basta definir `PIPELINE_ALERT_WEBHOOK_URL`. Sem a variável, o comportamento local é preservado sem nenhuma alteração.
+
+```bash
+PIPELINE_ALERT_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/xxx \
+PIPELINE_ALERT_WEBHOOK_TOKEN=meu-token \
+venv/bin/python scripts/run_pipeline.py --force
+```
+
+**Payload entregue:**
+
+```json
+{
+  "source": "namastex-pipeline-agent",
+  "incident_id": "incident_20260428T143022_manual_intervention_required",
+  "severity": "critical",
+  "status": "manual_intervention_required",
+  "summary": "Run validation_failed with agent status manual_intervention_required.",
+  "pipeline_status": "failed",
+  "failed_checks": ["silver.masked_text_fields_not_leaking"],
+  "auto_remediation_applied": false,
+  "timestamp_utc": "2026-04-28T14:30:22+00:00",
+  "details_url": null
+}
+```
+
+**Variáveis de configuração:**
+
+| Variável | Default | Descrição |
+| --- | --- | --- |
+| `PIPELINE_ALERT_WEBHOOK_URL` | vazio | URL HTTPS do endpoint receptor. Vazio = desabilitado |
+| `PIPELINE_ALERT_WEBHOOK_TOKEN` | vazio | Bearer token — enviado no header `Authorization`, nunca logado |
+| `PIPELINE_ALERT_WEBHOOK_TIMEOUT_SECONDS` | `5` | Timeout por tentativa em segundos (1–30) |
+| `PIPELINE_ALERT_WEBHOOK_MAX_RETRIES` | `2` | Máximo de tentativas antes de desistir (1–5) |
+| `PIPELINE_ALERT_MIN_SEVERITY` | `medium` | Severidade mínima para entrega: `low`, `medium`, `high`, `critical` |
+| `PIPELINE_ALERT_DETAILS_URL` | vazio | URL de detalhes incluída no payload como `details_url` |
+
+**Comportamento:**
+
+- A entrega é **non-blocking**: falha no webhook nunca interrompe o ciclo do pipeline.
+- Respostas `2xx` são consideradas entrega bem-sucedida; outros códigos disparam retry com intervalo fixo de 1s.
+- URLs `http://` são rejeitadas em produção; `http://localhost` é permitido em testes.
+- O resultado de cada entrega (`delivered` / `failed` / `skipped`) fica registrado no campo `delivery` de `reports/monitoring/latest_alert_report.json`.
+
+**Exemplos de integração:**
+
+- **Slack**: configure um Incoming Webhook no workspace e use a URL gerada diretamente em `PIPELINE_ALERT_WEBHOOK_URL`.
+- **PagerDuty**: configure um adaptador externo (n8n, Zapier ou função serverless) que receba o payload e chame a PagerDuty Events API v2.
+- **Microsoft Teams**: configure um Incoming Webhook no canal desejado e use a URL diretamente.
+
 ### Execução com Docker Compose
 
 Há suporte opcional a `docker-compose.yml` para subir o pipeline em modo contínuo junto com uma stack local de Langfuse.
