@@ -49,6 +49,7 @@ flowchart TD
     E --> I
     H --> I
     I --> J[data/gold/conversations_gold.parquet]
+    J --> J2[data/gold/conversations_gold_macro.parquet]
 
     K[config/pipeline_spec.json] --> D
     K --> G
@@ -112,7 +113,12 @@ Principais responsabilidades:
 
 ### Gold
 
-Publica `data/gold/conversations_gold.parquet` com uma visão analítica por lead. Entre os atributos calculados estão:
+Publica dois artefatos:
+
+- `data/gold/conversations_gold.parquet`: visão analítica por `lead_key`.
+- `data/gold/conversations_gold_macro.parquet`: visão agregada de toda a base em distribuições e rankings por dimensão categórica.
+
+Entre os atributos calculados em `conversations_gold.parquet` estão:
 
 - volume e distribuição de mensagens
 - bucket de engajamento
@@ -126,6 +132,8 @@ Publica `data/gold/conversations_gold.parquet` com uma visão analítica por lea
 - dominant email provider
 - closure outcome group
 - conversation sentiment
+
+O artefato `conversations_gold_macro.parquet` agrega toda a base pelas 11 dimensões categóricas (persona, audiência, temperatura, bucket, sentimento, closure, competitor pressure, price objection, urgência, intent stage e email provider) mais um bloco de métricas numéricas (`numeric_snapshot`). Cada linha representa um par `(dimension, dimension_value)` com contagens, proporções e ranking dentro da dimensão.
 
 ## Como rodar o projeto
 
@@ -172,6 +180,7 @@ Saídas principais após a execução:
 - `data/silver/silver_messages.parquet`
 - `data/silver/silver_conversations_llm.parquet`
 - `data/gold/conversations_gold.parquet`
+- `data/gold/conversations_gold_macro.parquet`
 - `reports/monitoring/latest_run_report.json`
 - `reports/monitoring/latest_plan_report.json`
 - `reports/monitoring/agent_autonomy_metrics.json`
@@ -348,6 +357,7 @@ Ao final da run, os seguintes artefatos devem existir no volume de output:
 - `data/silver/silver_messages.parquet`
 - `data/silver/silver_conversations_llm.parquet`
 - `data/gold/conversations_gold.parquet`
+- `data/gold/conversations_gold_macro.parquet`
 - `reports/monitoring/latest_run_report.json`
 - `reports/monitoring/latest_plan_report.json`
 - `reports/monitoring/agent_autonomy_metrics.json`
@@ -629,17 +639,10 @@ Essa divisão melhora manutenção, testes e legibilidade da entrega.
 - O modo com provider externo depende de credenciais, rede e disponibilidade do serviço.
 - O planner autônomo ainda restringe a promoção ao conjunto inicial de famílias suportadas e validadas deterministicamente.
 - O projeto foi otimizado para o dataset e o escopo do teste, não como plataforma multi-tenant completa.
-- A camada Gold produz apenas visão por lead; visão macro agregada da base está especificada mas não implementada (`spec-architecture-gold-macro-view.md`).
+- A camada Gold produz visão por lead (`conversations_gold.parquet`) e visão macro agregada (`conversations_gold_macro.parquet`).
 - Alertas do agente são relatórios JSON locais; canal externo via webhook está especificado mas não implementado (`spec-architecture-agent-webhook-alert-channel.md`).
 - Módulos `silver.py` e `operator.py` possuem alta complexidade ciclomática; decomposição está especificada mas não implementada (`spec-architecture-module-cyclomatic-decomposition.md`).
 
-## Especificações pendentes de implementação
-
-| Spec | Lacuna endereçada |
-| --- | --- |
-| [`spec-architecture-gold-macro-view.md`](spec/spec-architecture-gold-macro-view.md) | Visão macro agregada da base na camada Gold |
-| [`spec-architecture-agent-webhook-alert-channel.md`](spec/spec-architecture-agent-webhook-alert-channel.md) | Canal real de notificação externa para alertas do agente |
-| [`spec-architecture-module-cyclomatic-decomposition.md`](spec/spec-architecture-module-cyclomatic-decomposition.md) | Decomposição de `silver.py` e `operator.py` em submódulos coesos |
 
 ## Referências
 

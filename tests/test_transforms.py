@@ -9,6 +9,7 @@ from pipeline.transforms.conversation_enrichment import (
     consolidate_gold_semantics,
 )
 from pipeline.transforms.gold import build_gold
+from pipeline.transforms.gold_macro import build_gold_macro
 from pipeline.transforms.silver import (
     add_conversation_context,
     add_gold_segments,
@@ -1122,3 +1123,165 @@ def test_build_gold_keeps_commercial_severity_deterministic_when_llm_disagrees()
     assert gold.iloc[0]["price_objection_intensity"] == "nenhuma"
     assert gold.iloc[0]["commercial_urgency_signal"] == "nenhuma"
     assert gold.iloc[0]["competitor_pressure_level"] == "nenhuma"
+
+
+def _make_gold_df(n: int = 4) -> pd.DataFrame:
+    rows = []
+    personas = ["lead_frio", "cotador_comparador", "lead_frio", "cliente_pos_sinistro"]
+    audiences = [
+        "nutricao_basica",
+        "oferta_competitiva",
+        "nutricao_basica",
+        "retencao_pos_sinistro",
+    ]
+    temperatures = ["frio", "morno", "frio", "quente"]
+    buckets = ["lead_frio", "curta", "lead_frio", "longa"]
+    sentiments = ["sem_evidencia", "neutro", "positivo", "sem_evidencia"]
+    closures = ["aberto", "fechado", "aberto", "aberto"]
+    competitors = ["nenhuma", "leve", "nenhuma", "nenhuma"]
+    prices = ["nenhuma", "forte", "nenhuma", "nenhuma"]
+    urgencies = ["nenhuma", "moderada", "nenhuma", "nenhuma"]
+    intents = ["descoberta_inicial", "pesquisa_mercado", "descoberta_inicial", "pos_sinistro"]
+    email_providers = ["gmail", None, None, "outlook"]
+    contains_email = [True, False, False, True]
+    for i in range(n):
+        rows.append(
+            {
+                "lead_key": f"lead_{i}",
+                "persona_profile": personas[i],
+                "audience_segment": audiences[i],
+                "lead_temperature": temperatures[i],
+                "engagement_bucket": buckets[i],
+                "conversation_sentiment_label": sentiments[i],
+                "closure_outcome_group": closures[i],
+                "competitor_pressure_level": competitors[i],
+                "price_objection_intensity": prices[i],
+                "commercial_urgency_signal": urgencies[i],
+                "intent_stage": intents[i],
+                "dominant_email_provider": email_providers[i],
+                "contains_email": contains_email[i],
+                "total_messages": 2 + i,
+                "conversation_count": 1,
+                "data_shared_score": i,
+                "mentioned_competitor": i == 1,
+                "mentioned_sinistro": i == 3,
+                "has_closed_outcome": i == 1,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+class TestBuildGoldMacro:
+    def test_contains_all_required_dimensions(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        expected_dimensions = {
+            "persona_profile",
+            "audience_segment",
+            "dominant_email_provider",
+            "lead_temperature",
+            "engagement_bucket",
+            "conversation_sentiment_label",
+            "closure_outcome_group",
+            "competitor_pressure_level",
+            "price_objection_intensity",
+            "commercial_urgency_signal",
+            "intent_stage",
+            "numeric_snapshot",
+        }
+        present = set(macro["dimension"].unique())
+        assert expected_dimensions.issubset(present)
+
+    def test_rank_1_has_highest_lead_count_per_dimension(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        for dimension in macro["dimension"].unique():
+            if dimension == "numeric_snapshot":
+                continue
+            dim_rows = macro[macro["dimension"] == dimension].sort_values("rank")
+            top = dim_rows.iloc[0]
+            rest = dim_rows.iloc[1:]
+            assert all(top["lead_count"] >= r["lead_count"] for _, r in rest.iterrows())
+
+    def test_lead_count_sum_equals_total_leads(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+        total = len(gold_df)
+
+        for dimension in macro["dimension"].unique():
+            if dimension in ("numeric_snapshot", "dominant_email_provider"):
+                continue
+            dim_sum = macro[macro["dimension"] == dimension]["lead_count"].sum()
+            assert dim_sum == total
+
+    def test_lead_pct_sums_approximately_to_one(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        # dominant_email_provider is filtered by contains_email, so its pct sums to the email share
+        skip = {"numeric_snapshot", "dominant_email_provider"}
+        for dimension in macro["dimension"].unique():
+            if dimension in skip:
+                continue
+            pct_sum = macro[macro["dimension"] == dimension]["lead_pct"].sum()
+            assert 0.99 <= pct_sum <= 1.01
+
+    def test_null_dimension_value_becomes_sem_informacao(self) -> None:
+        gold_df = _make_gold_df().copy()
+        gold_df.loc[0, "intent_stage"] = None
+        macro = build_gold_macro(gold_df)
+
+        intent_values = set(macro[macro["dimension"] == "intent_stage"]["dimension_value"])
+        assert "sem_informacao" in intent_values
+        assert macro[macro["dimension"] == "intent_stage"]["dimension_value"].isna().sum() == 0
+
+    def test_no_pii_identifier_columns(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        forbidden_substrings = ("lead_key", "contact_ref", "name_masked")
+        for col in macro.columns:
+            assert not any(sub in col for sub in forbidden_substrings)
+
+    def test_numeric_snapshot_total_leads_correct(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        snap = macro[macro["dimension"] == "numeric_snapshot"]
+        total_row = snap[snap["dimension_value"] == "total_leads"]
+        assert len(total_row) == 1
+        assert float(total_row.iloc[0]["metric_value"]) == float(len(gold_df))
+
+    def test_dominant_email_provider_filtered_by_contains_email(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        email_rows = macro[macro["dimension"] == "dominant_email_provider"]
+        email_leads = gold_df[gold_df["contains_email"].astype(bool)]
+        assert email_rows["lead_count"].sum() == len(email_leads)
+
+    def test_required_columns_present(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        required = {
+            "dimension",
+            "dimension_value",
+            "lead_count",
+            "lead_pct",
+            "rank",
+            "computed_at_utc",
+        }
+        assert required.issubset(set(macro.columns))
+
+    def test_sorted_by_dimension_and_rank(self) -> None:
+        gold_df = _make_gold_df()
+        macro = build_gold_macro(gold_df)
+
+        categorical_rows = macro[macro["dimension"] != "numeric_snapshot"]
+        assert list(categorical_rows["dimension"]) == sorted(categorical_rows["dimension"].tolist())
+        for dimension in categorical_rows["dimension"].unique():
+            ranks = macro[macro["dimension"] == dimension]["rank"].tolist()
+            assert ranks == sorted(ranks)

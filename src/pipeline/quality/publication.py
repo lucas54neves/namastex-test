@@ -30,6 +30,22 @@ GOLD_FORBIDDEN_COLUMNS = frozenset(
         "lead_name_raw",
     }
 )
+GOLD_MACRO_FORBIDDEN_COLUMNS = frozenset(
+    {
+        "sender_name",
+        "sender_phone",
+        "message_body",
+        "conversation_lead_name",
+        "conversation_lead_phone",
+        "conversation_agent_name",
+        "sender_name_normalized",
+        "lead_phone_raw",
+        "lead_name_raw",
+        "lead_key",
+        "lead_contact_ref",
+        "canonical_lead_name_masked",
+    }
+)
 SILVER_REQUIRED_SAFE_COLUMNS = frozenset(
     {
         "sender_name_masked",
@@ -50,6 +66,8 @@ def forbidden_columns_for_layer(layer: str) -> frozenset[str]:
         return frozenset()
     if layer == "gold":
         return GOLD_FORBIDDEN_COLUMNS
+    if layer == "gold_macro":
+        return GOLD_MACRO_FORBIDDEN_COLUMNS
     raise ValueError(f"Unsupported publication layer: {layer}")
 
 
@@ -66,6 +84,8 @@ def required_safe_columns_for_layer(layer: str) -> frozenset[str]:
     if layer == "silver_conversations_llm":
         return frozenset()
     if layer == "gold":
+        return frozenset()
+    if layer == "gold_macro":
         return frozenset()
     raise ValueError(f"Unsupported publication layer: {layer}")
 

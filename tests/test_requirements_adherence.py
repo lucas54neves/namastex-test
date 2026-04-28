@@ -187,6 +187,32 @@ def test_adherence_pipeline_persists_operational_state(tmp_path: Path) -> None:
     assert state["runs"][-1]["executed"] is True
 
 
+def test_adherence_gold_macro_artifact_exists_after_run(tmp_path: Path) -> None:
+    _write_bronze(tmp_path, _bronze_rows())
+
+    paths = build_paths(tmp_path)
+    result = run_pipeline(paths, force=True)
+
+    assert result.status == "success"
+    assert Path(result.gold_macro_path).exists()
+    macro_df = pd.read_parquet(result.gold_macro_path)
+    required_columns = {
+        "dimension",
+        "dimension_value",
+        "lead_count",
+        "lead_pct",
+        "rank",
+        "computed_at_utc",
+    }
+    assert required_columns.issubset(set(macro_df.columns))
+    assert "numeric_snapshot" in macro_df["dimension"].unique()
+    assert (
+        macro_df[macro_df["dimension"] == "numeric_snapshot"]["dimension_value"]
+        .str.contains("total_leads")
+        .any()
+    )
+
+
 def test_adherence_simulated_failure_generates_alert_and_diagnosis(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -311,6 +311,32 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             },
         },
     },
+    "gold_macro": {
+        "required_columns": [
+            "dimension",
+            "dimension_value",
+            "lead_count",
+            "lead_pct",
+            "rank",
+            "computed_at_utc",
+        ],
+        "forbidden_raw_columns": [],
+        "dimensions": [
+            "persona_profile",
+            "audience_segment",
+            "dominant_email_provider",
+            "lead_temperature",
+            "engagement_bucket",
+            "conversation_sentiment_label",
+            "closure_outcome_group",
+            "competitor_pressure_level",
+            "price_objection_intensity",
+            "commercial_urgency_signal",
+            "intent_stage",
+            "numeric_snapshot",
+        ],
+        "numeric_snapshot_metric_value_representation": "lead_count_zero_with_metric_value_column",
+    },
     "quality": {
         "bronze_checks": [
             "required_columns",

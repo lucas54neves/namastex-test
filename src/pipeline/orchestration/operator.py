@@ -32,6 +32,7 @@ from pipeline.quality.quality import (
     validate_bronze,
     validate_cross_layer_consistency,
     validate_gold,
+    validate_gold_macro,
     validate_silver,
     validate_silver_conversations_llm,
     validate_silver_messages,
@@ -48,6 +49,7 @@ from pipeline.runtime.terminal_logging import log_event
 from pipeline.transforms.bronze import load_bronze_frame
 from pipeline.transforms.conversation_enrichment import build_conversation_enrichment
 from pipeline.transforms.gold import build_gold
+from pipeline.transforms.gold_macro import build_gold_macro
 from pipeline.transforms.silver import build_silver, build_silver_leads
 
 _MAX_REACT_ITERATIONS = 15  # 5 stages × up to 3 iterations each
@@ -60,6 +62,7 @@ class PipelineArtifacts:
     silver_messages_path: str
     silver_conversations_llm_path: str
     gold_path: str
+    gold_macro_path: str
     state_path: str
     validation_report_path: str
     agent_report_path: str
@@ -138,6 +141,7 @@ def _skip_artifacts(paths: PipelinePaths) -> PipelineArtifacts:
         silver_messages_path=str(paths.silver / "silver_messages.parquet"),
         silver_conversations_llm_path=str(paths.silver / "silver_conversations_llm.parquet"),
         gold_path=str(paths.gold / "conversations_gold.parquet"),
+        gold_macro_path=str(paths.gold / "conversations_gold_macro.parquet"),
         state_path=str(state_file(paths)),
         validation_report_path=str(validation_report_file(paths)),
         agent_report_path=str(agent_report_file(paths)),
@@ -206,6 +210,7 @@ def _success_artifacts(paths: PipelinePaths, status: str) -> PipelineArtifacts:
         silver_messages_path=str(paths.silver / "silver_messages.parquet"),
         silver_conversations_llm_path=str(paths.silver / "silver_conversations_llm.parquet"),
         gold_path=str(paths.gold / "conversations_gold.parquet"),
+        gold_macro_path=str(paths.gold / "conversations_gold_macro.parquet"),
         state_path=str(state_file(paths)),
         validation_report_path=str(validation_report_file(paths)),
         agent_report_path=str(agent_report_file(paths)),
@@ -272,6 +277,7 @@ def _run_validation_suite(
     silver_messages_df: Any,
     silver_conversations_llm_df: Any,
     gold_df: Any,
+    gold_macro_df: Any,
     compiled_plan: dict[str, Any],
 ) -> list[ValidationResult]:
     return (
@@ -289,6 +295,7 @@ def _run_validation_suite(
             gold_df,
             compiled_plan=compiled_plan,
         )
+        + validate_gold_macro(gold_macro_df, compiled_plan=compiled_plan)
     )
 
 
@@ -407,6 +414,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
         silver_conversations_llm_runtime_df: Any = None
         gold_df: Any = None
         gold_runtime_df: Any = None
+        gold_macro_df: Any = None
         gold_column_plan: Any = None
         quarantine: dict[str, Any] = {"clean_df": None, "report": {"quarantined_rows": 0}}
         quarantine_report: dict[str, Any] = {"quarantined_rows": 0}
@@ -566,6 +574,15 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                 current_stage = "gold_persist"
                 write_parquet(gold_df, gold_path)
                 log_event(logging.INFO, "gold_completed", gold_rows=int(len(gold_df)))
+                current_stage = "gold_macro_build"
+                gold_macro_df = build_gold_macro(gold_df)
+                gold_macro_path_file = paths.gold / "conversations_gold_macro.parquet"
+                write_parquet(gold_macro_df, gold_macro_path_file)
+                log_event(
+                    logging.INFO,
+                    "gold_macro_completed",
+                    gold_macro_rows=int(len(gold_macro_df)),
+                )
                 executed_stages.add("gold")
                 executed_stages.discard("validation")
 
@@ -577,6 +594,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                     silver_messages_df,
                     silver_conversations_llm_df,
                     gold_df,
+                    gold_macro_df,
                     compiled_plan,
                 )
                 validation_summary = summarize_validation_results(validation_results)
@@ -587,6 +605,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                     "silver_messages": int(len(silver_messages_df)),
                     "silver_conversations_llm": int(len(silver_conversations_llm_df)),
                     "gold": int(len(gold_df)),
+                    "gold_macro": int(len(gold_macro_df)) if gold_macro_df is not None else 0,
                 }
                 validation_summary["source_fingerprint"] = current_fingerprint
                 validation_summary["pipeline_spec_path"] = str(paths.pipeline_spec)
@@ -804,6 +823,7 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
                 "silver_messages_path": str(silver_messages_path),
                 "silver_conversations_llm_path": str(silver_conversations_llm_path),
                 "gold_path": str(gold_path),
+                "gold_macro_path": str(paths.gold / "conversations_gold_macro.parquet"),
                 "validation_report_path": str(report_path),
                 "agent_report_path": str(agent_report_path),
                 "alert_report_path": str(alert_report_path),

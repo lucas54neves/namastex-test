@@ -47,6 +47,38 @@ def compile_pipeline_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "gold_valid_semantic_source_families": set(spec["gold"]["valid_semantic_source_families"]),
         "gold_semantic_contracts": dict(spec["gold"]["semantic_contracts"]),
         "gold_segmentation": dict(spec["gold"]["segmentation"]),
+        "gold_macro_required_columns": list(
+            spec.get("gold_macro", {}).get(
+                "required_columns",
+                [
+                    "dimension",
+                    "dimension_value",
+                    "lead_count",
+                    "lead_pct",
+                    "rank",
+                    "computed_at_utc",
+                ],
+            )
+        ),
+        "gold_macro_dimensions": list(
+            spec.get("gold_macro", {}).get(
+                "dimensions",
+                [
+                    "persona_profile",
+                    "audience_segment",
+                    "dominant_email_provider",
+                    "lead_temperature",
+                    "engagement_bucket",
+                    "conversation_sentiment_label",
+                    "closure_outcome_group",
+                    "competitor_pressure_level",
+                    "price_objection_intensity",
+                    "commercial_urgency_signal",
+                    "intent_stage",
+                    "numeric_snapshot",
+                ],
+            )
+        ),
         "quality": dict(spec["quality"]),
         "quality_validation_rules": dict(spec["quality"].get("validation_rules", {})),
         "agent": dict(spec["agent"]),

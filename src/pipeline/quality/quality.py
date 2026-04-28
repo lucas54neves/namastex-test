@@ -1402,6 +1402,113 @@ def validate_gold(
     return results
 
 
+_GOLD_MACRO_REQUIRED_DIMENSIONS = frozenset(
+    {
+        "persona_profile",
+        "audience_segment",
+        "dominant_email_provider",
+        "lead_temperature",
+        "engagement_bucket",
+        "conversation_sentiment_label",
+        "closure_outcome_group",
+        "competitor_pressure_level",
+        "price_objection_intensity",
+        "commercial_urgency_signal",
+        "intent_stage",
+        "numeric_snapshot",
+    }
+)
+_GOLD_MACRO_FORBIDDEN_ID_SUBSTRINGS = ("lead_key", "contact_ref", "name_masked")
+
+
+def validate_gold_macro(
+    df: pd.DataFrame,
+    compiled_plan: dict[str, object] | None = None,
+) -> list[ValidationResult]:
+    plan = compiled_plan or get_default_compiled_plan()
+    required_columns = cast(
+        list[str],
+        plan.get(
+            "gold_macro_required_columns",
+            ["dimension", "dimension_value", "lead_count", "lead_pct", "rank", "computed_at_utc"],
+        ),
+    )
+
+    results: list[ValidationResult] = []
+
+    missing = sorted(set(required_columns) - set(df.columns))
+    results.append(_result("gold_macro", "required_columns", not missing, missing=missing))
+
+    if missing:
+        return results
+
+    dup_count = int(df.duplicated(subset=["dimension", "dimension_value"]).sum())
+    results.append(
+        _result(
+            "gold_macro",
+            "no_duplicate_dimension_pairs",
+            dup_count == 0,
+            duplicate_rows=dup_count,
+        )
+    )
+
+    pct_out = int(((df["lead_pct"] < 0.0) | (df["lead_pct"] > 1.0)).sum())
+    results.append(
+        _result("gold_macro", "lead_pct_in_bounds", pct_out == 0, out_of_range_rows=pct_out)
+    )
+
+    count_neg = int((df["lead_count"] < 0).sum())
+    results.append(
+        _result("gold_macro", "lead_count_non_negative", count_neg == 0, negative_rows=count_neg)
+    )
+
+    rank_invalid = int((df["rank"] < 1).sum())
+    results.append(
+        _result("gold_macro", "rank_positive", rank_invalid == 0, invalid_rows=rank_invalid)
+    )
+
+    null_dim = int(df["dimension"].isna().sum())
+    null_val = int(df["dimension_value"].isna().sum())
+    results.append(
+        _result(
+            "gold_macro",
+            "no_nulls_in_dimension",
+            null_dim == 0 and null_val == 0,
+            null_dimension=null_dim,
+            null_dimension_value=null_val,
+        )
+    )
+
+    forbidden_id_cols = [
+        col for col in df.columns if any(sub in col for sub in _GOLD_MACRO_FORBIDDEN_ID_SUBSTRINGS)
+    ]
+    results.append(
+        _result(
+            "gold_macro",
+            "no_pii_identifier_columns",
+            not forbidden_id_cols,
+            forbidden_columns=forbidden_id_cols,
+        )
+    )
+
+    required_dimensions = cast(
+        list[str],
+        plan.get("gold_macro_dimensions", list(_GOLD_MACRO_REQUIRED_DIMENSIONS)),
+    )
+    present_dimensions = set(df["dimension"].dropna().unique())
+    missing_dimensions = sorted(set(required_dimensions) - present_dimensions)
+    results.append(
+        _result(
+            "gold_macro",
+            "all_required_dimensions_present",
+            not missing_dimensions,
+            missing_dimensions=missing_dimensions,
+        )
+    )
+
+    return results
+
+
 def summarize_validation_results(results: list[ValidationResult]) -> dict[str, Any]:
     failures = [result.as_dict() for result in results if result.status == "failed"]
     return {

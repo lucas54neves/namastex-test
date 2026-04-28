@@ -149,13 +149,13 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     gold_df = pd.read_parquet(result.gold_path)
     assert result.status == "success"
     assert report["status"] == "passed"
-    assert report["row_counts"] == {
-        "bronze": 2,
-        "silver": 1,
-        "silver_messages": 2,
-        "silver_conversations_llm": 1,
-        "gold": 1,
-    }
+    assert report["row_counts"]["bronze"] == 2
+    assert report["row_counts"]["silver"] == 1
+    assert report["row_counts"]["silver_messages"] == 2
+    assert report["row_counts"]["silver_conversations_llm"] == 1
+    assert report["row_counts"]["gold"] == 1
+    assert "gold_macro" in report["row_counts"]
+    assert report["row_counts"]["gold_macro"] > 0
     assert report["pipeline_spec_path"].endswith("pipeline_spec.json")
     assert "planner_report" in agent_report
     assert agent_report["planner_report"]["report_path"].endswith("latest_plan_report.json")
