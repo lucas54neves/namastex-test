@@ -26,6 +26,8 @@ Specification files, design drafts, or planning documents must be created only i
 
 Do not create specs in `docs/superpowers/specs/` or other directories unless explicitly requested by the user.
 
+All specification files must be written in English, including titles, section content, requirements, acceptance criteria, and examples.
+
 ## Minimum required updates
 
 When a relevant change occurs, review and adjust:

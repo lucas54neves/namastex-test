@@ -21,6 +21,14 @@ from pipeline.runtime.terminal_logging import (  # noqa: E402
 )
 
 DEFAULT_POLL_INTERVAL_SECONDS = 60
+DEFAULT_MAX_BACKOFF_SECONDS = 300
+
+
+def _positive_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return ivalue
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,12 +52,19 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Stop after N cycles. Use 0 to keep running indefinitely.",
     )
+    parser.add_argument(
+        "--max-backoff-seconds",
+        type=_positive_int,
+        default=int(os.getenv("PIPELINE_MAX_BACKOFF_SECONDS", DEFAULT_MAX_BACKOFF_SECONDS)),
+        help="Maximum backoff time between retries after failure (seconds).",
+    )
     return parser.parse_args()
 
 
 def run_daemon(args: argparse.Namespace) -> None:
     configure_terminal_logging()
     cycle = 0
+    attempt = 0
     try:
         while True:
             cycle += 1
@@ -61,10 +76,34 @@ def run_daemon(args: argparse.Namespace) -> None:
                 force=force,
                 poll_interval_seconds=args.poll_interval_seconds,
             )
-            artifacts = run_pipeline(build_paths(ROOT), force=force)
-            output = {"cycle": cycle, "poll_interval_seconds": args.poll_interval_seconds}
-            output.update(artifacts_as_dict(artifacts))
-            print(json.dumps(output, indent=2, ensure_ascii=False), flush=True)
+            try:
+                artifacts = run_pipeline(build_paths(ROOT), force=force)
+                attempt = 0
+                output = {"cycle": cycle, "poll_interval_seconds": args.poll_interval_seconds}
+                output.update(artifacts_as_dict(artifacts))
+                print(json.dumps(output, indent=2, ensure_ascii=False), flush=True)
+            except Exception as exc:
+                backoff = min(2**attempt, args.max_backoff_seconds)
+                log_event(
+                    logging.ERROR,
+                    "daemon_cycle_failed",
+                    cycle=cycle,
+                    attempt=attempt,
+                    backoff_seconds=backoff,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                attempt += 1
+                if args.max_cycles and cycle >= args.max_cycles:
+                    log_event(
+                        logging.INFO, "daemon_stopped", cycle=cycle, reason="max_cycles_reached"
+                    )
+                    break
+                log_event(
+                    logging.WARNING, "daemon_backoff", backoff_seconds=backoff, attempt=attempt
+                )
+                time.sleep(backoff)
+                continue
 
             if args.max_cycles and cycle >= args.max_cycles:
                 log_event(logging.INFO, "daemon_stopped", cycle=cycle, reason="max_cycles_reached")
