@@ -28,6 +28,44 @@ from pipeline.transforms.gold import build_gold
 from pipeline.transforms.gold_macro import build_gold_macro
 from pipeline.transforms.silver import build_silver, build_silver_leads
 
+__all__ = [
+    "_get_llm_call",
+    "_determine_retry_stage",
+    "_run_validation_suite",
+    "_run_bronze_stage",
+    "_run_silver_stage",
+    "_run_gold_stage",
+    "_run_validation_stage",
+]
+
+
+def _get_llm_call() -> Any:
+    from pipeline.runtime.env import env_flag
+
+    if not env_flag("PIPELINE_ENABLE_LLM_AGENT", True):
+        return None
+    try:
+        from pipeline.runtime.llm_runtime import call_llm
+
+        return call_llm
+    except Exception:
+        return None
+
+
+def _determine_retry_stage(
+    failed_checks: list[dict[str, Any]],
+    stage_failure_counts: dict[str, int],
+) -> str | None:
+    stage_order = ["bronze", "silver", "gold"]
+    for stage in stage_order:
+        for check in failed_checks:
+            layer = str(check.get("layer", ""))
+            if layer.startswith(stage) or layer == stage:
+                count = stage_failure_counts.get(stage, 0)
+                if count < 2:
+                    return stage
+    return None
+
 
 def _run_bronze_stage(
     paths: PipelinePaths,

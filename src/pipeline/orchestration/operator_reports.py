@@ -9,6 +9,21 @@ from pipeline.config import PipelinePaths
 from pipeline.io.parquet_io import write_json
 from pipeline.orchestration.operator_artifacts import plan_report_file
 
+__all__ = [
+    "_incident_id",
+    "_utc_now_iso",
+    "_planner_report_summary",
+    "_run_record",
+    "_build_agent_report",
+    "_build_alert_report",
+    "_write_reports",
+    "_extract_llm_diagnoses",
+]
+
+
+def _incident_id() -> str:
+    return f"incident_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
+
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()

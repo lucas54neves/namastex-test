@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from typing import Any, cast
 
 from pipeline.agent.agent import (
@@ -41,28 +40,25 @@ from pipeline.orchestration.operator_reports import (  # noqa: F401
     _build_agent_report,
     _build_alert_report,
     _extract_llm_diagnoses,
+    _incident_id,
     _planner_report_summary,
     _run_record,
     _utc_now_iso,
     _write_reports,
 )
 from pipeline.orchestration.operator_stages import (  # noqa: F401
+    _determine_retry_stage,
+    _get_llm_call,
     _run_bronze_stage,
     _run_gold_stage,
     _run_silver_stage,
     _run_validation_stage,
+    _run_validation_suite,
 )
 from pipeline.quality.publication import sanitize_for_publication
 from pipeline.quality.quality import (
-    ValidationResult,
     summarize_validation_results,
-    validate_bronze,
-    validate_cross_layer_consistency,
-    validate_gold,
-    validate_gold_macro,
-    validate_silver,
-    validate_silver_conversations_llm,
-    validate_silver_messages,
+    validate_gold,  # noqa: F401 — patchable via operator namespace (CON-004)
 )
 from pipeline.quality.quarantine import quarantine_bronze_records
 from pipeline.runtime.spec import ensure_pipeline_spec
@@ -97,6 +93,9 @@ __all__ = [
     "_planner_report_summary",
     "_utc_now_iso",
     "_extract_llm_diagnoses",
+    "_incident_id",
+    "_get_llm_call",
+    "_determine_retry_stage",
     "_run_bronze_stage",
     "_run_silver_stage",
     "_run_gold_stage",
@@ -110,66 +109,6 @@ __all__ = [
 ]
 
 _MAX_REACT_ITERATIONS = 15  # 5 stages × up to 3 iterations each
-
-
-def _incident_id() -> str:
-    return f"incident_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
-
-
-def _get_llm_call() -> Any:
-    from pipeline.runtime.env import env_flag
-
-    if not env_flag("PIPELINE_ENABLE_LLM_AGENT", True):
-        return None
-    try:
-        from pipeline.runtime.llm_runtime import call_llm
-
-        return call_llm
-    except Exception:
-        return None
-
-
-def _determine_retry_stage(
-    failed_checks: list[dict[str, Any]],
-    stage_failure_counts: dict[str, int],
-) -> str | None:
-    stage_order = ["bronze", "silver", "gold"]
-    for stage in stage_order:
-        for check in failed_checks:
-            layer = str(check.get("layer", ""))
-            if layer.startswith(stage) or layer == stage:
-                count = stage_failure_counts.get(stage, 0)
-                if count < 2:
-                    return stage
-    return None
-
-
-def _run_validation_suite(
-    bronze_df: Any,
-    silver_df: Any,
-    silver_messages_df: Any,
-    silver_conversations_llm_df: Any,
-    gold_df: Any,
-    gold_macro_df: Any,
-    compiled_plan: dict[str, Any],
-) -> list[ValidationResult]:
-    return (
-        validate_bronze(bronze_df, compiled_plan=compiled_plan)
-        + validate_silver(silver_df, compiled_plan=compiled_plan)
-        + validate_silver_messages(silver_messages_df, compiled_plan=compiled_plan)
-        + validate_silver_conversations_llm(
-            silver_conversations_llm_df,
-            compiled_plan=compiled_plan,
-        )
-        + validate_gold(gold_df, compiled_plan=compiled_plan)
-        + validate_cross_layer_consistency(
-            silver_df,
-            silver_messages_df,
-            gold_df,
-            compiled_plan=compiled_plan,
-        )
-        + validate_gold_macro(gold_macro_df, compiled_plan=compiled_plan)
-    )
 
 
 def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  # noqa: C901

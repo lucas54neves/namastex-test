@@ -258,9 +258,9 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
 
     paths = build_paths(root)
 
-    import pipeline.orchestration.operator as operator_module
+    import pipeline.orchestration.operator_stages as operator_stages_module
 
-    original_validate_gold = operator_module.validate_gold
+    original_validate_gold = operator_stages_module.validate_gold
     calls = {"count": 0}
 
     def flaky_validate_gold(df: pd.DataFrame, compiled_plan=None) -> list[ValidationResult]:
@@ -276,7 +276,7 @@ def test_run_pipeline_marks_auto_remediation_when_validation_is_fixed(
             ]
         return original_validate_gold(df, compiled_plan=compiled_plan)
 
-    monkeypatch.setattr(operator_module, "validate_gold", flaky_validate_gold)
+    monkeypatch.setattr(operator_stages_module, "validate_gold", flaky_validate_gold)
     result = run_pipeline(paths, force=True)
 
     agent_report = json.loads(Path(result.agent_report_path).read_text(encoding="utf-8"))
