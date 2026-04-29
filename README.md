@@ -570,7 +570,7 @@ O agente executa um ciclo explícito de autonomia governada por impacto. O uso d
 
 O agente opera em dois ciclos distintos por execução.
 
-**Ciclo proativo** (`plan_pipeline_spec`): detecta drift antes da execução principal. Cinco detectores varrem observações do runtime para gerar propostas. Para cada proposta, a spec candidata é materializada de forma isolada, submetida a gates e, se aprovada, promovida automaticamente ou retida para aprovação. O output é `reports/monitoring/latest_plan_report.json`.
+**Ciclo proativo** (`plan_pipeline_spec`): detecta drift antes da execução principal. Seis detectores varrem observações do runtime para gerar propostas: schema drift, validation enhancement, derived column addition, segmentation adjustment, transformation rule change e quality drift. Antes da avaliação, o LLM Advisor reordena as propostas por prioridade e marca como diferidas as que devem ser ignoradas no ciclo atual. Para cada proposta não diferida, a spec candidata é materializada de forma isolada, submetida a gates e, se aprovada, promovida automaticamente ou retida para aprovação. O output é `reports/monitoring/latest_plan_report.json`.
 
 **Ciclo reativo** (`run_cycle` / loop ReAct): executa até 15 iterações para processar os estágios Bronze → Silver → Gold. Em cada iteração, valida o estágio atual e, em caso de falha, chama `diagnose_validation_failures` seguido de `attempt_auto_remediation`. Se a remediação resolve o problema, o loop continua; caso contrário, o estágio é reexecutado ou o loop é interrompido. Exceptions não tratadas acionam fallback para o último estado íntegro.
 
@@ -582,6 +582,7 @@ A política canônica fica em `config/agent_autonomy_policy.json` e define o com
 | --- | --- | --- | --- |
 | `schema_update` | `high` | não | sim |
 | `segmentation_adjustment` | `high` | não | sim |
+| `data_quality_drift` | `high` | não | sim |
 | `transformation_rule_change` | `medium` | não | sim |
 | `derived_column_addition` | `medium` | sim | não |
 | `validation_enhancement` | `low` | sim | não |
@@ -589,22 +590,31 @@ A política canônica fica em `config/agent_autonomy_policy.json` e define o com
 ### Ciclo de vida das propostas
 
 ```
-Detecção (planner.py)
-  └─> Fingerprint SHA-1 da proposta → proposal_id único
-      └─> apply_proposal_to_spec()
-          └─> evaluate_candidate() → gate_results + diff
-              ├─ gate: contract_validation
-              ├─ gate: backward_compatibility
-              ├─ gate: privacy_scan
-              └─ gate: targeted_tests
-          └─> persist_candidate_artifacts() → runtime/candidates/{proposal_id}/
-              ├─> Se requires_approval:
-              │     └─> agent_self_review_proposal() (LLM)
-              │           ├─ confidence >= threshold → approve_proposal("agent") → PROMOVIDA
-              │           └─ confidence < threshold  → AWAITING_APPROVAL (aguarda humano)
-              ├─> Se safe_auto_promote:
-              │     └─> promote_candidate_spec() → pipeline_spec.json + spec_history.json → PROMOVIDA
-              └─> Demais casos → CANDIDATE_MATERIALIZED (retida para revisão)
+Detecção (planner.py) → 6 detectores
+  └─> LLM Advisor (llm_advisor.py) → reordena por prioridade / marca diferidas
+      ├─ propostas diferidas → CLOSED_NO_ACTION
+      └─> Para cada proposta não diferida:
+          ├─> Cooloff check: se rejected_cooloff_active → CLOSED_NO_ACTION
+          └─> Fingerprint SHA-1 da proposta → proposal_id único
+              └─> apply_proposal_to_spec()
+                  └─> evaluate_candidate() → gate_results + diff
+                      ├─ gate: contract_validation
+                      ├─ gate: backward_compatibility
+                      ├─ gate: privacy_scan
+                      └─ gate: targeted_tests
+                  └─> persist_candidate_artifacts() → runtime/candidates/{proposal_id}/
+                      ├─> Se requires_approval:
+                      │     └─> agent_self_review_proposal() (LLM)
+                      │           ├─ confidence >= threshold → approve_proposal("agent") → PROMOVIDA
+                      │           └─ confidence < threshold  → AWAITING_APPROVAL (aguarda humano)
+                      │                 └─> Após N ciclos (stale_threshold):
+                      │                       ├─ threshold reduzido → nova auto-revisão (LLM)
+                      │                       │     ├─ confiança >= threshold reduzido → PROMOVIDA
+                      │                       │     └─ threshold no confidence_floor → STALE
+                      │                       └─ sem threshold configurado → STALE
+                      ├─> Se safe_auto_promote:
+                      │     └─> promote_candidate_spec() → pipeline_spec.json + spec_history.json → PROMOVIDA
+                      └─> Demais casos → CANDIDATE_MATERIALIZED (retida para revisão)
 ```
 
 Propostas rejeitadas por gate ou por baixa confiança de LLM ficam com status `validation_failed` ou `awaiting_approval` e nunca alteram a spec de produção.
@@ -643,7 +653,7 @@ Todos os pontos de LLM têm fallback determinístico e nunca bloqueiam a execuç
 - **Reexecução de estágio**: interrompida após 2 falhas consecutivas do mesmo estágio.
 - **Circuit breaker de LLM**: após 3 falhas consecutivas de chamada de LLM para diagnóstico, as chamadas são suspensas e o fallback determinístico é usado para os checks restantes.
 - **Gates de promoção**: todas as quatro validações (contrato, compatibilidade retroativa, privacidade, testes) precisam passar para qualquer promoção.
-- **Auto-aprovação por LLM**: requer `confidence >= threshold` configurado por família (padrão: 0.90 para `schema_update`, 0.85 para `transformation_rule_change`) e `severity != critical`.
+- **Auto-aprovação por LLM**: requer `confidence >= threshold` configurado por família (padrão: 0.90 para `schema_update` e `segmentation_adjustment`; 0.85 para `transformation_rule_change` e `data_quality_drift`) e `severity != critical`.
 
 ### Playbooks de remediação reativa
 
