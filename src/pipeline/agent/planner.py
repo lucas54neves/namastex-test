@@ -13,8 +13,13 @@ from pipeline.agent.approval import (
     APPROVAL_STATUS_APPROVED,
     APPROVAL_STATUS_REJECTED,
     approve_proposal,
+    expire_rejection_cooloff,
     get_proposal_approval_record,
     get_proposal_approval_status,
+    get_rejection_cooloff_record,
+    increment_rejection_cooloff_cycle,
+    is_in_rejection_cooloff,
+    start_rejection_cooloff,
 )
 from pipeline.agent.autonomy import (
     DECISION_HOLD_FOR_APPROVAL,
@@ -36,6 +41,7 @@ from pipeline.agent.autonomy import (
     evaluate_candidate,
     get_agent_auto_approve_threshold,
     get_awaiting_approval_stale_policy,
+    get_rejection_cooloff_policy,
     load_proposal_record,
     persist_autonomy_decision,
     persist_candidate_artifacts,
@@ -580,6 +586,8 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
 
     proposals_to_evaluate = priority_proposals_list + normal_proposals_list
 
+    cooloff_policy = get_rejection_cooloff_policy(paths)
+
     approval_status_by_proposal = {
         str(proposal["proposal_id"]): get_proposal_approval_status(
             paths, str(proposal["proposal_id"])
@@ -609,6 +617,30 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
     for proposal in proposals_to_evaluate:
         proposal_id = str(proposal["proposal_id"])
         approval_status = approval_status_by_proposal[proposal_id]
+
+        if is_in_rejection_cooloff(paths, proposal_id):
+            if approval_status != APPROVAL_STATUS_REJECTED:
+                expire_rejection_cooloff(paths, proposal_id)
+                # fall through to normal evaluation
+            else:
+                cooloff_record = get_rejection_cooloff_record(paths, proposal_id)
+                new_count = increment_rejection_cooloff_cycle(paths, proposal_id)
+                cooloff_started_at = datetime.fromisoformat(
+                    cooloff_record["cooloff_started_at_utc"]
+                )
+                elapsed_hours = (datetime.now(UTC) - cooloff_started_at).total_seconds() / 3600
+                if (
+                    new_count >= cooloff_policy["threshold_cycles"]
+                    or elapsed_hours >= cooloff_policy["threshold_hours"]
+                ):
+                    expire_rejection_cooloff(paths, proposal_id)
+                    # fall through to normal evaluation (re-evaluation pass)
+                else:
+                    proposal["status"] = PROPOSAL_STATUS_CLOSED_NO_ACTION
+                    proposal["decision_reason"] = "rejected_cooloff_active"
+                    persist_proposal_record(paths, proposal)
+                    continue
+
         proposal["candidate_actions"] = build_candidate_actions(proposal)
         proposal["approval_context"] = get_proposal_approval_record(paths, proposal_id)
         update_autonomy_metrics(
@@ -761,6 +793,7 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             proposal["status"] = PROPOSAL_STATUS_REJECTED
             decision = DECISION_REJECT
             decision_reason = "Proposal was explicitly rejected."
+            start_rejection_cooloff(paths, proposal_id)
         elif gate_passed and not promotion_enabled:
             proposal["status"] = PROPOSAL_STATUS_CANDIDATE_MATERIALIZED
             decision_reason = (

@@ -37,6 +37,8 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
     "awaiting_approval_stale_threshold_cycles": 5,
     "awaiting_approval_confidence_reduction_per_cycle": 0.05,
     "awaiting_approval_confidence_floor": 0.70,
+    "rejection_cooloff_threshold_cycles": 10,
+    "rejection_cooloff_threshold_hours": 24.0,
     "mutation_families": {
         "schema_update": {
             "default_impact_class": IMPACT_HIGH,
@@ -600,6 +602,14 @@ def load_proposal_record(paths: PipelinePaths, proposal_id: str) -> dict[str, An
     if not path.exists():
         return {}
     return read_json(path, default={})
+
+
+def get_rejection_cooloff_policy(paths: PipelinePaths) -> dict[str, Any]:
+    policy = load_autonomy_policy(paths)
+    return {
+        "threshold_cycles": int(policy.get("rejection_cooloff_threshold_cycles", 10)),
+        "threshold_hours": float(policy.get("rejection_cooloff_threshold_hours", 24.0)),
+    }
 
 
 def get_awaiting_approval_stale_policy(paths: PipelinePaths) -> dict[str, Any]:

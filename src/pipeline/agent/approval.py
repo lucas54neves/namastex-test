@@ -18,7 +18,7 @@ def _utc_now_iso() -> str:
 def load_approval_state(paths: PipelinePaths) -> dict[str, Any]:
     return read_json(
         paths.approval_state,
-        default={"approved_proposals": {}, "proposal_decisions": {}},
+        default={"approved_proposals": {}, "proposal_decisions": {}, "rejection_cooloff": {}},
     )
 
 
@@ -67,6 +67,43 @@ def approve_proposal(paths: PipelinePaths, proposal_id: str, approved_by: str) -
         "decided_at_utc": _utc_now_iso(),
     }
     write_json(state, paths.approval_state)
+
+
+def start_rejection_cooloff(paths: PipelinePaths, proposal_id: str) -> None:
+    state = load_approval_state(paths)
+    state.setdefault("rejection_cooloff", {})[proposal_id] = {
+        "cooloff_started_at_utc": _utc_now_iso(),
+        "cycle_count": 0,
+    }
+    write_json(state, paths.approval_state)
+
+
+def get_rejection_cooloff_record(paths: PipelinePaths, proposal_id: str) -> dict[str, Any]:
+    state = load_approval_state(paths)
+    return dict(state.get("rejection_cooloff", {}).get(proposal_id, {}))
+
+
+def is_in_rejection_cooloff(paths: PipelinePaths, proposal_id: str) -> bool:
+    state = load_approval_state(paths)
+    return proposal_id in state.get("rejection_cooloff", {})
+
+
+def increment_rejection_cooloff_cycle(paths: PipelinePaths, proposal_id: str) -> int:
+    state = load_approval_state(paths)
+    cooloff = state.get("rejection_cooloff", {})
+    if proposal_id not in cooloff:
+        return 0
+    cooloff[proposal_id]["cycle_count"] += 1
+    write_json(state, paths.approval_state)
+    return int(cooloff[proposal_id]["cycle_count"])
+
+
+def expire_rejection_cooloff(paths: PipelinePaths, proposal_id: str) -> None:
+    state = load_approval_state(paths)
+    cooloff = state.get("rejection_cooloff", {})
+    if proposal_id in cooloff:
+        del cooloff[proposal_id]
+        write_json(state, paths.approval_state)
 
 
 def reject_proposal(paths: PipelinePaths, proposal_id: str, rejected_by: str) -> None:
