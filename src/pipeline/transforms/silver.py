@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
-
 import pandas as pd
+
+from pipeline.transforms.bronze import load_bronze_frame, parse_metadata  # noqa: F401
 
 # Reexports — retrocompatibility (noqa: F401 suppresses unused-import warnings)
 from pipeline.transforms.gold import (  # noqa: F401
@@ -188,19 +188,6 @@ __all__ = [
     "_commercial_urgency_signal",
     "_competitor_pressure_level",
 ]
-
-
-def load_bronze_frame(source_path: str) -> pd.DataFrame:
-    df = pd.read_parquet(source_path).copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    return df
-
-
-def parse_metadata(df: pd.DataFrame) -> pd.DataFrame:
-    metadata = df["metadata"].map(json.loads)
-    metadata_df = pd.json_normalize(metadata)
-    metadata_df.columns = [f"metadata_{column}" for column in metadata_df.columns]
-    return pd.concat([df.drop(columns=["metadata"]), metadata_df], axis=1)
 
 
 def build_silver(df: pd.DataFrame, compiled_plan: dict[str, object] | None = None) -> pd.DataFrame:

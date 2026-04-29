@@ -4,6 +4,9 @@ import pandas as pd
 
 import pipeline.transforms.conversation_enrichment as conversation_enrichment
 from pipeline.orchestration.compiler import get_default_compiled_plan
+from pipeline.transforms.bronze import (
+    build_bronze,
+)
 from pipeline.transforms.conversation_enrichment import (
     build_conversation_enrichment,
     consolidate_gold_semantics,
@@ -1285,3 +1288,138 @@ class TestBuildGoldMacro:
         for dimension in categorical_rows["dimension"].unique():
             ranks = macro[macro["dimension"] == dimension]["rank"].tolist()
             assert ranks == sorted(ranks)
+
+
+# ---------------------------------------------------------------------------
+# Bronze enrichment tests (spec-architecture-bronze-layer-enrichment.md)
+# ---------------------------------------------------------------------------
+
+_FIXTURE_PARQUET = "docs/conversations_bronze.parquet"
+
+
+def _make_minimal_bronze_parquet(tmp_path, rows=None):
+    if rows is None:
+        rows = [
+            {
+                "message_id": "m1",
+                "conversation_id": "conv_1",
+                "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+                "sender_phone": "+5511999999999",
+                "sender_name": "Ana",
+                "message_body": "quero cotacao",
+                "campaign_id": "camp_1",
+                "agent_id": "agent_1",
+                "direction": "inbound",
+                "message_type": "text",
+                "status": "read",
+                "channel": "whatsapp",
+                "conversation_outcome": "em_negociacao",
+                "metadata": (
+                    '{"device":"iphone","city":"SP","state":"SP",'
+                    '"response_time_sec":60,"is_business_hours":true,"lead_source":"google"}'
+                ),
+            }
+        ]
+    df = pd.DataFrame(rows)
+    path = tmp_path / "bronze.parquet"
+    df.to_parquet(path, index=False)
+    return str(path)
+
+
+def test_build_bronze_casts_categoricals(tmp_path) -> None:
+    path = _make_minimal_bronze_parquet(tmp_path)
+    result = build_bronze(path)
+    assert result.df["direction"].dtype.name == "category"
+    cats = list(result.df["direction"].cat.categories)
+    assert cats == ["outbound", "inbound"]
+
+
+def test_build_bronze_expands_metadata(tmp_path) -> None:
+    path = _make_minimal_bronze_parquet(tmp_path)
+    result = build_bronze(path)
+    assert "metadata_response_time_sec" in result.df.columns
+    assert str(result.df["metadata_response_time_sec"].dtype) == "Int64"
+
+
+def test_build_bronze_validation_report_ok(tmp_path) -> None:
+    path = _make_minimal_bronze_parquet(tmp_path)
+    result = build_bronze(path)
+    assert result.validation_report.schema_ok is True
+    assert result.validation_report.missing_columns == []
+
+
+def test_build_bronze_malformed_metadata_no_exception(tmp_path) -> None:
+    rows = [
+        {
+            "message_id": "m1",
+            "conversation_id": "conv_1",
+            "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+            "sender_phone": "+5511999999999",
+            "sender_name": "Ana",
+            "message_body": "ok",
+            "campaign_id": "camp_1",
+            "agent_id": "agent_1",
+            "direction": "inbound",
+            "message_type": "text",
+            "status": "read",
+            "channel": "whatsapp",
+            "conversation_outcome": "em_negociacao",
+            "metadata": '{"device":"iphone"}',
+        },
+        {
+            "message_id": "m2",
+            "conversation_id": "conv_2",
+            "timestamp": pd.Timestamp("2026-02-01 10:01:00"),
+            "sender_phone": "+5511888888888",
+            "sender_name": "Bruno",
+            "message_body": "ok",
+            "campaign_id": "camp_1",
+            "agent_id": "agent_1",
+            "direction": "outbound",
+            "message_type": "text",
+            "status": "sent",
+            "channel": "whatsapp",
+            "conversation_outcome": "em_negociacao",
+            "metadata": "not_valid_json",
+        },
+    ]
+    path = _make_minimal_bronze_parquet(tmp_path, rows=rows)
+    result = build_bronze(path)
+    assert pd.isna(result.df["metadata_device"].iloc[1])
+
+
+def test_build_bronze_missing_column_report(tmp_path) -> None:
+    rows = [
+        {
+            "message_id": "m1",
+            "conversation_id": "conv_1",
+            "timestamp": pd.Timestamp("2026-02-01 10:00:00"),
+            "sender_phone": "+5511999999999",
+            "sender_name": "Ana",
+            "message_body": "ok",
+            "campaign_id": "camp_1",
+            "agent_id": "agent_1",
+            "message_type": "text",
+            "status": "read",
+            "channel": "whatsapp",
+            "conversation_outcome": "em_negociacao",
+            "metadata": '{"device":"iphone"}',
+        }
+    ]
+    path = _make_minimal_bronze_parquet(tmp_path, rows=rows)
+    result = build_bronze(path)
+    assert result.validation_report.schema_ok is False
+    assert "direction" in result.validation_report.missing_columns
+
+
+def test_build_bronze_drops_raw_metadata(tmp_path) -> None:
+    path = _make_minimal_bronze_parquet(tmp_path)
+    result = build_bronze(path)
+    assert "metadata" not in result.df.columns
+
+
+def test_silver_still_exports_load_bronze_frame() -> None:
+    from pipeline.transforms.silver import load_bronze_frame, parse_metadata  # noqa: F401
+
+    assert callable(load_bronze_frame)
+    assert callable(parse_metadata)

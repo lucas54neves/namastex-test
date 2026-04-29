@@ -22,7 +22,7 @@ from pipeline.quality.quality import (
 )
 from pipeline.quality.quarantine import quarantine_bronze_records
 from pipeline.runtime.terminal_logging import log_event
-from pipeline.transforms.bronze import load_bronze_frame
+from pipeline.transforms.bronze import build_bronze
 from pipeline.transforms.conversation_enrichment import build_conversation_enrichment
 from pipeline.transforms.gold import build_gold
 from pipeline.transforms.gold_macro import build_gold_macro
@@ -71,8 +71,14 @@ def _run_bronze_stage(
     paths: PipelinePaths,
     compiled_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    bronze_df = load_bronze_frame(str(paths.raw_bronze_source))
-    log_event(logging.INFO, "bronze_loaded", rows=int(len(bronze_df)))
+    result = build_bronze(str(paths.raw_bronze_source), compiled_plan=compiled_plan)
+    bronze_df = result.df
+    log_event(
+        logging.INFO,
+        "bronze_loaded",
+        rows=int(len(bronze_df)),
+        schema_ok=result.validation_report.schema_ok,
+    )
 
     quarantine = quarantine_bronze_records(bronze_df, paths.quarantine, compiled_plan)
     bronze_df = quarantine["clean_df"]
@@ -87,7 +93,11 @@ def _run_bronze_stage(
     bronze_path = paths.bronze / "conversations.parquet"
     write_parquet(bronze_df, bronze_path)
 
-    return {"bronze_df": bronze_df, "quarantine_report": quarantine_report}
+    return {
+        "bronze_df": bronze_df,
+        "quarantine_report": quarantine_report,
+        "bronze_validation": result.validation_report,
+    }
 
 
 def _run_silver_stage(
