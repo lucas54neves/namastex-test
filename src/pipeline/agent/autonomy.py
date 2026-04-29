@@ -29,8 +29,14 @@ PROPOSAL_STATUS_REJECTED = "rejected"
 PROPOSAL_STATUS_PROMOTED = "promoted"
 PROPOSAL_STATUS_ROLLED_BACK = "rolled_back"
 PROPOSAL_STATUS_CLOSED_NO_ACTION = "closed_no_action"
+PROPOSAL_STATUS_STALE = "stale"
+
+DECISION_STALE = "stale"
 
 DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
+    "awaiting_approval_stale_threshold_cycles": 5,
+    "awaiting_approval_confidence_reduction_per_cycle": 0.05,
+    "awaiting_approval_confidence_floor": 0.70,
     "mutation_families": {
         "schema_update": {
             "default_impact_class": IMPACT_HIGH,
@@ -70,7 +76,7 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
             "requires_privacy_scan": False,
             "agent_auto_approve_if_confidence_ge": 0.85,
         },
-    }
+    },
 }
 
 
@@ -587,6 +593,24 @@ def get_agent_auto_approve_threshold(paths: PipelinePaths, proposal_family: str)
     if threshold is None:
         return None
     return float(threshold)
+
+
+def load_proposal_record(paths: PipelinePaths, proposal_id: str) -> dict[str, Any]:
+    path = proposal_record_path(paths, proposal_id)
+    if not path.exists():
+        return {}
+    return read_json(path, default={})
+
+
+def get_awaiting_approval_stale_policy(paths: PipelinePaths) -> dict[str, Any]:
+    policy = load_autonomy_policy(paths)
+    return {
+        "stale_threshold_cycles": int(policy.get("awaiting_approval_stale_threshold_cycles", 5)),
+        "confidence_reduction_per_cycle": float(
+            policy.get("awaiting_approval_confidence_reduction_per_cycle", 0.05)
+        ),
+        "confidence_floor": float(policy.get("awaiting_approval_confidence_floor", 0.70)),
+    }
 
 
 def promote_candidate_spec(

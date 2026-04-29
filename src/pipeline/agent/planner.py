@@ -20,6 +20,7 @@ from pipeline.agent.autonomy import (
     DECISION_HOLD_FOR_APPROVAL,
     DECISION_PROMOTE,
     DECISION_REJECT,
+    DECISION_STALE,
     PROPOSAL_STATUS_APPROVED,
     PROPOSAL_STATUS_AWAITING_APPROVAL,
     PROPOSAL_STATUS_CANDIDATE_MATERIALIZED,
@@ -27,12 +28,15 @@ from pipeline.agent.autonomy import (
     PROPOSAL_STATUS_PROMOTED,
     PROPOSAL_STATUS_PROPOSED,
     PROPOSAL_STATUS_REJECTED,
+    PROPOSAL_STATUS_STALE,
     PROPOSAL_STATUS_VALIDATION_FAILED,
     apply_proposal_to_spec,
     build_candidate_actions,
     classify_proposal,
     evaluate_candidate,
     get_agent_auto_approve_threshold,
+    get_awaiting_approval_stale_policy,
+    load_proposal_record,
     persist_autonomy_decision,
     persist_candidate_artifacts,
     persist_proposal_record,
@@ -702,9 +706,57 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             and proposal["requires_approval"]
             and approval_status != APPROVAL_STATUS_APPROVED
         ):
-            proposal["status"] = PROPOSAL_STATUS_AWAITING_APPROVAL
-            decision = DECISION_HOLD_FOR_APPROVAL
-            decision_reason = "Impact-governed policy requires explicit approval."
+            existing_record = load_proposal_record(paths, proposal_id)
+            cycle_count = int(existing_record.get("awaiting_approval_cycle_count", 0)) + 1
+            proposal["awaiting_approval_cycle_count"] = cycle_count
+
+            stale_policy = get_awaiting_approval_stale_policy(paths)
+            stale_threshold = stale_policy["stale_threshold_cycles"]
+            reduction = stale_policy["confidence_reduction_per_cycle"]
+            floor = stale_policy["confidence_floor"]
+
+            if cycle_count >= stale_threshold:
+                base_threshold = get_agent_auto_approve_threshold(
+                    paths, str(proposal["proposal_family"])
+                )
+                if base_threshold is None:
+                    proposal["status"] = PROPOSAL_STATUS_STALE
+                    decision = DECISION_STALE
+                    decision_reason = "awaiting_approval_expired_no_auto_approve_threshold"
+                    update_autonomy_metrics(
+                        paths,
+                        str(proposal["proposal_family"]),
+                        unresolved_failure=True,
+                    )
+                else:
+                    reduced = max(
+                        base_threshold - reduction * (cycle_count - stale_threshold + 1), floor
+                    )
+                    review = agent_self_review_proposal(proposal, gate_results, diff, compiled_plan)
+                    if review["should_approve"] and float(review["confidence"]) >= reduced:
+                        approve_proposal(paths, proposal_id, "agent_secondary_review")
+                        approval_status = APPROVAL_STATUS_APPROVED
+                        proposal["approval_context"] = get_proposal_approval_record(
+                            paths, proposal_id
+                        )
+                        # fall through to promotion path below
+                    elif reduced <= floor:
+                        proposal["status"] = PROPOSAL_STATUS_STALE
+                        decision = DECISION_STALE
+                        decision_reason = "awaiting_approval_expired_at_confidence_floor"
+                        update_autonomy_metrics(
+                            paths,
+                            str(proposal["proposal_family"]),
+                            unresolved_failure=True,
+                        )
+                    else:
+                        proposal["status"] = PROPOSAL_STATUS_AWAITING_APPROVAL
+                        decision = DECISION_HOLD_FOR_APPROVAL
+                        decision_reason = "Impact-governed policy requires explicit approval."
+            else:
+                proposal["status"] = PROPOSAL_STATUS_AWAITING_APPROVAL
+                decision = DECISION_HOLD_FOR_APPROVAL
+                decision_reason = "Impact-governed policy requires explicit approval."
         elif approval_status == APPROVAL_STATUS_REJECTED:
             proposal["status"] = PROPOSAL_STATUS_REJECTED
             decision = DECISION_REJECT
@@ -841,6 +893,9 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
                     1
                     for proposal in all_proposals
                     if proposal["status"] == PROPOSAL_STATUS_CLOSED_NO_ACTION
+                ),
+                PROPOSAL_STATUS_STALE: sum(
+                    1 for proposal in all_proposals if proposal["status"] == PROPOSAL_STATUS_STALE
                 ),
             },
         },
