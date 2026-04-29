@@ -305,6 +305,77 @@ docker compose up --build
 
 Esse modo é útil para observabilidade e integração com providers, mas não é necessário para o baseline de validação local.
 
+## LLM Enrichment — Baseline vs. Enriched Output
+
+O pipeline suporta dois modos de execução: baseline determinístico e modo enriquecido com LLM. No modo baseline (padrão recomendado para validação local), todos os campos interpretativos da Gold são calculados por regras determinísticas — sem chamadas externas e sem dependência de credenciais. No modo enriquecido, a camada Silver recebe anotações semânticas de um provider externo (OpenAI ou Anthropic), que se propagam para dimensões adicionais da Gold com maior precisão semântica.
+
+### Campos afetados pelo enrichment
+
+| Campo | Baseline | LLM-enriched |
+|---|---|---|
+| `conversation_sentiment_label` | Contagem de padrões de tom (`positive_tone_hits`, `negative_tone_hits`) | Classificação semântica pelo LLM |
+| `conversation_sentiment_support` | Threshold sobre hits positivos/negativos | Nível de confiança do LLM |
+| `intent_stage` | Match de palavras-chave sinalizadoras | Classificação de intenção pelo LLM |
+| `lead_temperature` | Derivado de contagem de mensagens e engagement | Influenciado via persona e segmento atribuídos pelo LLM |
+| `persona_profile` | Regras derivadas de sinais comportamentais | Perfil semântico atribuído pelo LLM |
+| `audience_segment` | Derivado de persona determinística | Segmento semântico atribuído pelo LLM |
+
+As colunas de proveniência `conversation_sentiment_source_family`, `intent_stage_source_family`, `persona_profile_source_family` e `audience_segment_source_family` registram a origem de cada valor: `"deterministic"` no baseline e `"llm_provider"` no modo enriquecido. No baseline, todos os campos acima possuem valor válido — nenhum campo fica ausente ou vazio.
+
+### Exemplo de registro Gold
+
+**Modo baseline (sem LLM):**
+
+```json
+{
+  "lead_key": "XXXXX9XXXXXXXXXXX",
+  "total_messages": 4,
+  "inbound_messages": 3,
+  "outbound_messages": 1,
+  "engagement_bucket": "curta",
+  "dominant_email_provider": "gmail",
+  "conversation_sentiment_label": "neutro",
+  "conversation_sentiment_support": "fraco",
+  "conversation_sentiment_source_family": "deterministic",
+  "intent_stage": "descoberta_inicial",
+  "intent_stage_source_family": "deterministic",
+  "lead_temperature": "frio",
+  "persona_profile": "lead_frio",
+  "persona_profile_source_family": "deterministic",
+  "audience_segment": "nutricao_basica",
+  "audience_segment_source_family": "deterministic"
+}
+```
+
+**Modo enriquecido (com LLM):**
+
+```json
+{
+  "lead_key": "XXXXX9XXXXXXXXXXX",
+  "total_messages": 4,
+  "inbound_messages": 3,
+  "outbound_messages": 1,
+  "engagement_bucket": "curta",
+  "dominant_email_provider": "gmail",
+  "conversation_sentiment_label": "negativo",               // enriched
+  "conversation_sentiment_support": "forte",                // enriched
+  "conversation_sentiment_source_family": "llm_provider",   // enriched
+  "intent_stage": "cotacao_ativa",                          // enriched
+  "intent_stage_source_family": "llm_provider",             // enriched
+  "lead_temperature": "morno",                              // enriched
+  "persona_profile": "cotador_comparador",                  // enriched
+  "persona_profile_source_family": "llm_provider",          // enriched
+  "audience_segment": "oferta_competitiva",                 // enriched
+  "audience_segment_source_family": "llm_provider"          // enriched
+}
+```
+
+### Contrato de fallback
+
+Quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1` mas o provider (configurado via `OPENAI_API_KEY` ou `ANTHROPIC_API_KEY`) estiver indisponível ou retornar uma resposta inválida, o pipeline faz fallback automático para as regras determinísticas e a execução é concluída com sucesso. O output nesse caso é idêntico ao modo baseline — as colunas `*_source_family` ficam com o valor `"deterministic_fallback"` em vez de `"deterministic"`.
+
+Para habilitar o enrichment localmente, copie [`.env.example`](.env.example), defina `PIPELINE_ENABLE_LLM_ENRICHMENT=1` e configure `OPENAI_API_KEY` ou `ANTHROPIC_API_KEY` com uma credencial válida.
+
 ## Variáveis de ambiente relevantes
 
 As variáveis estão exemplificadas em [`.env.example`](/home/lucas/projects/lucas54neves/namastex-test/.env.example). As mais importantes para a entrega são:
