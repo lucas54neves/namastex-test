@@ -1,10 +1,45 @@
+"""
+Silver transformation layer — public facade.
+
+This module is the stable public entry point for the Silver stage of the
+Medallion pipeline. It contains no transformation logic of its own; all
+logic lives in the submodules listed below. Imports are reexported here so
+that callers always use ``pipeline.transforms.silver`` as the import path,
+regardless of internal reorganisation.
+
+Primary entry points
+--------------------
+build_silver(df, compiled_plan=None) -> pd.DataFrame
+    Build the Silver messages view from a Bronze DataFrame.
+
+build_silver_leads(silver_messages) -> pd.DataFrame
+    Aggregate the messages view into a per-lead view.
+
+load_bronze_frame(source_path) -> pd.DataFrame
+    Read the raw Parquet source and coerce the timestamp column.
+
+Canonical submodule map
+-----------------------
+Responsibility                          Module
+--------------------------------------  --------------------------------
+Regex patterns and domain constants     silver_patterns.py
+PII masking functions                   silver_masking.py
+Signal extraction and sentiment         silver_signals.py
+Conversation and lead context           silver_context.py
+Semantic deduplication                  silver_dedup.py
+Pandas aggregation helpers              silver_aggregators.py
+Gold segmentation logic                 gold_segments.py
+Gold build pipeline                     gold.py
+Silver build pipeline (this file)       silver.py
+"""
+
 from __future__ import annotations
 
 import pandas as pd
 
+# --- Reexports (facade) ---
+# See module docstring for the canonical owner of each symbol.
 from pipeline.transforms.bronze import load_bronze_frame, parse_metadata  # noqa: F401
-
-# Reexports — retrocompatibility (noqa: F401 suppresses unused-import warnings)
 from pipeline.transforms.gold import (  # noqa: F401
     _canonical_audience_for_persona,
     _commercial_urgency_signal,

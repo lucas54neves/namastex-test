@@ -1423,3 +1423,11 @@ def test_silver_still_exports_load_bronze_frame() -> None:
 
     assert callable(load_bronze_frame)
     assert callable(parse_metadata)
+
+
+def test_silver_module_has_facade_docstring() -> None:
+    import pipeline.transforms.silver as silver_mod
+
+    assert silver_mod.__doc__ is not None
+    assert "facade" in silver_mod.__doc__.lower()
+    assert "build_silver" in silver_mod.__doc__
