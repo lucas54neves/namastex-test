@@ -31,6 +31,13 @@ def _positive_int(value: str) -> int:
     return ivalue
 
 
+def _nonneg_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {value!r}")
+    return ivalue
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the medalion pipeline continuously with polling."
@@ -58,6 +65,16 @@ def parse_args() -> argparse.Namespace:
         default=int(os.getenv("PIPELINE_MAX_BACKOFF_SECONDS", DEFAULT_MAX_BACKOFF_SECONDS)),
         help="Maximum backoff time between retries after failure (seconds).",
     )
+    parser.add_argument(
+        "--planner-cadence-cycles",
+        type=_nonneg_int,
+        default=int(os.getenv("PIPELINE_PLANNER_CADENCE_CYCLES", 0)),
+        help=(
+            "Number of consecutive idle cycles after which the planner runs even without "
+            "source change. 0 disables the secondary gate (default). "
+            "Env var: PIPELINE_PLANNER_CADENCE_CYCLES"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -65,6 +82,7 @@ def run_daemon(args: argparse.Namespace) -> None:
     configure_terminal_logging()
     cycle = 0
     attempt = 0
+    idle_cycle_count = 0
     try:
         while True:
             cycle += 1
@@ -77,11 +95,25 @@ def run_daemon(args: argparse.Namespace) -> None:
                 poll_interval_seconds=args.poll_interval_seconds,
             )
             try:
-                artifacts = run_pipeline(build_paths(ROOT), force=force)
+                cadence_fires = (
+                    args.planner_cadence_cycles > 0
+                    and idle_cycle_count > 0
+                    and idle_cycle_count % args.planner_cadence_cycles == 0
+                )
+                artifacts = run_pipeline(
+                    build_paths(ROOT),
+                    force=force,
+                    idle_cycle_count=idle_cycle_count,
+                    planner_cadence=args.planner_cadence_cycles,
+                )
                 attempt = 0
                 output = {"cycle": cycle, "poll_interval_seconds": args.poll_interval_seconds}
                 output.update(artifacts_as_dict(artifacts))
                 print(json.dumps(output, indent=2, ensure_ascii=False), flush=True)
+                if artifacts.status == "skipped_no_source_change" and not cadence_fires:
+                    idle_cycle_count += 1
+                else:
+                    idle_cycle_count = 0
             except Exception as exc:
                 backoff = min(2**attempt, args.max_backoff_seconds)
                 log_event(

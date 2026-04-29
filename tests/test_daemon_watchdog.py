@@ -36,6 +36,7 @@ def _make_args(**kwargs):
         poll_interval_seconds=1,
         max_cycles=0,
         max_backoff_seconds=300,
+        planner_cadence_cycles=0,
     )
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -45,7 +46,7 @@ def _setup(module, monkeypatch, side_effects):
     """side_effects: list where None means success and an Exception instance means failure."""
     calls = iter(side_effects)
 
-    def fake_run_pipeline(_paths, force=False):
+    def fake_run_pipeline(_paths, force=False, **kwargs):
         result = next(calls)
         if result is not None:
             raise result

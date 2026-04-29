@@ -77,6 +77,7 @@ from pipeline.transforms.silver import build_silver, build_silver_leads
 
 __all__ = [
     "PipelineArtifacts",
+    "_EMPTY_PLANNER_REPORT",
     "run_cycle",
     "build_monitor_snapshot",
     "state_file",
@@ -109,14 +110,25 @@ __all__ = [
 ]
 
 _MAX_REACT_ITERATIONS = 15  # 5 stages × up to 3 iterations each
+_EMPTY_PLANNER_REPORT: dict[str, Any] = {
+    "proposals": [],
+    "applied": False,
+    "skipped": True,
+    "reason": "no_source_change_and_cadence_not_triggered",
+    "proposal_count": 0,
+    "promoted_proposal_ids": [],
+}
 
 
-def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  # noqa: C901
+def run_cycle(
+    paths: PipelinePaths,
+    force: bool = False,
+    idle_cycle_count: int = 0,
+    planner_cadence: int = 0,
+) -> PipelineArtifacts:  # noqa: C901
     ensure_directories(paths)
     spec = ensure_pipeline_spec(paths.pipeline_spec)
     compiled_plan = compile_pipeline_spec(spec)
-    planner_report = plan_pipeline_spec(paths)
-    planner_summary = _planner_report_summary(paths, planner_report)
 
     state_path = state_file(paths)
     report_path = validation_report_file(paths)
@@ -127,6 +139,31 @@ def run_cycle(paths: PipelinePaths, force: bool = False) -> PipelineArtifacts:  
     state = load_pipeline_state(state_path)
     previous_fingerprint = state.get("last_source_fingerprint")
     changed = has_source_changed(current_fingerprint_obj, previous_fingerprint)
+
+    cadence_triggered = (
+        planner_cadence > 0 and idle_cycle_count > 0 and idle_cycle_count % planner_cadence == 0
+    )
+    should_plan = changed or force or cadence_triggered
+
+    if should_plan:
+        if cadence_triggered and not changed and not force:
+            log_event(
+                logging.INFO,
+                "planner_triggered_by_cadence",
+                idle_cycle_count=idle_cycle_count,
+                cadence=planner_cadence,
+            )
+        planner_report = plan_pipeline_spec(paths)
+    else:
+        log_event(
+            logging.INFO,
+            "planner_skipped",
+            reason="no_source_change_and_cadence_not_triggered",
+            idle_cycle_count=idle_cycle_count,
+            cadence=planner_cadence,
+        )
+        planner_report = _EMPTY_PLANNER_REPORT
+    planner_summary = _planner_report_summary(paths, planner_report)
 
     log_event(logging.INFO, "run_started", force=force)
     log_event(logging.INFO, "source_change_evaluated", changed=changed, force=force)

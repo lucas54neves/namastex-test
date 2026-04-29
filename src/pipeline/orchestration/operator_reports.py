@@ -37,6 +37,7 @@ def _planner_report_summary(paths: PipelinePaths, planner_report: dict[str, Any]
         "requires_approval": planner_report.get("requires_approval", False),
         "approved": planner_report.get("approved", False),
         "applied": planner_report.get("applied", False),
+        "skipped": planner_report.get("skipped", False),
         "promoted_proposal_ids": planner_report.get("promoted_proposal_ids", []),
         "applied_proposal_ids": planner_report.get("applied_proposal_ids", []),
         "applied_proposal_types": planner_report.get("applied_proposal_types", []),

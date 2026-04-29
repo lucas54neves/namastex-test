@@ -32,7 +32,7 @@ def test_run_daemon_respects_max_cycles(monkeypatch, capsys) -> None:
         executed = True
         status = "success"
 
-    def fake_run_pipeline(_paths, force: bool = False):
+    def fake_run_pipeline(_paths, force: bool = False, **kwargs):
         calls.append(force)
         return DummyArtifacts()
 
@@ -57,7 +57,12 @@ def test_run_daemon_respects_max_cycles(monkeypatch, capsys) -> None:
     monkeypatch.setattr(module, "shutdown_langfuse_client", lambda: shutdown_calls.append("done"))
 
     module.run_daemon(
-        argparse.Namespace(force_first_run=True, poll_interval_seconds=1, max_cycles=2)
+        argparse.Namespace(
+            force_first_run=True,
+            poll_interval_seconds=1,
+            max_cycles=2,
+            planner_cadence_cycles=0,
+        )
     )
 
     assert calls == [True, False]
