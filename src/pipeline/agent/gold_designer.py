@@ -121,7 +121,16 @@ def safe_eval_condition(expr: str, df: pd.DataFrame) -> pd.Series:
     expr = re.sub(r"\s+", " ", expr.strip())
 
     for token in _SAFE_EVAL_BLOCKLIST:
-        if token in expr:
+        if token == "__":
+            # Match dunder prefix (e.g. __class__, __import__) with a leading word boundary
+            matched = bool(re.search(r"\b__", expr))
+        elif token.isidentifier():
+            # Word boundary prevents false positives where the token is a substring
+            # of a legitimate value (e.g. "os" inside "bradesco_seguros")
+            matched = bool(re.search(r"\b" + token + r"\b", expr))
+        else:
+            matched = token in expr
+        if matched:
             log_event(
                 logging.WARNING,
                 "gold_plan_unsafe_expr_rejected",
@@ -174,7 +183,8 @@ def safe_eval_condition(expr: str, df: pd.DataFrame) -> pd.Series:
         return pd.Series(False, index=df.index)
 
 
-_SAMPLE_ROWS = 50
+_LEADS_SAMPLE_ROWS = 10
+_MESSAGES_SCHEMA_MAX_VALUES = 5
 _GOLD_DESIGNER_PROMPT = """
 You are a data analyst designing analytical columns for a Gold data layer.
 You will receive a sample of Silver lead data and Silver message data from a vehicle insurance CRM.
@@ -186,7 +196,7 @@ Your task is to design novel, insightful analytical columns that go beyond basic
 ## Silver Leads Sample (up to {sample_rows} rows)
 {leads_sample}
 
-## Silver Messages Sample (up to {sample_rows} rows)
+## Silver Messages Schema (all columns — use these names for source_col and when expressions)
 {messages_sample}
 
 ## Forbidden Columns (DO NOT use as source fields)
@@ -195,10 +205,50 @@ Your task is to design novel, insightful analytical columns that go beyond basic
 ## Derivation Logic Types Allowed
 - aggregation:
   {{"type": "aggregation", "agg_fn": "<sum|mean|max|min|count>", "source_col": "<column>"}}
+  Note: source_col can be any column from Silver Leads OR Silver Messages samples above.
 - conditional_bucket:
   {{"type": "conditional_bucket", "conditions": [{{"when": "<expr>", "then": "<label>"}},
   ..., {{"else": "<label>"}}]}}
 - llm_enriched: {{"type": "llm_enriched", "field": "<existing_llm_column>"}}
+
+## Expression Syntax for conditional_bucket (STRICT PYTHON SUBSET — NOT SQL)
+
+"when" expressions are evaluated as Python boolean expressions. Only the following syntax is valid.
+Expressions that violate these rules are silently treated as False (all rows fall to "else").
+
+ALLOWED:
+  - Comparisons:   ==   !=   <   <=   >   >=
+  - Membership:    column in ["a", "b"]   /   column not in ["a"]
+  - Boolean ops (lowercase only):  and   or   not
+  - Boolean literals:  True   False   (capital first letter)
+  - Column reference:  just the bare name, no quotes
+  - String literals:   'value'
+  - Number literals:   42   3.14
+
+FORBIDDEN — these will be silently rejected:
+  - Uppercase AND / OR / NOT  → use lowercase and / or / not
+  - Single = for equality     → use ==
+  - Lowercase true / false    → use True / False
+  - SQL BETWEEN x AND y       → use: col >= x and col <= y
+  - SQL LIKE / ILIKE          → use: 'substr' in col  (if col is a string column)
+  - SQL IS NULL / IS NOT NULL → use: col == None  /  col != None
+  - SQL EXTRACT / COALESCE / any function call
+  - Arithmetic inside conditions (+, -, *, /)  → not supported
+
+CORRECT examples:
+  "message_count > 10 and has_competitor_signal == True"
+  "engagement_bucket in ['media', 'longa']"
+  "latest_outcome == 'venda_fechada'"
+  "mentioned_sinistro"
+  "message_count >= 5 and message_count <= 14"
+  "not mentioned_competitor and data_shared_score >= 3"
+
+WRONG examples (will be rejected):
+  "message_count BETWEEN 5 AND 14"              → use: message_count >= 5 and message_count <= 14
+  "has_competitor_signal = true"                → use: has_competitor_signal == True
+  "message_count >= 5 AND avg_response_time_sec <= 120"  → use lowercase and
+  "EXTRACT(HOUR FROM first_seen_at) >= 18"      → not supported
+  "(a + b + c) >= 2"                            → arithmetic not supported
 
 ## Requirements
 - Include at least 2 engagement-related columns
@@ -378,11 +428,32 @@ def _load_data_dictionary(paths: PipelinePaths) -> str:
     return "(data dictionary unavailable)"
 
 
-def _sample_df(df: pd.DataFrame, n: int = _SAMPLE_ROWS) -> str:
+def _sample_df(df: pd.DataFrame, n: int = _LEADS_SAMPLE_ROWS) -> str:
     sample = df.sample(min(n, len(df)), random_state=42) if len(df) > n else df
     cols_to_drop = [c for c in sample.columns if "body" in c.lower() or "masked" in c.lower()]
     sample = sample.drop(columns=cols_to_drop, errors="ignore")
     return str(sample.to_json(orient="records", date_format="iso"))
+
+
+def _schema_df(df: pd.DataFrame, max_values: int = _MESSAGES_SCHEMA_MAX_VALUES) -> str:
+    """Compact column schema with name, type, and representative unique values.
+    Used for large tables (messages) to avoid blowing up the prompt token count."""
+    cols_to_drop = [c for c in df.columns if "body" in c.lower() or "masked" in c.lower()]
+    df = df.drop(columns=cols_to_drop, errors="ignore")
+    schema: list[dict[str, Any]] = []
+    for col in df.columns:
+        series = df[col].dropna()
+        dtype = str(df[col].dtype)
+        raw_vals = series.unique()[:max_values].tolist()
+        safe_vals: list[Any] = []
+        for v in raw_vals:
+            try:
+                json.dumps(v)
+                safe_vals.append(v)
+            except (TypeError, ValueError):
+                safe_vals.append(str(v))
+        schema.append({"name": col, "type": dtype, "sample_values": safe_vals})
+    return json.dumps(schema, ensure_ascii=False)
 
 
 def _validate_plan(
@@ -512,7 +583,7 @@ def design_gold_columns(
     paths: PipelinePaths,
     llm_call: Callable[..., str] | None = None,
     compiled_plan: dict[str, Any] | None = None,
-    timeout: float = 30.0,
+    timeout: float = 90.0,
 ) -> GoldColumnPlan:
     plan_path = paths.agent_decisions / "latest_gold_column_plan.json"
     fallback = _fallback_gold_plan()
@@ -520,13 +591,15 @@ def design_gold_columns(
     if llm_call is not None:
         try:
             data_dict = _load_data_dictionary(paths)
-            leads_sample = _sample_df(silver_leads_df)
-            messages_sample = _sample_df(silver_messages_df)
+            leads_sample = _sample_df(
+                silver_leads_df, min(_LEADS_SAMPLE_ROWS, len(silver_leads_df))
+            )
+            messages_sample = _schema_df(silver_messages_df)
             forbidden = spec.get("forbidden_columns", [])
 
             prompt = _GOLD_DESIGNER_PROMPT.format(
                 data_dictionary=data_dict,
-                sample_rows=_SAMPLE_ROWS,
+                sample_rows=_LEADS_SAMPLE_ROWS,
                 leads_sample=leads_sample,
                 messages_sample=messages_sample,
                 forbidden_columns=json.dumps(forbidden),
@@ -575,6 +648,7 @@ def apply_gold_column_plan(
     gold_df: pd.DataFrame,
     plan: GoldColumnPlan,
     silver_leads_df: pd.DataFrame | None = None,
+    silver_messages_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Apply GoldColumnPlan columns to an existing Gold DataFrame."""
     result = gold_df.copy()
@@ -590,7 +664,63 @@ def apply_gold_column_plan(
             if logic_type == "aggregation":
                 source_col = logic.get("source_col", "")
                 agg_fn = logic.get("agg_fn", "sum")
-                if source_col not in result.columns:
+                if source_col in result.columns:
+                    # Gold is already aggregated per lead from Silver; agg_fn documents original
+                    # semantic — do not re-aggregate scalar values
+                    if agg_fn in ("sum", "count", "max", "min"):
+                        result[col_def.name] = result[source_col]
+                    elif agg_fn in ("mean", "avg"):
+                        count_col = source_col + "_count"
+                        if count_col in result.columns:
+                            result[col_def.name] = result[source_col] / result[count_col].replace(
+                                0, 1
+                            )
+                        else:
+                            log_event(
+                                logging.WARNING,
+                                "gold_agg_mean_no_denominator",
+                                column=col_def.name,
+                                source_col=source_col,
+                            )
+                            result[col_def.name] = result[source_col]
+                    else:
+                        log_event(
+                            logging.WARNING,
+                            "gold_agg_unknown_fn",
+                            agg_fn=agg_fn,
+                            column=col_def.name,
+                        )
+                        result[col_def.name] = result[source_col]
+                elif (
+                    silver_messages_df is not None
+                    and "lead_key" in silver_messages_df.columns
+                    and source_col in silver_messages_df.columns
+                ):
+                    _agg_fn_map = {
+                        "sum": "sum",
+                        "count": "count",
+                        "max": "max",
+                        "min": "min",
+                        "mean": "mean",
+                        "avg": "mean",
+                    }
+                    pandas_agg = _agg_fn_map.get(agg_fn)
+                    if pandas_agg is None:
+                        log_event(
+                            logging.WARNING,
+                            "gold_agg_unknown_fn",
+                            agg_fn=agg_fn,
+                            column=col_def.name,
+                        )
+                        pandas_agg = "sum"
+                    agg_result = (
+                        silver_messages_df.groupby("lead_key", dropna=False)[source_col]
+                        .agg(pandas_agg)
+                        .rename(col_def.name)
+                        .reset_index()
+                    )
+                    result = result.merge(agg_result, on="lead_key", how="left")
+                else:
                     log_event(
                         logging.WARNING,
                         "gold_plan_missing_source_col",
@@ -598,31 +728,6 @@ def apply_gold_column_plan(
                         source_col=source_col,
                     )
                     result[col_def.name] = None
-                    continue
-                # Gold is already aggregated per lead from Silver; agg_fn documents original
-                # semantic — do not re-aggregate scalar values
-                if agg_fn in ("sum", "count", "max", "min"):
-                    result[col_def.name] = result[source_col]
-                elif agg_fn in ("mean", "avg"):
-                    count_col = source_col + "_count"
-                    if count_col in result.columns:
-                        result[col_def.name] = result[source_col] / result[count_col].replace(0, 1)
-                    else:
-                        log_event(
-                            logging.WARNING,
-                            "gold_agg_mean_no_denominator",
-                            column=col_def.name,
-                            source_col=source_col,
-                        )
-                        result[col_def.name] = result[source_col]
-                else:
-                    log_event(
-                        logging.WARNING,
-                        "gold_agg_unknown_fn",
-                        agg_fn=agg_fn,
-                        column=col_def.name,
-                    )
-                    result[col_def.name] = result[source_col]
 
             elif logic_type == "conditional_bucket":
                 conditions = logic.get("conditions", [])

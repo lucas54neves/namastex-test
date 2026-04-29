@@ -372,5 +372,7 @@ def build_gold(
         from pipeline.agent.gold_designer import GoldColumnPlan, apply_gold_column_plan
 
         if isinstance(gold_column_plan, GoldColumnPlan) and gold_column_plan.source == "llm":
-            base_gold = apply_gold_column_plan(base_gold, gold_column_plan)
+            base_gold = apply_gold_column_plan(
+                base_gold, gold_column_plan, silver_messages_df=silver_messages
+            )
     return base_gold

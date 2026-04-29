@@ -477,6 +477,25 @@ def test_safe_eval_compound_and_or() -> None:
     assert list(result) == [True, False, False]
 
 
+def test_safe_eval_blocklist_no_false_positive_on_substring() -> None:
+    df = pd.DataFrame(
+        {
+            "primary_competitor_observed": [
+                "bradesco_seguros",
+                "porto_seguro",
+                "sulamerica",
+            ]
+        }
+    )
+    # "os" is in the blocklist but must not reject expressions where it only
+    # appears as a substring inside a legitimate string value
+    result = safe_eval_condition(
+        "primary_competitor_observed in ['bradesco_seguros', 'porto_seguro', 'sulamerica']",
+        df,
+    )
+    assert list(result) == [True, True, True]
+
+
 def test_safe_eval_blocked_dunder() -> None:
     df = _bool_df()
     result = safe_eval_condition("__class__.__bases__[0]", df)
@@ -745,6 +764,53 @@ def test_apply_plan_agg_missing_source_col_produces_null_and_warns() -> None:
     assert result["phantom"].isna().all()
     events = [call.args[1] for call in mock_log.call_args_list]
     assert "gold_plan_missing_source_col" in events
+
+
+def test_apply_plan_agg_from_silver_messages_aggregates_per_lead() -> None:
+    gold_df = pd.DataFrame({"lead_key": ["lead_1", "lead_2"], "message_count": [3, 5]})
+    messages_df = pd.DataFrame(
+        {
+            "lead_key": ["lead_1", "lead_1", "lead_2"],
+            "is_inbound": [True, False, True],
+        }
+    )
+    col = GoldColumnDefinition(
+        name="inbound_count",
+        data_type="int64",
+        derivation_logic={"type": "aggregation", "agg_fn": "sum", "source_col": "is_inbound"},
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    result = apply_gold_column_plan(gold_df, plan, silver_messages_df=messages_df)
+    assert "inbound_count" in result.columns
+    assert result.loc[result["lead_key"] == "lead_1", "inbound_count"].iloc[0] == 1
+    assert result.loc[result["lead_key"] == "lead_2", "inbound_count"].iloc[0] == 1
+
+
+def test_apply_plan_agg_missing_in_both_produces_null_without_messages() -> None:
+    gold_df = pd.DataFrame({"lead_key": ["a"]})
+    messages_df = pd.DataFrame({"lead_key": ["a"], "other_col": [1]})
+    col = GoldColumnDefinition(
+        name="phantom",
+        data_type="float64",
+        derivation_logic={"type": "aggregation", "agg_fn": "sum", "source_col": "nonexistent"},
+        rationale="test",
+        segment_values=None,
+    )
+    plan = GoldColumnPlan(
+        columns=[col],
+        source="llm",
+        generated_at_utc="2026-04-27T00:00:00+00:00",
+        llm_rationale=None,
+    )
+    result = apply_gold_column_plan(gold_df, plan, silver_messages_df=messages_df)
+    assert result["phantom"].isna().all()
 
 
 def test_apply_plan_agg_sum_count_max_min_copy_source_unchanged() -> None:

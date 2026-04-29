@@ -804,7 +804,7 @@ def call_llm(
     effective_timeout = int(timeout) if timeout is not None else config["timeout_seconds"]
     errors: list[str] = []
 
-    for provider in ("anthropic", "openai"):
+    for provider in ("openai", "anthropic"):
         readiness = _provider_ready(config, provider)
         if readiness:
             errors.append(f"{provider}:{readiness}")
