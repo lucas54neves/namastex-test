@@ -39,6 +39,16 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
     "awaiting_approval_confidence_floor": 0.70,
     "rejection_cooloff_threshold_cycles": 10,
     "rejection_cooloff_threshold_hours": 24.0,
+    "quality_drift_null_rate_columns": [
+        "message_body",
+        "conversation_outcome",
+        "channel",
+        "timestamp",
+    ],
+    "quality_drift_distribution_columns": ["conversation_outcome", "channel"],
+    "quality_drift_null_rate_threshold_pp": 10.0,
+    "quality_drift_record_count_drop_threshold_pct": 20.0,
+    "quality_drift_distribution_shift_threshold_pp": 15.0,
     "mutation_families": {
         "schema_update": {
             "default_impact_class": IMPACT_HIGH,
@@ -75,6 +85,14 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
             "auto_promote": False,
             "requires_approval": True,
             "requires_backward_compatibility": True,
+            "requires_privacy_scan": False,
+            "agent_auto_approve_if_confidence_ge": 0.85,
+        },
+        "data_quality_drift": {
+            "default_impact_class": IMPACT_HIGH,
+            "auto_promote": False,
+            "requires_approval": True,
+            "requires_backward_compatibility": False,
             "requires_privacy_scan": False,
             "agent_auto_approve_if_confidence_ge": 0.85,
         },
@@ -299,6 +317,19 @@ def build_candidate_actions(proposal: dict[str, Any]) -> list[dict[str, Any]]:
                 "validation_scope": ["spec_validation"],
             }
         ]
+    if proposal_type == "data_quality_drift_detected":
+        return [
+            {
+                "action_id": "action_01",
+                "action_kind": "drift_escalation",
+                "target_path": "config/pipeline_spec.json",
+                "target_selector": "quality.drift_log",
+                "operation": "record_quality_drift_event",
+                "payload": {"drift_triggers": proposal.get("items", [])},
+                "reversible": True,
+                "validation_scope": ["spec_validation"],
+            }
+        ]
     return []
 
 
@@ -351,6 +382,15 @@ def apply_proposal_to_spec(
     elif proposal_type == "metadata_key_normalization_rule":
         updated["silver"]["metadata_key_normalization"] = copy.deepcopy(
             proposal.get("proposed_change", {})
+        )
+        changed = True
+    elif proposal_type == "data_quality_drift_detected":
+        drift_log = updated.setdefault("quality", {}).setdefault("drift_log", [])
+        drift_log.append(
+            {
+                "drift_triggers": proposal.get("items", []),
+                "recorded_at_utc": proposal.get("created_at_utc", ""),
+            }
         )
         changed = True
 
@@ -609,6 +649,28 @@ def get_rejection_cooloff_policy(paths: PipelinePaths) -> dict[str, Any]:
     return {
         "threshold_cycles": int(policy.get("rejection_cooloff_threshold_cycles", 10)),
         "threshold_hours": float(policy.get("rejection_cooloff_threshold_hours", 24.0)),
+    }
+
+
+def get_quality_drift_policy(paths: PipelinePaths) -> dict[str, Any]:
+    policy = load_autonomy_policy(paths)
+    return {
+        "null_rate_columns": list(
+            policy.get(
+                "quality_drift_null_rate_columns",
+                ["message_body", "conversation_outcome", "channel", "timestamp"],
+            )
+        ),
+        "distribution_columns": list(
+            policy.get("quality_drift_distribution_columns", ["conversation_outcome", "channel"])
+        ),
+        "null_rate_threshold_pp": float(policy.get("quality_drift_null_rate_threshold_pp", 10.0)),
+        "record_count_drop_threshold_pct": float(
+            policy.get("quality_drift_record_count_drop_threshold_pct", 20.0)
+        ),
+        "distribution_shift_threshold_pp": float(
+            policy.get("quality_drift_distribution_shift_threshold_pp", 15.0)
+        ),
     }
 
 

@@ -41,6 +41,7 @@ from pipeline.agent.autonomy import (
     evaluate_candidate,
     get_agent_auto_approve_threshold,
     get_awaiting_approval_stale_policy,
+    get_quality_drift_policy,
     get_rejection_cooloff_policy,
     load_proposal_record,
     persist_autonomy_decision,
@@ -54,12 +55,19 @@ from pipeline.config import PipelinePaths
 from pipeline.io.parquet_io import write_json
 from pipeline.orchestration.compiler import compile_pipeline_spec
 from pipeline.runtime.spec import load_pipeline_spec
+from pipeline.runtime.state import (
+    compute_quality_snapshot,
+    load_pipeline_state,
+    load_quality_baseline,
+    save_pipeline_state,
+)
 
 PROPOSAL_FAMILY_SCHEMA_UPDATE = "schema_update"
 PROPOSAL_FAMILY_VALIDATION = "validation_enhancement"
 PROPOSAL_FAMILY_DERIVED = "derived_column_addition"
 PROPOSAL_FAMILY_SEGMENTATION = "segmentation_adjustment"
 PROPOSAL_FAMILY_TRANSFORMATION = "transformation_rule_change"
+PROPOSAL_FAMILY_QUALITY_DRIFT = "data_quality_drift"
 
 _CAMEL_CASE_PATTERN = re.compile(r"(?<!^)(?=[A-Z])")
 
@@ -511,6 +519,116 @@ def _transformation_proposals(
     return [context], [proposal]
 
 
+def _quality_drift_proposals(
+    paths: PipelinePaths,
+    planning_run_id: str,
+    bronze_df: pd.DataFrame,
+    baseline: dict[str, Any] | None,
+    policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if baseline is None:
+        return [], []
+
+    drift_triggers: list[str] = []
+    evidence: dict[str, Any] = {
+        "current_record_count": int(len(bronze_df)),
+        "baseline_record_count": int(baseline.get("record_count", 0)),
+        "null_rate_drift_pp": {},
+        "record_count_drop_pct": None,
+        "distribution_diff": {},
+    }
+
+    current_null_rates = {
+        col: round(float(bronze_df[col].isna().mean()), 6)
+        for col in policy["null_rate_columns"]
+        if col in bronze_df.columns
+    }
+    baseline_null_rates = dict(baseline.get("null_rates", {}))
+    evidence["current_null_rates"] = current_null_rates
+    evidence["baseline_null_rates"] = baseline_null_rates
+    for col, current_rate in current_null_rates.items():
+        if col not in baseline_null_rates:
+            continue
+        drift_pp = (current_rate - float(baseline_null_rates[col])) * 100
+        if drift_pp >= policy["null_rate_threshold_pp"]:
+            drift_triggers.append(f"{col}_null_rate_increase")
+            evidence["null_rate_drift_pp"][col] = round(drift_pp, 2)
+
+    baseline_count = int(baseline.get("record_count", 0))
+    current_count = int(len(bronze_df))
+    if baseline_count > 0:
+        drop_pct = (baseline_count - current_count) / baseline_count * 100
+        if drop_pct >= policy["record_count_drop_threshold_pct"]:
+            drift_triggers.append("record_count_drop")
+            evidence["record_count_drop_pct"] = round(drop_pct, 2)
+
+    baseline_distribution = dict(baseline.get("distribution", {}))
+    for col in policy["distribution_columns"]:
+        if col not in bronze_df.columns or col not in baseline_distribution:
+            continue
+        current_freq: dict[str, float] = {
+            k: round(float(v), 6)
+            for k, v in bronze_df[col].dropna().astype(str).value_counts(normalize=True).items()
+        }
+        baseline_freq: dict[str, float] = {
+            k: float(v) for k, v in baseline_distribution[col].items()
+        }
+        all_values = set(current_freq) | set(baseline_freq)
+        max_shift_pp = (
+            max(abs(current_freq.get(v, 0.0) - baseline_freq.get(v, 0.0)) * 100 for v in all_values)
+            if all_values
+            else 0.0
+        )
+        if max_shift_pp >= policy["distribution_shift_threshold_pp"]:
+            drift_triggers.append(f"{col}_distribution_shift")
+            evidence["distribution_diff"][col] = {
+                v: round((current_freq.get(v, 0.0) - baseline_freq.get(v, 0.0)) * 100, 2)
+                for v in all_values
+            }
+
+    if not drift_triggers:
+        return [], []
+
+    drift_triggers = sorted(drift_triggers)
+    context = _build_context(
+        "quality_drift_detected",
+        "Desvio estatistico detectado no Bronze em relacao ao baseline registrado.",
+        evidence | {"items": drift_triggers},
+    )
+    proposal = _build_proposal(
+        paths=paths,
+        planning_run_id=planning_run_id,
+        proposal_type="data_quality_drift_detected",
+        proposal_family=PROPOSAL_FAMILY_QUALITY_DRIFT,
+        title="Desvio de qualidade detectado no Bronze",
+        context_detected=context,
+        proposed_change={
+            "target_path": "quality.drift_log",
+            "operation": "record_quality_drift_event",
+            "drift_triggers": drift_triggers,
+        },
+        expected_impact=(
+            "Registra evento de desvio de qualidade e sinaliza necessidade "
+            "de rebuild da Silver com revisao de regras de quarentena."
+        ),
+        risk="high",
+        impact_scope="cross_layer",
+        requires_approval=True,
+        rationale=(
+            "Desvio estatistico no Bronze pode propagar silenciosamente "
+            "para Silver e Gold sem acionar validacoes estruturais."
+        ),
+        affected_layers=["bronze", "silver", "gold"],
+        affected_artifacts=[
+            "config/pipeline_spec.json",
+            "reports/monitoring/latest_plan_report.json",
+        ],
+        privacy_impact="none",
+        items=drift_triggers,
+    )
+    return [context], [proposal]
+
+
 def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
     spec = load_pipeline_spec(paths.pipeline_spec)
     bronze_df = pd.read_parquet(paths.raw_bronze_source)
@@ -519,6 +637,8 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
     observed_metadata_fields = _discover_metadata_fields(metadata_objects)
 
     planning_run_id = f"planning_run_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
+    quality_drift_policy = get_quality_drift_policy(paths)
+    quality_baseline = load_quality_baseline(paths)
     detected_contexts = [
         _build_context(
             "bronze_observation_summary",
@@ -538,6 +658,9 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         _derived_column_proposals(paths, planning_run_id, spec, metadata_objects),
         _segmentation_proposals(paths, planning_run_id, spec, bronze_df),
         _transformation_proposals(paths, planning_run_id, metadata_objects),
+        _quality_drift_proposals(
+            paths, planning_run_id, bronze_df, quality_baseline, quality_drift_policy
+        ),
     ]
     for contexts, generated_proposals in detector_results:
         detected_contexts.extend(contexts)
@@ -934,4 +1057,15 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         },
     }
     write_json(report, paths.monitoring / "latest_plan_report.json")
+
+    quality_snapshot = compute_quality_snapshot(
+        bronze_df,
+        quality_drift_policy["null_rate_columns"],
+        quality_drift_policy["distribution_columns"],
+    )
+    state_path = paths.state / "pipeline_state.json"
+    pipeline_state = load_pipeline_state(state_path)
+    pipeline_state["quality_baseline"] = quality_snapshot
+    save_pipeline_state(state_path, pipeline_state)
+
     return report
