@@ -184,7 +184,10 @@ def test_run_pipeline_writes_validation_report(tmp_path: Path) -> None:
     assert "message_body" not in gold_df.columns
 
 
-def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, monkeypatch) -> None:
+def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path) -> None:
+    from pipeline.orchestration.operator import run_cycle
+    from pipeline.orchestration.operator_stages import StageDeps
+
     root = tmp_path
     (root / "docs").mkdir()
     frame = _sample_frame()
@@ -194,19 +197,16 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
     first = run_pipeline(paths, force=True)
     assert first.status == "success"
 
-    import pipeline.orchestration.operator as operator_module
-
-    def explode(
-        _silver: pd.DataFrame,
-        _silver_messages: pd.DataFrame,
-        _silver_conversations_llm: pd.DataFrame | None = None,
-        compiled_plan=None,
-        gold_column_plan=None,
-    ) -> pd.DataFrame:
+    def explode(*a, **kw) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(operator_module, "build_gold", explode)
-    second = run_pipeline(paths, force=True)
+    deps = StageDeps(
+        run_bronze=StageDeps.default().run_bronze,
+        run_silver=StageDeps.default().run_silver,
+        run_gold=explode,
+        run_validation=StageDeps.default().run_validation,
+    )
+    second = run_cycle(paths, force=True, stage_deps=deps)
 
     agent_report = json.loads(Path(second.agent_report_path).read_text(encoding="utf-8"))
     alert_report = json.loads(Path(second.alert_report_path).read_text(encoding="utf-8"))
@@ -215,9 +215,10 @@ def test_run_pipeline_applies_agent_fallback_on_runtime_error(tmp_path: Path, mo
     assert alert_report["event"]["should_alert"] is True
 
 
-def test_run_pipeline_emits_terminal_log_for_failure_stage(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_run_pipeline_emits_terminal_log_for_failure_stage(tmp_path: Path, capsys) -> None:
+    from pipeline.orchestration.operator import run_cycle
+    from pipeline.orchestration.operator_stages import StageDeps
+
     root = tmp_path
     (root / "docs").mkdir()
     frame = _sample_frame()
@@ -227,20 +228,17 @@ def test_run_pipeline_emits_terminal_log_for_failure_stage(
     first = run_pipeline(paths, force=True)
     assert first.status == "success"
 
-    import pipeline.orchestration.operator as operator_module
-
-    def explode(
-        _silver: pd.DataFrame,
-        _silver_messages: pd.DataFrame,
-        _silver_conversations_llm: pd.DataFrame | None = None,
-        compiled_plan=None,
-        gold_column_plan=None,
-    ) -> pd.DataFrame:
+    def explode(*a, **kw) -> None:
         raise RuntimeError("boom")
 
     configure_terminal_logging()
-    monkeypatch.setattr(operator_module, "build_gold", explode)
-    second = run_pipeline(paths, force=True)
+    deps = StageDeps(
+        run_bronze=StageDeps.default().run_bronze,
+        run_silver=StageDeps.default().run_silver,
+        run_gold=explode,
+        run_validation=StageDeps.default().run_validation,
+    )
+    second = run_cycle(paths, force=True, stage_deps=deps)
     captured = capsys.readouterr()
 
     assert second.status == "fallback_to_last_successful"
@@ -380,9 +378,10 @@ def test_react_loop_action_in_agent_report(tmp_path: Path) -> None:
     assert run_record_agent_summary is not None
 
 
-def test_stages_run_inside_react_loop(tmp_path: Path, monkeypatch) -> None:
-    """Stages should be called inside the loop (by checking logs contain react_loop_action)."""
-    import pipeline.orchestration.operator as op_mod
+def test_stages_run_inside_react_loop(tmp_path: Path) -> None:
+    """Stages should be called inside the loop (verified via StageDeps DI tracing)."""
+    from pipeline.orchestration.operator import run_cycle
+    from pipeline.orchestration.operator_stages import StageDeps
     from pipeline.runtime.terminal_logging import configure_terminal_logging
 
     root = tmp_path
@@ -392,21 +391,24 @@ def test_stages_run_inside_react_loop(tmp_path: Path, monkeypatch) -> None:
     paths = build_paths(root)
 
     call_log: list[str] = []
-    orig_bronze = op_mod.load_bronze_frame
-    orig_silver = op_mod.build_silver
+    default = StageDeps.default()
 
     def traced_bronze(*a, **kw):  # type: ignore[no-untyped-def]
         call_log.append("bronze")
-        return orig_bronze(*a, **kw)
+        return default.run_bronze(*a, **kw)
 
     def traced_silver(*a, **kw):  # type: ignore[no-untyped-def]
         call_log.append("silver")
-        return orig_silver(*a, **kw)
+        return default.run_silver(*a, **kw)
 
-    monkeypatch.setattr(op_mod, "load_bronze_frame", traced_bronze)
-    monkeypatch.setattr(op_mod, "build_silver", traced_silver)
+    deps = StageDeps(
+        run_bronze=traced_bronze,
+        run_silver=traced_silver,
+        run_gold=default.run_gold,
+        run_validation=default.run_validation,
+    )
 
-    result = run_pipeline(paths, force=True)
+    result = run_cycle(paths, force=True, stage_deps=deps)
     assert result.status == "success"
     assert "bronze" in call_log
     assert "silver" in call_log
@@ -522,3 +524,43 @@ def test_llm_kind_map_not_applied_for_unknown_kind() -> None:
             llm_diagnoses=[diag],
         )
     assert not any("via_llm_kind_map" in a for a in result["actions"])
+
+
+def test_run_cycle_uses_injected_stage_deps(tmp_path: Path) -> None:
+    from pipeline.orchestration.operator import run_cycle
+    from pipeline.orchestration.operator_stages import StageDeps
+
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = build_paths(root)
+    invoked: dict[str, bool] = {"silver": False}
+    default = StageDeps.default()
+
+    def mock_silver(*a, **kw):
+        invoked["silver"] = True
+        return default.run_silver(*a, **kw)
+
+    deps = StageDeps(
+        run_bronze=default.run_bronze,
+        run_silver=mock_silver,
+        run_gold=default.run_gold,
+        run_validation=default.run_validation,
+    )
+    run_cycle(paths, force=True, stage_deps=deps)
+    assert invoked["silver"] is True
+
+
+def test_run_cycle_default_deps_run_end_to_end(tmp_path: Path) -> None:
+    from pipeline.orchestration.operator import run_cycle
+
+    root = tmp_path
+    (root / "docs").mkdir()
+    frame = _sample_frame()
+    frame.to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
+
+    paths = build_paths(root)
+    result = run_cycle(paths, force=True)
+    assert result.status == "success"

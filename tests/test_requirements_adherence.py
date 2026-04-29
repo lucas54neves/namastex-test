@@ -213,27 +213,26 @@ def test_adherence_gold_macro_artifact_exists_after_run(tmp_path: Path) -> None:
     )
 
 
-def test_adherence_simulated_failure_generates_alert_and_diagnosis(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_adherence_simulated_failure_generates_alert_and_diagnosis(tmp_path: Path) -> None:
+    from pipeline.orchestration.operator import run_cycle
+    from pipeline.orchestration.operator_stages import StageDeps
+
     _write_bronze(tmp_path, _bronze_rows())
 
     paths = build_paths(tmp_path)
     first = run_pipeline(paths, force=True)
     assert first.status == "success"
 
-    import pipeline.orchestration.operator as operator_module
-
-    def explode(
-        _silver: pd.DataFrame,
-        _silver_messages: pd.DataFrame,
-        _silver_conversations_llm: pd.DataFrame | None = None,
-        compiled_plan=None,
-    ) -> pd.DataFrame:
+    def explode(*a, **kw) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(operator_module, "build_gold", explode)
-    second = run_pipeline(paths, force=True)
+    deps = StageDeps(
+        run_bronze=StageDeps.default().run_bronze,
+        run_silver=StageDeps.default().run_silver,
+        run_gold=explode,
+        run_validation=StageDeps.default().run_validation,
+    )
+    second = run_cycle(paths, force=True, stage_deps=deps)
 
     agent_report = json.loads(Path(second.agent_report_path).read_text(encoding="utf-8"))
     alert_report = json.loads(Path(second.alert_report_path).read_text(encoding="utf-8"))

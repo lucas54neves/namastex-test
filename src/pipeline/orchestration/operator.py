@@ -1,30 +1,24 @@
-# GUD-001 EXCEPTION: This file exceeds 400 lines. Justification: run_cycle() must call
-# load_bronze_frame, build_silver, build_gold, and validate_gold directly from this module's
-# namespace so that existing tests can monkeypatch them via pipeline.orchestration.operator
-# (CON-004). Delegating those calls to operator_stages would break the patches. All auxiliary
-# logic has been extracted to operator_artifacts, operator_reports, and operator_stages; only
-# run_cycle() and build_monitor_snapshot() are defined here.
+# GUD-001 EXCEPTION: This file exceeds 400 lines. Justification: run_cycle() retains a
+# non-trivial setup phase (planner, fingerprint, execution-plan, skip-path), a full
+# exception-fallback handler, and report-writing logic that together exceed the threshold
+# even after extracting all stage-dispatch logic to _run_react_iteration in operator_stages.py.
+# Further decomposition is deferred to a separate spec.
 from __future__ import annotations
 
 import logging
 from typing import Any, cast
 
-from pipeline.agent.agent import (
-    attempt_auto_remediation,
-    diagnose_exception,
-    diagnose_validation_failures,
-)
+from pipeline.agent.agent import diagnose_exception
 from pipeline.agent.execution_planner import (
     VALID_STAGES,
     ExecutionPlan,
     LoopAction,
     build_execution_plan,
     build_observation,
-    decide_loop_action,
 )
 from pipeline.agent.planner import plan_pipeline_spec
 from pipeline.config import PipelinePaths, ensure_directories
-from pipeline.io.parquet_io import read_json, read_parquet, write_parquet
+from pipeline.io.parquet_io import read_json
 from pipeline.orchestration.compiler import compile_pipeline_spec
 from pipeline.orchestration.operator_artifacts import (  # noqa: F401
     PipelineArtifacts,
@@ -47,20 +41,17 @@ from pipeline.orchestration.operator_reports import (  # noqa: F401
     _write_reports,
 )
 from pipeline.orchestration.operator_stages import (  # noqa: F401
+    StageDeps,
     _determine_retry_stage,
     _get_llm_call,
     _run_bronze_stage,
     _run_gold_stage,
+    _run_react_iteration,
     _run_silver_stage,
     _run_validation_stage,
     _run_validation_suite,
 )
-from pipeline.quality.publication import sanitize_for_publication
-from pipeline.quality.quality import (
-    summarize_validation_results,
-    validate_gold,  # noqa: F401 — patchable via operator namespace (CON-004)
-)
-from pipeline.quality.quarantine import quarantine_bronze_records
+from pipeline.quality.quality import validate_gold  # noqa: F401 — re-exported (CON-003)
 from pipeline.runtime.spec import ensure_pipeline_spec
 from pipeline.runtime.state import (
     build_source_fingerprint,
@@ -69,14 +60,13 @@ from pipeline.runtime.state import (
     save_pipeline_state,
 )
 from pipeline.runtime.terminal_logging import log_event
-from pipeline.transforms.bronze import load_bronze_frame
-from pipeline.transforms.conversation_enrichment import build_conversation_enrichment
-from pipeline.transforms.gold import build_gold
-from pipeline.transforms.gold_macro import build_gold_macro
-from pipeline.transforms.silver import build_silver, build_silver_leads
+from pipeline.transforms.bronze import load_bronze_frame  # noqa: F401 — re-exported (CON-003)
+from pipeline.transforms.gold import build_gold  # noqa: F401 — re-exported (CON-003)
+from pipeline.transforms.silver import build_silver  # noqa: F401 — re-exported (CON-003)
 
 __all__ = [
     "PipelineArtifacts",
+    "StageDeps",
     "_EMPTY_PLANNER_REPORT",
     "run_cycle",
     "build_monitor_snapshot",
@@ -97,12 +87,13 @@ __all__ = [
     "_incident_id",
     "_get_llm_call",
     "_determine_retry_stage",
+    "_run_react_iteration",
     "_run_bronze_stage",
     "_run_silver_stage",
     "_run_gold_stage",
     "_run_validation_stage",
     "_run_validation_suite",
-    # patchable names used by tests (imported at module level)
+    # re-exported names kept for CON-003 compatibility
     "load_bronze_frame",
     "build_silver",
     "build_gold",
@@ -125,7 +116,10 @@ def run_cycle(
     force: bool = False,
     idle_cycle_count: int = 0,
     planner_cadence: int = 0,
-) -> PipelineArtifacts:  # noqa: C901
+    *,
+    stage_deps: StageDeps | None = None,
+) -> PipelineArtifacts:
+    deps = stage_deps or StageDeps.default()
     ensure_directories(paths)
     spec = ensure_pipeline_spec(paths.pipeline_spec)
     compiled_plan = compile_pipeline_spec(spec)
@@ -245,353 +239,77 @@ def run_cycle(
         log_event(logging.WARNING, "run_skipped", reason="source_fingerprint_unchanged")
         return _skip_artifacts(paths)
 
-    bronze_path = paths.bronze / "conversations.parquet"
-    silver_path = paths.silver / "silver_leads.parquet"
-    silver_messages_path = paths.silver / "silver_messages.parquet"
-    silver_conversations_llm_path = paths.silver / "silver_conversations_llm.parquet"
-    gold_path = paths.gold / "conversations_gold.parquet"
-
-    current_stage = "initialization"
-
-    try:
-        # Initialize all stage variables (populated inside the ReAct loop)
-        bronze_df: Any = None
-        silver_df: Any = None
-        silver_messages_df: Any = None
-        silver_runtime_df: Any = None
-        silver_messages_runtime_df: Any = None
-        silver_conversations_llm_df: Any = None
-        silver_conversations_llm_runtime_df: Any = None
-        gold_df: Any = None
-        gold_runtime_df: Any = None
-        gold_macro_df: Any = None
-        gold_column_plan: Any = None
-        quarantine: dict[str, Any] = {"clean_df": None, "report": {"quarantined_rows": 0}}
-        quarantine_report: dict[str, Any] = {"quarantined_rows": 0}
-
-        # --- ReAct loop: stage execution + validation + remediation ---
-        executed_stages: set[str] = set()
-        failed_stage: str | None = None
-        stage_failure_counts: dict[str, int] = {}
-        all_diagnoses: list[dict[str, Any]] = []
-        all_llm_diagnoses: list[dict[str, Any]] = []
-        remediation: dict[str, Any] = {
-            "classification": "not_applicable",
-            "attempted": False,
-            "applied": False,
-            "actions": [],
-            "resolved": False,
-            "candidate_path": None,
-        }
-        decisions: list[dict[str, Any]] = []
-        agent_status = "healthy"
-        run_status = "success"
-        final_loop_action: LoopAction | None = None
-        validation_passed = False
-        validation_summary = {
+    agent_ctx: dict[str, Any] = {
+        "execution_plan": execution_plan,
+        "changed": changed,
+        "current_fingerprint": current_fingerprint,
+        "llm_call": llm_call,
+        "stage_failure_counts": {},
+        "executed_stages": set(),
+        "failed_stage": None,
+        "validation_passed": False,
+        "run_status": "success",
+        "agent_status": "healthy",
+        "final_loop_action": None,
+        "bronze_df": None,
+        "silver_df": None,
+        "silver_messages_df": None,
+        "silver_runtime_df": None,
+        "silver_messages_runtime_df": None,
+        "silver_conversations_llm_df": None,
+        "silver_conversations_llm_runtime_df": None,
+        "gold_df": None,
+        "gold_runtime_df": None,
+        "gold_macro_df": None,
+        "gold_column_plan": None,
+        "quarantine_report": {"quarantined_rows": 0},
+        "validation_summary": {
             "status": "pending",
             "checks": [],
             "failed_checks": [],
             "executed_at_utc": _utc_now_iso(),
             "source_fingerprint": current_fingerprint,
             "pipeline_spec_path": str(paths.pipeline_spec),
-        }
-        row_counts: dict[str, Any] = {}
+        },
+        "row_counts": {},
+        "remediation": {
+            "classification": "not_applicable",
+            "attempted": False,
+            "applied": False,
+            "actions": [],
+            "resolved": False,
+            "candidate_path": None,
+        },
+        "current_stage": "initialization",
+    }
 
+    all_diagnoses: list[dict[str, Any]] = []
+    all_llm_diagnoses: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+
+    try:
         for iteration in range(_MAX_REACT_ITERATIONS):
-            current_stage = f"loop_iteration_{iteration}"
-            current_obs = build_observation(paths, state, changed)
-
-            loop_action = decide_loop_action(
-                execution_plan=execution_plan,
-                observation=current_obs,
-                stage_failure_counts=stage_failure_counts,
-                iteration=iteration,
-                validation_passed=validation_passed,
-                executed_stages=executed_stages,
-                failed_stage=failed_stage,
-            )
-            log_event(
-                logging.INFO,
-                "react_loop_action",
-                kind=loop_action.kind,
-                stage=loop_action.stage,
-                reason=loop_action.reason,
-                iteration=iteration,
-            )
-            final_loop_action = loop_action
-
-            if loop_action.kind == "complete":
+            agent_ctx["iteration"] = iteration
+            iter_result = _run_react_iteration(state, deps, paths, compiled_plan, spec, agent_ctx)
+            agent_ctx = iter_result
+            all_diagnoses.extend(iter_result.get("iteration_diagnoses", []))
+            all_llm_diagnoses.extend(iter_result.get("iteration_llm_diagnoses", []))
+            decisions.extend(iter_result.get("iteration_decisions", []))
+            if iter_result["should_break"]:
                 break
-
-            if loop_action.kind == "halt":
-                if run_status not in ("halted_critical_failure",):
-                    run_status = "halted_stage_failure"
-                    agent_status = "halted_stage_failure"
-                break
-
-            stage = loop_action.stage
-            assert stage is not None
-            failed_stage = None  # reset; set only on failure
-
-            if stage == "bronze":
-                current_stage = "bronze_load"
-                bronze_df = load_bronze_frame(str(paths.raw_bronze_source))
-                log_event(logging.INFO, "bronze_loaded", rows=int(len(bronze_df)))
-
-                current_stage = "quarantine_processing"
-                quarantine = quarantine_bronze_records(bronze_df, paths.quarantine, compiled_plan)
-                bronze_df = cast(Any, quarantine["clean_df"])
-                quarantine_report = cast(dict[str, Any], quarantine["report"])
-                log_event(
-                    logging.INFO,
-                    "quarantine_completed",
-                    quarantined_rows=quarantine_report.get("quarantined_rows", 0),
-                    clean_rows=int(len(bronze_df)),
-                )
-                current_stage = "bronze_persist"
-                write_parquet(bronze_df, bronze_path)
-                executed_stages.add("bronze")
-
-            elif stage == "silver":
-                current_stage = "silver_build"
-                silver_messages_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
-                silver_runtime_df = build_silver_leads(silver_messages_runtime_df)
-                silver_df = sanitize_for_publication(silver_runtime_df, "silver")
-                silver_messages_df = sanitize_for_publication(
-                    silver_messages_runtime_df, "silver_messages"
-                )
-                log_event(
-                    logging.INFO,
-                    "silver_completed",
-                    silver_rows=int(len(silver_df)),
-                    silver_messages_rows=int(len(silver_messages_df)),
-                )
-
-                current_stage = "enrichment_build"
-                existing_enrichment = (
-                    read_parquet(silver_conversations_llm_path)
-                    if silver_conversations_llm_path.exists()
-                    else None
-                )
-                silver_conversations_llm_runtime_df = build_conversation_enrichment(
-                    silver_messages_runtime_df,
-                    compiled_plan=compiled_plan,
-                    existing_enrichment=existing_enrichment,
-                )
-                silver_conversations_llm_df = sanitize_for_publication(
-                    silver_conversations_llm_runtime_df, "silver_conversations_llm"
-                )
-                log_event(
-                    logging.INFO,
-                    "enrichment_completed",
-                    silver_conversations_llm_rows=int(len(silver_conversations_llm_df)),
-                )
-                current_stage = "silver_persist"
-                write_parquet(silver_df, silver_path)
-                write_parquet(silver_messages_df, silver_messages_path)
-                write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
-                executed_stages.add("silver")
-                executed_stages.discard("gold")
-                executed_stages.discard("validation")
-
-            elif stage == "gold":
-                # Decision 2: Dynamic Gold Designer
-                current_stage = "gold_design"
-                from pipeline.agent.gold_designer import design_gold_columns
-
-                gold_column_plan = design_gold_columns(
-                    silver_leads_df=silver_runtime_df,
-                    silver_messages_df=silver_messages_runtime_df,
-                    spec=spec,
-                    paths=paths,
-                    llm_call=llm_call,
-                    compiled_plan=compiled_plan,
-                )
-                log_event(
-                    logging.INFO,
-                    "gold_column_plan_designed",
-                    source=gold_column_plan.source,
-                    column_count=len(gold_column_plan.columns),
-                )
-                current_stage = "gold_build"
-                gold_runtime_df = build_gold(
-                    silver_runtime_df,
-                    silver_messages_runtime_df,
-                    silver_conversations_llm_runtime_df,
-                    compiled_plan=compiled_plan,
-                    gold_column_plan=gold_column_plan,
-                )
-                gold_df = sanitize_for_publication(gold_runtime_df, "gold")
-                current_stage = "gold_persist"
-                write_parquet(gold_df, gold_path)
-                log_event(logging.INFO, "gold_completed", gold_rows=int(len(gold_df)))
-                current_stage = "gold_macro_build"
-                gold_macro_df = build_gold_macro(gold_df)
-                gold_macro_path_file = paths.gold / "conversations_gold_macro.parquet"
-                write_parquet(gold_macro_df, gold_macro_path_file)
-                log_event(
-                    logging.INFO,
-                    "gold_macro_completed",
-                    gold_macro_rows=int(len(gold_macro_df)),
-                )
-                executed_stages.add("gold")
-                executed_stages.discard("validation")
-
-            elif stage == "validation":
-                current_stage = "validation"
-                validation_results = _run_validation_suite(
-                    bronze_df,
-                    silver_df,
-                    silver_messages_df,
-                    silver_conversations_llm_df,
-                    gold_df,
-                    gold_macro_df,
-                    compiled_plan,
-                )
-                validation_summary = summarize_validation_results(validation_results)
-                validation_summary["executed_at_utc"] = _utc_now_iso()
-                validation_summary["row_counts"] = {
-                    "bronze": int(len(bronze_df)),
-                    "silver": int(len(silver_df)),
-                    "silver_messages": int(len(silver_messages_df)),
-                    "silver_conversations_llm": int(len(silver_conversations_llm_df)),
-                    "gold": int(len(gold_df)),
-                    "gold_macro": int(len(gold_macro_df)) if gold_macro_df is not None else 0,
-                }
-                validation_summary["source_fingerprint"] = current_fingerprint
-                validation_summary["pipeline_spec_path"] = str(paths.pipeline_spec)
-
-                failed_checks = cast(list[dict[str, Any]], validation_summary["failed_checks"])
-                row_counts = cast(dict[str, Any], validation_summary["row_counts"])
-                log_event(
-                    logging.INFO,
-                    "validation_completed",
-                    status=validation_summary["status"],
-                    failed_check_count=len(failed_checks),
-                    iteration=iteration,
-                )
-
-                if validation_summary["status"] == "passed":
-                    validation_passed = True
-                    executed_stages.add("validation")
-                    final_loop_action = LoopAction(
-                        kind="complete", stage=None, reason="validation_passed"
-                    )
-                    break
-
-                # Decision 3: Diagnose failures (with LLM for unknown checks)
-                diagnoses_list = diagnose_validation_failures(
-                    failed_checks, compiled_plan, llm_call=llm_call
-                )
-                iteration_diagnoses = [d.as_dict() for d in diagnoses_list]
-                all_diagnoses.extend(iteration_diagnoses)
-                iteration_llm_diagnoses = _extract_llm_diagnoses(iteration_diagnoses)
-                all_llm_diagnoses.extend(iteration_llm_diagnoses)
-
-                critical_found = any(d.get("severity") == "critical" for d in iteration_diagnoses)
-                if critical_found:
-                    log_event(logging.ERROR, "critical_diagnosis_halt", iteration=iteration)
-                    final_loop_action = LoopAction(
-                        kind="halt", stage=None, reason="critical_diagnosis"
-                    )
-                    run_status = "halted_critical_failure"
-                    agent_status = "halted_critical_failure"
-                    executed_stages.add("validation")
-                    break
-
-                # Attempt auto-remediation (GAP-02: llm_diagnoses; QUAL-03: incident/paths)
-                rem = attempt_auto_remediation(
-                    bronze_df=bronze_df,
-                    silver_df=silver_df,
-                    silver_messages_df=silver_messages_df,
-                    gold_df=gold_df,
-                    failed_checks=failed_checks,
-                    compiled_plan=compiled_plan,
-                    llm_diagnoses=diagnoses_list,
-                    incident_id=_incident_id(),
-                    paths=paths,
-                )
-                decisions.extend(cast(list[dict[str, Any]], rem["decisions"]))
-
-                if rem["resolved"]:
-                    silver_df = rem["silver_df"]
-                    silver_messages_df = rem["silver_messages_df"]
-                    gold_df = rem["gold_df"]
-                    write_parquet(silver_df, silver_path)
-                    write_parquet(silver_messages_df, silver_messages_path)
-                    write_parquet(silver_conversations_llm_df, silver_conversations_llm_path)
-                    write_parquet(gold_df, gold_path)
-                    remediation = {
-                        "classification": "auto_remediated",
-                        "attempted": True,
-                        "applied": bool(rem["actions"]),
-                        "actions": rem["actions"],
-                        "resolved": True,
-                        "candidate_path": rem.get("candidate_path"),
-                    }
-                    validation_passed = True
-                    agent_status = "auto_remediated"
-                    run_status = "success_after_auto_remediation"
-                    final_loop_action = LoopAction(
-                        kind="complete", stage=None, reason="auto_remediation_resolved"
-                    )
-                    executed_stages.add("validation")
-                    break
-
-                # Remediation didn't resolve — determine retry stage
-                retry_stage = _determine_retry_stage(failed_checks, stage_failure_counts)
-                if retry_stage is None:
-                    final_loop_action = LoopAction(
-                        kind="halt", stage=None, reason="no_recoverable_stage"
-                    )
-                    break
-
-                stage_failure_counts[retry_stage] = stage_failure_counts.get(retry_stage, 0) + 1
-                if stage_failure_counts[retry_stage] >= 2:
-                    final_loop_action = LoopAction(
-                        kind="halt",
-                        stage=retry_stage,
-                        reason=f"repeated_stage_failure:{retry_stage}",
-                    )
-                    break
-
-                log_event(
-                    logging.INFO,
-                    "react_retry_stage",
-                    stage=retry_stage,
-                    iteration=iteration,
-                    failure_count=stage_failure_counts[retry_stage],
-                )
-                # Cascade-remove the failing stage and all downstream from executed_stages
-                _stage_cascade_order = ["bronze", "silver", "gold", "validation"]
-                retry_idx = (
-                    _stage_cascade_order.index(retry_stage)
-                    if retry_stage in _stage_cascade_order
-                    else -1
-                )
-                if retry_idx >= 0:
-                    for _s in _stage_cascade_order[retry_idx:]:
-                        executed_stages.discard(_s)
-
-                remediation = {
-                    "classification": "unresolved_manual_action"
-                    if any(bool(d.get("auto_remediable")) for d in iteration_diagnoses)
-                    else "not_auto_remediable",
-                    "attempted": True,
-                    "applied": bool(rem["actions"]),
-                    "actions": rem["actions"],
-                    "resolved": False,
-                    "candidate_path": rem.get("candidate_path"),
-                }
-
-            elif stage == "planning":
-                # Planning already ran before the loop
-                executed_stages.add("planning")
-
         else:
-            # Max iterations reached without break
-            final_loop_action = LoopAction(kind="halt", stage=None, reason="max_iterations_reached")
+            agent_ctx["final_loop_action"] = LoopAction(
+                kind="halt", stage=None, reason="max_iterations_reached"
+            )
+
+        run_status = cast(str, agent_ctx["run_status"])
+        agent_status = cast(str, agent_ctx["agent_status"])
+        validation_summary = cast(dict[str, Any], agent_ctx["validation_summary"])
+        validation_passed = cast(bool, agent_ctx["validation_passed"])
+        row_counts = cast(dict[str, Any], agent_ctx["row_counts"])
+        quarantine_report = cast(dict[str, Any], agent_ctx["quarantine_report"])
+        final_loop_action = cast(LoopAction | None, agent_ctx["final_loop_action"])
+        remediation = cast(dict[str, Any], agent_ctx["remediation"])
 
         if run_status == "success":
             if validation_summary.get("status") != "passed":
@@ -631,7 +349,7 @@ def run_cycle(
                 "status": validation_summary.get("status"),
                 "failed_checks": validation_summary.get("failed_checks", []),
             },
-            details=row_counts | {"quarantined_rows": quarantine["report"]["quarantined_rows"]},
+            details=row_counts | {"quarantined_rows": quarantine_report.get("quarantined_rows", 0)},
             agent_summary={
                 "status": agent_report["status"],
                 "diagnosis_count": len(agent_report["diagnoses"]),
@@ -670,11 +388,13 @@ def run_cycle(
         if run_status in {"success", "success_after_auto_remediation"}:
             state["last_successful_run_at_utc"] = _utc_now_iso()
             state["last_successful_artifacts"] = {
-                "bronze_path": str(bronze_path),
-                "silver_path": str(silver_path),
-                "silver_messages_path": str(silver_messages_path),
-                "silver_conversations_llm_path": str(silver_conversations_llm_path),
-                "gold_path": str(gold_path),
+                "bronze_path": str(paths.bronze / "conversations.parquet"),
+                "silver_path": str(paths.silver / "silver_leads.parquet"),
+                "silver_messages_path": str(paths.silver / "silver_messages.parquet"),
+                "silver_conversations_llm_path": str(
+                    paths.silver / "silver_conversations_llm.parquet"
+                ),
+                "gold_path": str(paths.gold / "conversations_gold.parquet"),
                 "gold_macro_path": str(paths.gold / "conversations_gold_macro.parquet"),
                 "validation_report_path": str(report_path),
                 "agent_report_path": str(agent_report_path),
@@ -692,6 +412,7 @@ def run_cycle(
         return _success_artifacts(paths, run_status)
 
     except Exception as exc:
+        current_stage = agent_ctx.get("current_stage", "unknown")
         log_event(logging.ERROR, "run_failed", stage=current_stage, error=type(exc).__name__)
         diagnosis = diagnose_exception(exc).as_dict()
         last_successful_artifacts = state.get("last_successful_artifacts", {})
