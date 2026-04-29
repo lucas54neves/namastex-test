@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
 from pipeline.agent.approval import approve_proposal
+from pipeline.agent.autonomy import get_agent_auto_approve_threshold
 from pipeline.agent.planner import plan_pipeline_spec
 from pipeline.config import build_paths
+from pipeline.orchestration.operator import run_cycle
 
 
 def _write_bronze(root: Path, rows: list[dict[str, object]]) -> None:
@@ -397,3 +401,88 @@ def test_planner_holds_high_impact_change_for_approval_with_candidate_artifacts(
     assert (paths.autonomy_proposals / f"{proposal['proposal_id']}.json").exists()
     assert (paths.candidates / proposal["proposal_id"] / "candidate_diff.json").exists()
     assert decision["decision"] in {"hold_for_approval", "promote"}
+
+
+# --- FIX-A: quality_baseline persisted after plan_pipeline_spec call ---
+
+_OP = "pipeline.orchestration.operator"
+
+
+class _FingerprintStub:
+    def as_dict(self) -> dict:
+        return {"hash": "stub"}
+
+
+def test_run_cycle_preserves_quality_baseline_written_by_planner(tmp_path: Path) -> None:
+    from pipeline.agent.execution_planner import ExecutionPlan
+
+    paths = build_paths(tmp_path)
+
+    stale_state: dict = {}
+    fresh_state: dict = {
+        "quality_baseline": {
+            "recorded_at_utc": "2026-01-01T00:00:00+00:00",
+            "record_count": 250,
+            "null_rates": {},
+            "distribution": {},
+        }
+    }
+    saved_states: list[dict] = []
+
+    with (
+        patch(f"{_OP}.ensure_directories"),
+        patch(f"{_OP}.ensure_pipeline_spec", return_value={}),
+        patch(f"{_OP}.compile_pipeline_spec", return_value={}),
+        patch(f"{_OP}.build_source_fingerprint", return_value=_FingerprintStub()),
+        patch(f"{_OP}.load_pipeline_state", side_effect=[stale_state, fresh_state]),
+        patch(f"{_OP}.has_source_changed", return_value=True),
+        patch(f"{_OP}.plan_pipeline_spec", return_value={"proposals": [], "applied": False}),
+        patch(f"{_OP}.build_observation", return_value=MagicMock()),
+        patch(
+            f"{_OP}.build_execution_plan",
+            return_value=ExecutionPlan(
+                stages=[],
+                rationale="test",
+                confidence=1.0,
+                source="test",
+                generated_at_utc="2026-01-01T00:00:00+00:00",
+            ),
+        ),
+        patch(f"{_OP}.save_pipeline_state", side_effect=lambda _p, s: saved_states.append(dict(s))),
+        patch(f"{_OP}._write_reports"),
+        patch(f"{_OP}._build_alert_report", return_value={}),
+        patch(f"{_OP}.log_event"),
+    ):
+        run_cycle(paths, force=False)
+
+    assert saved_states, "save_pipeline_state was never called"
+    assert "quality_baseline" in saved_states[-1], (
+        "quality_baseline written by plan_pipeline_spec was overwritten by stale state"
+    )
+
+
+# --- FIX-C: agent_auto_approve_if_confidence_ge thresholds in autonomy policy ---
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _paths_with_real_policy(tmp_path: Path):
+    paths = build_paths(tmp_path)
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    shutil.copy(_REPO_ROOT / "config" / "agent_autonomy_policy.json", paths.autonomy_policy)
+    return paths
+
+
+def test_get_agent_auto_approve_threshold_schema_update(tmp_path: Path) -> None:
+    paths = _paths_with_real_policy(tmp_path)
+    assert get_agent_auto_approve_threshold(paths, "schema_update") == 0.90
+
+
+def test_get_agent_auto_approve_threshold_data_quality_drift(tmp_path: Path) -> None:
+    paths = _paths_with_real_policy(tmp_path)
+    assert get_agent_auto_approve_threshold(paths, "data_quality_drift") == 0.85
+
+
+def test_get_agent_auto_approve_threshold_validation_enhancement_is_none(tmp_path: Path) -> None:
+    paths = _paths_with_real_policy(tmp_path)
+    assert get_agent_auto_approve_threshold(paths, "validation_enhancement") is None

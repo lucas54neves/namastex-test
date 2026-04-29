@@ -15,7 +15,8 @@
       "auto_promote": false,
       "requires_approval": true,
       "requires_backward_compatibility": true,
-      "requires_privacy_scan": true
+      "requires_privacy_scan": true,
+      "agent_auto_approve_if_confidence_ge": 0.90
     },
     "validation_enhancement": {
       "default_impact_class": "low",
@@ -36,14 +37,24 @@
       "auto_promote": false,
       "requires_approval": true,
       "requires_backward_compatibility": true,
-      "requires_privacy_scan": false
+      "requires_privacy_scan": false,
+      "agent_auto_approve_if_confidence_ge": 0.90
     },
     "transformation_rule_change": {
       "default_impact_class": "medium",
       "auto_promote": false,
       "requires_approval": true,
       "requires_backward_compatibility": true,
-      "requires_privacy_scan": false
+      "requires_privacy_scan": false,
+      "agent_auto_approve_if_confidence_ge": 0.85
+    },
+    "data_quality_drift": {
+      "default_impact_class": "high",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": false,
+      "requires_privacy_scan": false,
+      "agent_auto_approve_if_confidence_ge": 0.85
     }
   }
 }

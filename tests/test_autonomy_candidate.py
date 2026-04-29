@@ -266,3 +266,29 @@ def test_evaluate_candidate_failing_tests_blocks_promotion(tmp_path: Path) -> No
 
     assert gate_results["targeted_tests"]["executed"] is True
     assert gate_results["targeted_tests"]["passed"] is False
+
+
+# --- FIX-B: targeted_test_paths wired in pipeline_spec.json ---
+
+
+def test_evaluate_candidate_config_targeted_test_paths_executes_on_schema_diff() -> None:
+    import copy
+    import json
+    from pathlib import Path
+
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    spec = json.loads((_REPO_ROOT / "config" / "pipeline_spec.json").read_text())
+    candidate_spec = copy.deepcopy(spec)
+    candidate_spec["gold"]["required_columns"] = list(
+        candidate_spec["gold"]["required_columns"]
+    ) + ["new_config_col"]
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+
+    with patch("subprocess.run", return_value=mock_result):
+        gate_results, _ = evaluate_candidate(_make_proposal(), spec, candidate_spec)
+
+    assert gate_results["targeted_tests"]["executed"] is True
+    assert gate_results["targeted_tests"]["passed"] is True
+    assert "tests/test_jobs.py" in gate_results["targeted_tests"]["test_paths_run"]

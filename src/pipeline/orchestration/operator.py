@@ -154,6 +154,7 @@ def run_cycle(
                 cadence=planner_cadence,
             )
         planner_report = plan_pipeline_spec(paths)
+        state = load_pipeline_state(state_path)
     else:
         log_event(
             logging.INFO,
