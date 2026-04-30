@@ -98,6 +98,31 @@ Os artefatos abaixo mostram o comportamento da camada agentica durante a execuca
 - `state/pipeline_state.json`: estado persistido do operador e CDC
 - `state/approval_state.json`: estado de aprovacoes humanas quando aplicavel
 
+## Onde observar o agente autonomo no codigo
+
+Se a intencao for inspecionar a autonomia diretamente na implementacao, estes sao os pontos mais representativos:
+
+- Entrada do ciclo de execucao: [src/pipeline/orchestration/operator.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/orchestration/operator.py:118)
+  `run_cycle()` concentra o fluxo principal: carrega estado, calcula CDC, decide se precisa planejar, monta o execution plan, executa estagios, consolida reports e persiste o estado final.
+- Deteccao de mudanca na fonte: [src/pipeline/runtime/state.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/runtime/state.py:15)
+  `SourceCDCState`, `build_cdc_state()` e `has_source_changed_cdc()` mostram como o pipeline decide se a Bronze mudou de verdade usando o conjunto de `message_id`.
+- Planejamento autonomo: [src/pipeline/agent/planner.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/planner.py:1114)
+  `plan_pipeline_spec()` observa Bronze, metadata, baseline de qualidade e drift report para gerar contexts e proposals estruturadas.
+- Politica de impacto e promocao segura: [src/pipeline/agent/autonomy.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/autonomy.py:36)
+  `DEFAULT_AUTONOMY_POLICY` documenta o envelope de autonomia por familia de mutacao. Em [src/pipeline/agent/autonomy.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/autonomy.py:175), `classify_proposal()` transforma uma proposal em decisao operacional com impacto, auto-promocao e necessidade de aprovacao.
+- Diagnostico e auto-remediacao guiada por playbooks: [src/pipeline/agent/agent.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/agent.py:152)
+  `VALIDATION_CHECK_MAP` mapeia falhas conhecidas para severidade, acao sugerida e playbook. Esse e um dos pontos mais claros para ver como o agente decide se algo e auto-remediavel.
+- Schema drift e gatilhos de evolucao: [src/pipeline/quality/schema_drift.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/quality/schema_drift.py:147)
+  `resolve_policy()` define se um drift sera propagado, alertado, colocado em quarantine ou bloqueado. Em [src/pipeline/quality/schema_drift.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/quality/schema_drift.py:196), `classify_bronze_columns()` mostra como colunas novas, ausentes ou divergentes entram no fluxo agentico.
+- Aprovacao humana para mudancas fora do envelope seguro: [src/pipeline/agent/approval.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/approval.py:18)
+  `load_approval_state()`, `approve_proposal()` e `reject_proposal()` mostram onde a autonomia para e a governanca humana assume.
+- Alertas e escalonamento externo: [src/pipeline/agent/alerts.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/alerts.py:84)
+  `build_alert_event()` e `handle_alerting()` demonstram como estados degradados ou nao remediaveis viram incidentes persistidos e, opcionalmente, entregues por webhook.
+- Execucao continua do agente: [scripts/run_pipeline_daemon.py](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/scripts/run_pipeline_daemon.py:81)
+  `run_daemon()` mostra o pipeline vivo em operacao: polling, contagem de ciclos ociosos, gatilho por cadencia do planner e backoff exponencial quando o ciclo falha.
+
+Em conjunto, esses arquivos mostram que a autonomia nao esta concentrada em um unico modulo "magico". Ela emerge da combinacao entre deteccao de mudanca, planejamento, politica de impacto, remediacao segura, aprovacao humana e observabilidade operacional.
+
 ## Como o projeto atende o enunciado
 
 | Requisito do teste | Resposta da entrega |
