@@ -65,6 +65,108 @@ O funcionamento esperado pelo teste pode ser resumido neste fluxo:
 
 Esse desenho separa autonomia de permissão. O agente pode diagnosticar e preparar a mudança sozinho, mas a promoção depende do nível de risco. Esse é o ponto central da governança desta entrega.
 
+## Confiança e fluxo de promoção
+
+A decisão de promover ou segurar uma proposal depende de dois usos diferentes do conceito de confiança numérica. Os dois ficam entre `0.0` e `1.0` e são comparados contra limiares definidos por família de mutação na política de autonomia.
+
+### 1. Confiança da proposal
+
+Mede quão segura parece uma promoção sugerida pelo agente para uma coluna ou regra observada. É calculada por `_promotion_confidence()` em [src/pipeline/agent/planner.py:349](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/planner.py:349) e anexada à proposal em [src/pipeline/agent/planner.py:613](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/planner.py:613).
+
+A fórmula combina quatro fatores ponderados, com pesos default em [src/pipeline/agent/autonomy.py:52](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/autonomy.py:52):
+
+| Fator | Peso | Como é calculado |
+| --- | --- | --- |
+| `stability` | 0.4 | `min(1.0, observed_cycles / 5.0)` — mais ciclos estáveis aumentam a confiança |
+| `type_consistency` | 0.2 | `1.0` se não houve `type_mismatch` recente, `0.0` caso contrário |
+| `cardinality_fit` | 0.2 | adequação da cardinalidade observada ao nível sugerido na escada de promoção |
+| `privacy_clean` | 0.2 | `1.0` se passou no privacy gate, `0.0` se foi bloqueada |
+
+O resultado é truncado em `[0.0, 1.0]` e arredondado em quatro casas. Falha de privacidade zera a parcela correspondente, e mismatch de tipo zera a parcela de consistência — esses dois sinais sozinhos podem manter a confiança abaixo do limiar mesmo com muitos ciclos observados.
+
+### 2. Limiar para o agente agir sozinho
+
+A política define, para cada família de mutação, a confiança mínima que permite ação automática. O campo é `agent_auto_approve_if_confidence_ge` em [src/pipeline/agent/autonomy.py:58](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/autonomy.py:58).
+
+Exemplos retirados do default:
+
+| Família | `auto_promote` | Limiar |
+| --- | --- | --- |
+| `validation_enhancement` | true | sem limiar (auto direto) |
+| `schema_promotion_bronze_optional` | true | 0.85 |
+| `schema_promotion_silver` | true | 0.85 |
+| `derived_column_addition` | true | sem limiar |
+| `transformation_rule_change` | false | 0.85 (via self-review) |
+| `schema_promotion_gold_optional` | false | 0.90 (via self-review) |
+| `schema_update` | false | 0.90 (via self-review) |
+| `schema_promotion_gold_macro_dimension` | false | sem limiar — sempre exige humano |
+
+A decisão de auto-promoção fica em [src/pipeline/agent/planner.py:1341](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/planner.py:1341) e segue a regra:
+
+```
+auto_promote_eligible = safe_auto_promote AND (threshold is None OR confidence >= threshold)
+```
+
+Se a confiança ficar abaixo do limiar, a proposal não é promovida mesmo que o candidato tenha sido materializado e tenha passado nos gates. Nesse caso ela para em `candidate_materialized` com a razão `Candidate materialized but confidence is below the auto-promotion threshold`, em [src/pipeline/agent/planner.py:1454](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/planner.py:1454).
+
+### Self-review do agente para proposals que exigem aprovação
+
+Para famílias com `requires_approval = true`, o agente pode tentar uma autorrevisão por LLM em [src/pipeline/agent/llm_advisor.py:145](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/llm_advisor.py:145), que retorna `should_approve`, `confidence` e `rationale`.
+
+A autorrevisão só substitui a aprovação humana quando, em [src/pipeline/agent/planner.py:1350](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/planner.py:1350):
+
+- todos os gates determinísticos passaram
+- a proposal exige aprovação
+- a revisão devolve `should_approve = true`
+- a confiança da revisão é `>= threshold` da família
+
+Se o LLM estiver desabilitado ou indisponível, o fallback é `should_approve = false`, ou seja, o caminho de autorrevisão nunca dispara uma promoção indevida.
+
+### Limiar degradado por envelhecimento
+
+Proposals que ficam paradas em `awaiting_approval` ganham uma redução progressiva no limiar exigido pela autorrevisão, configurada em [src/pipeline/agent/autonomy.py:37](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/autonomy.py:37) e aplicada em [src/pipeline/agent/planner.py:1372](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/src/pipeline/agent/planner.py:1372):
+
+- começa a tratar a proposal como stale após `5` ciclos
+- reduz o limiar em `0.05` por ciclo adicional
+- nunca baixa abaixo de `0.70`
+
+Exemplo: uma família com limiar base `0.90` pode cair, ciclo a ciclo, para `0.85`, `0.80`, `0.75` e `0.70`. Se nem com o piso a autorrevisão atingir o nível necessário, a proposal entra em `stale` e é registrada como falha não resolvida nas métricas de autonomia.
+
+### Fluxograma dos estados de uma proposal
+
+```mermaid
+flowchart TD
+    proposed([proposed]) --> materialize{materializa<br/>candidato}
+    materialize -- gates falham --> validation_failed([validation_failed])
+    materialize -- gates passam --> safe_auto{safe_auto_promote<br/>= true?}
+
+    safe_auto -- nao --> requires_approval{requires_approval<br/>= true?}
+    safe_auto -- sim --> conf_threshold{confianca<br/>>= threshold?}
+
+    conf_threshold -- sim --> promoted([promoted])
+    conf_threshold -- nao --> candidate_materialized([candidate_materialized<br/>confianca abaixo do limiar])
+
+    requires_approval -- nao --> candidate_materialized
+    requires_approval -- sim --> self_review{self-review LLM<br/>aprova com<br/>confianca >= threshold?}
+
+    self_review -- sim --> approved_path[approve_proposal]
+    approved_path --> promoted
+
+    self_review -- nao --> awaiting_approval([awaiting_approval])
+    awaiting_approval --> aging{ciclos sem<br/>aprovacao >= 5?}
+    aging -- nao --> awaiting_approval
+    aging -- sim --> reduced_review{self-review com<br/>limiar reduzido<br/>aprova?}
+    reduced_review -- sim --> approved_path
+    reduced_review -- nao, ainda acima do piso --> awaiting_approval
+    reduced_review -- nao, no piso 0.70 --> stale([stale])
+
+    awaiting_approval -. aprovacao humana .-> approved([approved])
+    approved --> promoted
+    awaiting_approval -. rejeicao humana .-> rejected([rejected])
+```
+
+Os estados terminais visíveis nos artefatos do agente são `promoted`, `validation_failed`, `rejected`, `stale` e `candidate_materialized`. Eles ficam registrados em `reports/agent_decisions/proposals/` e na decisão consolidada em `reports/agent_decisions/autonomy/latest_autonomy_decision.json`.
+
 ## O que o agente faz de forma autônoma
 
 - detecta mudanças na fonte e evita reprocessamento inútil em ciclos ociosos
