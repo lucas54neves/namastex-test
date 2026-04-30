@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 
@@ -34,8 +36,25 @@ def _fill_null_str(series: pd.Series) -> pd.Series:
     return series.astype("string").fillna("sem_informacao").replace("", "sem_informacao")
 
 
+def _missing_dimension_row(dimension: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "dimension": [dimension],
+            "dimension_value": ["sem_contrato"],
+            "lead_count": [0],
+            "lead_pct": [0.0],
+            "rank": [1],
+            "metric_value": [float("nan")],
+        }
+    )
+
+
 def _dimension_rows(gold_df: pd.DataFrame, dimension: str, total_leads: int) -> pd.DataFrame:
+    if dimension not in gold_df.columns:
+        return _missing_dimension_row(dimension)
     if dimension == "dominant_email_provider":
+        if "contains_email" not in gold_df.columns:
+            return _missing_dimension_row(dimension)
         subset = gold_df.loc[gold_df["contains_email"].astype(bool), dimension]
     else:
         subset = gold_df[dimension]
@@ -113,12 +132,29 @@ def _numeric_snapshot_rows(gold_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_gold_macro(gold_df: pd.DataFrame) -> pd.DataFrame:
+def build_gold_macro(
+    gold_df: pd.DataFrame,
+    *,
+    contract: Mapping[str, Any] | None = None,
+) -> pd.DataFrame:
     total_leads = len(gold_df)
     computed_at = datetime.now(UTC).isoformat()
 
+    dimensions = list(_CATEGORICAL_DIMENSIONS)
+    contract_version: int | None = None
+    if isinstance(contract, Mapping):
+        gold_macro_cfg = contract.get("gold_macro") or {}
+        if isinstance(gold_macro_cfg, Mapping):
+            declared = gold_macro_cfg.get("categorical_dimensions")
+            if isinstance(declared, list) and declared:
+                dimensions = [str(item) for item in declared]
+        try:
+            contract_version = int(contract.get("schema_contract_version") or 0)
+        except (TypeError, ValueError):
+            contract_version = None
+
     blocks: list[pd.DataFrame] = []
-    for dimension in _CATEGORICAL_DIMENSIONS:
+    for dimension in dimensions:
         blocks.append(_dimension_rows(gold_df, dimension, total_leads))
     blocks.append(_numeric_snapshot_rows(gold_df))
 
@@ -132,14 +168,16 @@ def build_gold_macro(gold_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     result = result.sort_values(["dimension", "rank"]).reset_index(drop=True)
-    return result[
-        [
-            "dimension",
-            "dimension_value",
-            "lead_count",
-            "lead_pct",
-            "rank",
-            "computed_at_utc",
-            "metric_value",
-        ]
+    columns = [
+        "dimension",
+        "dimension_value",
+        "lead_count",
+        "lead_pct",
+        "rank",
+        "computed_at_utc",
+        "metric_value",
     ]
+    if contract_version is not None:
+        result["schema_contract_version"] = contract_version
+        columns.append("schema_contract_version")
+    return result[columns]

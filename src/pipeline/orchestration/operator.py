@@ -27,6 +27,7 @@ from pipeline.orchestration.operator_artifacts import (  # noqa: F401
     agent_report_file,
     alert_report_file,
     plan_report_file,
+    schema_drift_report_file,
     state_file,
     validation_report_file,
 )
@@ -52,6 +53,7 @@ from pipeline.orchestration.operator_stages import (  # noqa: F401
     _run_validation_suite,
 )
 from pipeline.quality.quality import validate_gold  # noqa: F401 — re-exported (CON-003)
+from pipeline.quality.schema_drift import build_drift_report, write_drift_report
 from pipeline.runtime.spec import ensure_pipeline_spec
 from pipeline.runtime.state import (
     SourceCDCState,
@@ -304,6 +306,7 @@ def run_cycle(
         "gold_runtime_df": None,
         "gold_macro_df": None,
         "gold_column_plan": None,
+        "drift_events": [],
         "quarantine_report": {"quarantined_rows": 0},
         "validation_summary": {
             "status": "pending",
@@ -420,11 +423,21 @@ def run_cycle(
             alert_report_path,
             paths.agent_decisions,
         )
+        drift_events = list(agent_ctx.get("drift_events", []))
+        drift_report = build_drift_report(
+            run_id=str(agent_report.get("incident_id") or ""),
+            contract=spec,
+            events=drift_events,
+        )
+        write_drift_report(drift_report, schema_drift_report_file(paths))
+        if drift_report.schema_drift_alert:
+            validation_summary["schema_drift_alert"] = True
         log_event(
             logging.INFO,
             "reports_persisted",
             status=run_status,
             incident_id=agent_report["incident_id"],
+            schema_drift_alert=drift_report.schema_drift_alert,
         )
         state.setdefault("runs", []).append(run_record)
         state["last_cdc_state"] = current_cdc.as_dict()

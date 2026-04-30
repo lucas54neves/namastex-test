@@ -30,8 +30,11 @@ from pipeline.quality.quality import (
     validate_silver_messages,
 )
 from pipeline.quality.quarantine import quarantine_bronze_records
+from pipeline.quality.schema_drift import (
+    DriftEvent,
+)
 from pipeline.runtime.terminal_logging import log_event
-from pipeline.transforms.bronze import load_bronze_frame
+from pipeline.transforms.bronze import detect_bronze_schema_drift, load_bronze_frame
 from pipeline.transforms.conversation_enrichment import build_conversation_enrichment
 from pipeline.transforms.gold import build_gold
 from pipeline.transforms.gold_macro import build_gold_macro
@@ -98,9 +101,24 @@ def _determine_retry_stage(
 def _run_bronze_stage(
     paths: PipelinePaths,
     compiled_plan: dict[str, Any],
+    spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     bronze_df = load_bronze_frame(str(paths.raw_bronze_source))
     log_event(logging.INFO, "bronze_loaded", rows=int(len(bronze_df)))
+
+    drift_events: list[DriftEvent] = []
+    if spec:
+        drift_events = detect_bronze_schema_drift(bronze_df, spec)
+        if drift_events:
+            log_event(
+                logging.INFO,
+                "schema_drift_detected",
+                event_count=len(drift_events),
+                unknown=sum(1 for e in drift_events if e.drift_class == "unknown"),
+                missing_required=sum(
+                    1 for e in drift_events if e.drift_class == "missing_required"
+                ),
+            )
 
     quarantine = quarantine_bronze_records(bronze_df, paths.quarantine, compiled_plan)
     bronze_df = quarantine["clean_df"]
@@ -118,6 +136,7 @@ def _run_bronze_stage(
     return {
         "bronze_df": bronze_df,
         "quarantine_report": quarantine_report,
+        "drift_events": drift_events,
     }
 
 
@@ -126,9 +145,16 @@ def _run_silver_stage(
     paths: PipelinePaths,
     compiled_plan: dict[str, Any],
     silver_conversations_llm_path: Path,
+    spec: dict[str, Any] | None = None,
+    drift_events: list[DriftEvent] | None = None,
 ) -> dict[str, Any]:
-    silver_messages_runtime_df = build_silver(bronze_df, compiled_plan=compiled_plan)
-    silver_runtime_df = build_silver_leads(silver_messages_runtime_df)
+    silver_messages_runtime_df = build_silver(
+        bronze_df,
+        compiled_plan=compiled_plan,
+        contract=spec,
+        drift_events=drift_events,
+    )
+    silver_runtime_df = build_silver_leads(silver_messages_runtime_df, contract=spec)
     silver_df = sanitize_for_publication(silver_runtime_df, "silver")
     silver_messages_df = sanitize_for_publication(silver_messages_runtime_df, "silver_messages")
     log_event(
@@ -199,19 +225,22 @@ def _run_gold_stage(
         column_count=len(gold_column_plan.columns),
     )
 
+    gold_drop_events: list[DriftEvent] = []
     gold_runtime_df = build_gold(
         silver_runtime_df,
         silver_messages_runtime_df,
         silver_conversations_llm_runtime_df,
         compiled_plan=compiled_plan,
         gold_column_plan=gold_column_plan,
+        contract=spec,
+        drop_events=gold_drop_events,
     )
     gold_df = sanitize_for_publication(gold_runtime_df, "gold")
     gold_path = paths.gold / "conversations_gold.parquet"
     write_parquet(gold_df, gold_path)
     log_event(logging.INFO, "gold_completed", gold_rows=int(len(gold_df)))
 
-    gold_macro_df = build_gold_macro(gold_df)
+    gold_macro_df = build_gold_macro(gold_df, contract=spec)
     gold_macro_path = paths.gold / "conversations_gold_macro.parquet"
     write_parquet(gold_macro_df, gold_macro_path)
     log_event(logging.INFO, "gold_macro_completed", gold_macro_rows=int(len(gold_macro_df)))
@@ -221,6 +250,7 @@ def _run_gold_stage(
         "gold_runtime_df": gold_runtime_df,
         "gold_df": gold_df,
         "gold_macro_df": gold_macro_df,
+        "gold_drop_events": gold_drop_events,
     }
 
 
@@ -401,14 +431,22 @@ def _run_react_iteration(
 
     if stage == "bronze":
         agent_ctx["current_stage"] = "bronze_load"
-        result = deps.run_bronze(paths, compiled_plan)
+        result = deps.run_bronze(paths, compiled_plan, spec)
         bronze_df = result["bronze_df"]
         quarantine_report = result["quarantine_report"]
+        agent_ctx["drift_events"] = result.get("drift_events", [])
         executed_stages.add("bronze")
 
     elif stage == "silver":
         agent_ctx["current_stage"] = "silver_build"
-        result = deps.run_silver(bronze_df, paths, compiled_plan, silver_conversations_llm_path)
+        result = deps.run_silver(
+            bronze_df,
+            paths,
+            compiled_plan,
+            silver_conversations_llm_path,
+            spec,
+            agent_ctx.get("drift_events", []),
+        )
         silver_runtime_df = result["silver_runtime_df"]
         silver_messages_runtime_df = result["silver_messages_runtime_df"]
         silver_df = result["silver_df"]
@@ -434,6 +472,9 @@ def _run_react_iteration(
         gold_runtime_df = result["gold_runtime_df"]
         gold_df = result["gold_df"]
         gold_macro_df = result["gold_macro_df"]
+        existing_drift = list(agent_ctx.get("drift_events", []))
+        existing_drift.extend(result.get("gold_drop_events", []))
+        agent_ctx["drift_events"] = existing_drift
         executed_stages.add("gold")
         executed_stages.discard("validation")
 

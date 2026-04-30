@@ -42,6 +42,13 @@ def plan_report_file(paths: PipelinePaths) -> Path:
     return paths.monitoring / "latest_plan_report.json"
 
 
+def schema_drift_report_file(paths: PipelinePaths, run_id: str | None = None) -> Path:
+    name = "latest_schema_drift_report.json"
+    if run_id:
+        name = f"schema_drift_{run_id}.json"
+    return paths.monitoring / name
+
+
 def _skip_artifacts(paths: PipelinePaths) -> PipelineArtifacts:
     return PipelineArtifacts(
         bronze_path=str(paths.bronze / "conversations.parquet"),

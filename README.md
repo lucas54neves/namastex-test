@@ -135,6 +135,42 @@ Entre os atributos calculados em `conversations_gold.parquet` estão:
 
 O artefato `conversations_gold_macro.parquet` agrega toda a base pelas 11 dimensões categóricas (persona, audiência, temperatura, bucket, sentimento, closure, competitor pressure, price objection, urgência, intent stage e email provider) mais um bloco de métricas numéricas (`numeric_snapshot`). Cada linha representa um par `(dimension, dimension_value)` com contagens, proporções e ranking dentro da dimensão.
 
+### Schema evolution: detecção de drift e propagação controlada
+
+Quando a fonte de dados ganha colunas novas, o pipeline **não as descarta em silêncio**. A spec `spec/spec-architecture-schema-evolution-detection-and-propagation.md` define o contrato; a implementação está em `src/pipeline/quality/schema_drift.py`.
+
+Em cada execução o Bronze classifica toda coluna observada (e toda chave do JSON `metadata`) em uma de seis classes de drift:
+
+| Classe | Significado |
+| --- | --- |
+| `expected` | Coluna prevista no contrato e presente |
+| `optional_known` | Coluna opcional declarada e presente |
+| `unknown` | Coluna observada sem declaração no contrato |
+| `missing_required` | Coluna obrigatória ausente |
+| `type_mismatch` | Dtype declarado difere do observado |
+| `category_drift` | Valor fora do domínio declarado em `bronze.category_domains` |
+
+A política aplicada vem do contrato em `config/pipeline_spec.json`:
+
+| Política | Comportamento |
+| --- | --- |
+| `passthrough_silent` | Coluna é propagada sem alarme |
+| `passthrough_with_alert` | Coluna é propagada e o run levanta `schema_drift_alert` |
+| `quarantine` | Linhas afetadas são desviadas para `data/quarantine/` |
+| `block` | Run falha com saída não-zero |
+
+Defaults: `unknown` resolve para `passthrough_with_alert`, `missing_required` para `block`, `type_mismatch` e `category_drift` para `quarantine`. Overrides por coluna ficam em `bronze.column_policies`.
+
+Propagação por camada:
+
+- **Silver**: colunas listadas em `silver.preserve_extra_columns` mantêm o mesmo nome. As demais com política `passthrough_*` recebem prefixo `bronze_passthrough__` e são agregadas no nível de lead segundo `silver.extra_aggregation_rules` (default `first_non_null`).
+- **Gold**: só chegam colunas declaradas em `gold.required_columns`, `gold.optional_columns` ou `gold.passthrough_columns`. Qualquer coluna `bronze_passthrough__*` não promovida ao contrato Gold é descartada com motivo `not_in_gold_contract` registrado no drift report.
+- **Gold Macro**: dimensões e métricas vêm de `gold_macro.categorical_dimensions` e `gold_macro.numeric_metrics`. Dimensão referenciando coluna ausente em Gold gera placeholder `dimension_value = "sem_contrato"` em vez de quebrar. Toda linha do Gold Macro carrega a coluna `schema_contract_version`.
+
+Artefato emitido em cada execução: `reports/monitoring/latest_schema_drift_report.json`. O JSON traz o `schema_contract_version` ativo, sumário por classe, política mais alta aplicada, flag `schema_drift_alert` e a lista de eventos com sample mascarado, contagem de linhas e estado de propagação por camada. Esse relatório é insumo para a camada agêntica propor promoção de colunas novas ao contrato.
+
+Versionamento: `schema_contract_version` é um inteiro top-level no `pipeline_spec.json` e na `DEFAULT_PIPELINE_SPEC`. Mudanças que afetem detecção ou propagação devem incrementar esse valor.
+
 ## Como rodar o projeto
 
 ### Pré-requisitos
@@ -830,7 +866,7 @@ O enrichment por conversa suporta providers externos e observabilidade com Langf
 
 ### 7. Contrato declarativo central em `config/pipeline_spec.json`
 
-A spec centraliza colunas obrigatórias, buckets válidos, domínios semânticos e regras estruturais do pipeline. Isso facilita validação, planejamento de drift e evolução controlada.
+A spec centraliza colunas obrigatórias, buckets válidos, domínios semânticos e regras estruturais do pipeline. Isso facilita validação, planejamento de drift e evolução controlada. O contrato carrega `schema_contract_version`, listas de colunas opcionais e passthrough por camada (`bronze`, `silver`, `gold`, `gold_macro`) e políticas por coluna, alimentando a detecção de drift descrita em [Schema evolution](#schema-evolution-detecção-de-drift-e-propagação-controlada).
 
 ### 8. Fallback para último estado íntegro
 

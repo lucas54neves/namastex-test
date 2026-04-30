@@ -35,10 +35,18 @@ Silver build pipeline (this file)       silver.py
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 import pandas as pd
 
 # --- Reexports (facade) ---
 # See module docstring for the canonical owner of each symbol.
+from pipeline.quality.schema_drift import (  # noqa: F401
+    BRONZE_PASSTHROUGH_PREFIX,
+    DriftEvent,
+    namespaced_passthrough_name,
+)
 from pipeline.transforms.bronze import load_bronze_frame, parse_metadata  # noqa: F401
 from pipeline.transforms.gold import (  # noqa: F401
     _canonical_audience_for_persona,
@@ -202,6 +210,9 @@ __all__ = [
     "parse_metadata",
     "build_silver",
     "build_silver_leads",
+    "apply_bronze_passthrough_namespace",
+    "BRONZE_PASSTHROUGH_PREFIX",
+    "namespaced_passthrough_name",
     # gold entry point (reexported from gold.py)
     "add_gold_segments",
     "build_gold",
@@ -225,8 +236,54 @@ __all__ = [
 ]
 
 
-def build_silver(df: pd.DataFrame, compiled_plan: dict[str, object] | None = None) -> pd.DataFrame:
+def apply_bronze_passthrough_namespace(
+    df: pd.DataFrame,
+    contract: Mapping[str, Any] | None,
+    drift_events: list[DriftEvent] | None,
+) -> pd.DataFrame:
+    """Rename undeclared passthrough columns into the ``bronze_passthrough__`` namespace.
+
+    Columns listed in ``silver.preserve_extra_columns`` keep their original
+    name. Other columns whose drift policy resolves to ``passthrough_silent``
+    or ``passthrough_with_alert`` are renamed so the canonical Silver schema
+    is not polluted.
+    """
+
+    if not contract or not drift_events:
+        return df
+    silver_cfg = contract.get("silver") or {}
+    preserve = (
+        set(silver_cfg.get("preserve_extra_columns") or [])
+        if isinstance(silver_cfg, Mapping)
+        else set()
+    )
+    rename_map: dict[str, str] = {}
+    for event in drift_events:
+        if event.scope != "top_level":
+            continue
+        if event.drift_class not in {"unknown", "optional_known"}:
+            continue
+        if event.applied_policy not in {"passthrough_silent", "passthrough_with_alert"}:
+            continue
+        column = event.column
+        if column in preserve:
+            continue
+        if column in df.columns:
+            rename_map[column] = namespaced_passthrough_name(column)
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
+
+
+def build_silver(
+    df: pd.DataFrame,
+    compiled_plan: dict[str, object] | None = None,
+    *,
+    contract: Mapping[str, Any] | None = None,
+    drift_events: list[DriftEvent] | None = None,
+) -> pd.DataFrame:
     silver = parse_metadata(df)
+    silver = apply_bronze_passthrough_namespace(silver, contract, drift_events)
     silver = add_conversation_context(silver)
     silver = deduplicate_events(silver, compiled_plan=compiled_plan)
     silver = add_message_signals(silver)
@@ -236,7 +293,77 @@ def build_silver(df: pd.DataFrame, compiled_plan: dict[str, object] | None = Non
     return silver.sort_values(["conversation_id", "timestamp", "message_id"]).reset_index(drop=True)
 
 
-def build_silver_leads(silver_messages: pd.DataFrame) -> pd.DataFrame:
+def _aggregator_for_rule(rule: str):
+    if rule == "first_non_null":
+        return _first_non_null
+    if rule == "last_non_null":
+        return _last_non_null
+    if rule == "max":
+        return "max"
+    if rule == "mean":
+        return "mean"
+    if rule == "sum":
+        return "sum"
+    if rule == "any":
+        return lambda values: bool(values.fillna(False).astype(bool).any())
+    if rule == "all":
+        return lambda values: bool(values.fillna(False).astype(bool).all())
+    if rule == "mode":
+
+        def _mode(values: pd.Series) -> object:
+            non_null = values.dropna()
+            if non_null.empty:
+                return None
+            counts = non_null.value_counts()
+            return counts.index[0]
+
+        return _mode
+    return _first_non_null
+
+
+def _identify_extra_columns(
+    silver_messages: pd.DataFrame,
+    contract: Mapping[str, Any] | None,
+) -> tuple[list[str], dict[str, str]]:
+    if not contract:
+        return [], {}
+    silver_cfg = contract.get("silver") or {}
+    if not isinstance(silver_cfg, Mapping):
+        return [], {}
+    preserve = list(silver_cfg.get("preserve_extra_columns") or [])
+    rules = dict(silver_cfg.get("extra_aggregation_rules") or {})
+
+    columns: list[str] = []
+    for column in preserve:
+        if column in silver_messages.columns:
+            columns.append(column)
+    for column in silver_messages.columns:
+        if column.startswith(BRONZE_PASSTHROUGH_PREFIX) and column not in columns:
+            columns.append(column)
+    return columns, rules
+
+
+def _aggregate_extra_columns(
+    silver_messages: pd.DataFrame,
+    contract: Mapping[str, Any] | None,
+) -> pd.DataFrame | None:
+    columns, rules = _identify_extra_columns(silver_messages, contract)
+    if not columns:
+        return None
+    grouped = silver_messages.groupby("lead_key", dropna=False)
+    agg_kwargs: dict[str, tuple[str, Any]] = {}
+    for column in columns:
+        rule = rules.get(column, "first_non_null")
+        agg_kwargs[column] = (column, _aggregator_for_rule(rule))
+    aggregated = grouped.agg(**agg_kwargs).reset_index()
+    return aggregated
+
+
+def build_silver_leads(
+    silver_messages: pd.DataFrame,
+    *,
+    contract: Mapping[str, Any] | None = None,
+) -> pd.DataFrame:
     lead_frame = silver_messages.copy()
     optional_defaults: dict[str, object] = {
         "metadata_city": "",
@@ -304,4 +431,7 @@ def build_silver_leads(silver_messages: pd.DataFrame) -> pd.DataFrame:
         leads["lead_contact_ref"].astype(str).str.strip().ne(""),
         leads["lead_key"],
     )
+    extras = _aggregate_extra_columns(silver_messages, contract)
+    if extras is not None:
+        leads = leads.merge(extras, on="lead_key", how="left")
     return leads.sort_values("lead_key").reset_index(drop=True)

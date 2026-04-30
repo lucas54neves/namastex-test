@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from typing import Any
 
 import pandas as pd
 
+from pipeline.quality.schema_drift import (  # noqa: F401
+    BRONZE_PASSTHROUGH_PREFIX,
+    DriftEvent,
+)
 from pipeline.transforms.gold_macro import build_gold_macro  # noqa: F401
 from pipeline.transforms.gold_segments import (  # noqa: F401
     _canonical_audience_for_persona,
@@ -84,12 +90,79 @@ def _normalize_outcome_group(observed_outcomes: object) -> str:
     return "aberto"
 
 
+_GOLD_INTERNAL_INTERMEDIATES: tuple[str, ...] = (
+    "quoted_price_mentions",
+    "price_objection_hits",
+    "urgency_hits",
+    "urgency_strength_max",
+    "competitor_mentions_count",
+    "competitor_comparison_hits",
+    "lead_lifecycle_hours",
+)
+
+
+def _partition_gold_columns(
+    gold: pd.DataFrame,
+    contract: Mapping[str, Any] | None,
+    drop_events: list[DriftEvent] | None,
+) -> pd.DataFrame:
+    """Drop columns that violate the Gold partition contract.
+
+    Backward compatible: when no contract is supplied, only the existing
+    internal intermediates are dropped. When a contract is supplied,
+    ``bronze_passthrough__*`` columns that are not promoted into
+    ``gold.passthrough_columns`` are also dropped, with a drift event
+    recording the drop reason.
+    """
+
+    drop_columns = list(_GOLD_INTERNAL_INTERMEDIATES)
+    if contract is not None:
+        gold_cfg = contract.get("gold") or {}
+        passthrough = (
+            set(gold_cfg.get("passthrough_columns") or [])
+            if isinstance(gold_cfg, Mapping)
+            else set()
+        )
+        contract_version = 0
+        try:
+            contract_version = int(contract.get("schema_contract_version", 0) or 0)
+        except (TypeError, ValueError):
+            contract_version = 0
+        for column in list(gold.columns):
+            if not column.startswith(BRONZE_PASSTHROUGH_PREFIX):
+                continue
+            if column in passthrough:
+                continue
+            drop_columns.append(column)
+            if drop_events is not None:
+                drop_events.append(
+                    DriftEvent(
+                        layer="gold",
+                        scope="top_level",
+                        column=column,
+                        drift_class="unknown",
+                        applied_policy="passthrough_with_alert",
+                        contract_version_at_event=contract_version,
+                        propagation={
+                            "silver": "bronze_passthrough_namespace",
+                            "gold": "not_in_gold_contract",
+                            "gold_macro": "not_in_dimensions",
+                        },
+                        detail={"reason": "not_in_gold_contract"},
+                    )
+                )
+    return gold.drop(columns=drop_columns, errors="ignore")
+
+
 def build_gold(
     silver_leads: pd.DataFrame,
     silver_messages: pd.DataFrame,
     silver_conversations_llm: pd.DataFrame | None = None,
     compiled_plan: dict[str, object] | None = None,
     gold_column_plan: object | None = None,
+    *,
+    contract: Mapping[str, Any] | None = None,
+    drop_events: list[DriftEvent] | None = None,
 ) -> pd.DataFrame:
     if silver_conversations_llm is not None:
         from pipeline.transforms.conversation_enrichment import consolidate_gold_semantics
@@ -354,17 +427,7 @@ def build_gold(
         None,
     )
     base_gold = (
-        gold.drop(
-            columns=[
-                "quoted_price_mentions",
-                "price_objection_hits",
-                "urgency_hits",
-                "urgency_strength_max",
-                "competitor_mentions_count",
-                "competitor_comparison_hits",
-                "lead_lifecycle_hours",
-            ]
-        )
+        _partition_gold_columns(gold, contract, drop_events)
         .sort_values("lead_key")
         .reset_index(drop=True)
     )

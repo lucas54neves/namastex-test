@@ -9,6 +9,7 @@ from pipeline.io.parquet_io import write_json
 
 DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
     "version": 1,
+    "schema_contract_version": 2,
     "bronze": {
         "required_columns": [
             "message_id",
@@ -26,6 +27,18 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "conversation_outcome",
             "metadata",
         ],
+        "optional_columns": [],
+        "passthrough_columns": [],
+        "optional_metadata_fields": [],
+        "column_policies": {},
+        "category_domains": {
+            "direction": ["outbound", "inbound"],
+            "message_type": ["text", "image", "audio", "document", "sticker"],
+            "status": ["sent", "delivered", "read", "failed"],
+            "channel": ["whatsapp"],
+        },
+        "unknown_column_default_policy": "passthrough_with_alert",
+        "unknown_metadata_default_policy": "passthrough_with_alert",
         "supported_channels": ["whatsapp"],
         "fingerprint_strategy": "path_size_mtime",
         "quarantine": {
@@ -88,6 +101,8 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "is_business_hours",
             "lead_source",
         ],
+        "preserve_extra_columns": [],
+        "extra_aggregation_rules": {},
         "derived_fields": [
             "mentions_vehicle",
             "mentions_competitor",
@@ -162,6 +177,9 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "positive_tone_hits",
             "negative_tone_hits",
         ],
+        "optional_columns": [],
+        "passthrough_columns": [],
+        "aggregation_rules": {},
         "valid_buckets": ["lead_frio", "curta", "media", "longa"],
         "valid_personas": [
             "lead_frio",
@@ -334,6 +352,29 @@ DEFAULT_PIPELINE_SPEC: dict[str, Any] = {
             "commercial_urgency_signal",
             "intent_stage",
             "numeric_snapshot",
+        ],
+        "categorical_dimensions": [
+            "persona_profile",
+            "audience_segment",
+            "dominant_email_provider",
+            "lead_temperature",
+            "engagement_bucket",
+            "conversation_sentiment_label",
+            "closure_outcome_group",
+            "competitor_pressure_level",
+            "price_objection_intensity",
+            "commercial_urgency_signal",
+            "intent_stage",
+        ],
+        "numeric_metrics": [
+            "avg_total_messages",
+            "avg_conversation_count",
+            "avg_data_shared_score",
+            "total_leads",
+            "leads_with_email_pct",
+            "leads_with_competitor_signal_pct",
+            "leads_with_sinistro_signal_pct",
+            "leads_closed_pct",
         ],
         "numeric_snapshot_metric_value_representation": "lead_count_zero_with_metric_value_column",
     },
