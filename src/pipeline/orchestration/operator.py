@@ -54,8 +54,10 @@ from pipeline.orchestration.operator_stages import (  # noqa: F401
 from pipeline.quality.quality import validate_gold  # noqa: F401 — re-exported (CON-003)
 from pipeline.runtime.spec import ensure_pipeline_spec
 from pipeline.runtime.state import (
-    build_source_fingerprint,
-    has_source_changed,
+    SourceCDCState,
+    build_cdc_state,
+    compute_new_ids,
+    has_source_changed_cdc,
     load_pipeline_state,
     save_pipeline_state,
 )
@@ -128,11 +130,39 @@ def run_cycle(
     report_path = validation_report_file(paths)
     agent_report_path = agent_report_file(paths)
     alert_report_path = alert_report_file(paths)
-    current_fingerprint_obj = build_source_fingerprint(paths.raw_bronze_source)
-    current_fingerprint = current_fingerprint_obj.as_dict()
+    current_cdc = build_cdc_state(paths.raw_bronze_source)
     state = load_pipeline_state(state_path)
-    previous_fingerprint = state.get("last_source_fingerprint")
-    changed = has_source_changed(current_fingerprint_obj, previous_fingerprint)
+    previous_cdc = (
+        SourceCDCState.from_dict(state["last_cdc_state"]) if "last_cdc_state" in state else None
+    )
+    new_ids = compute_new_ids(current_cdc, previous_cdc)
+    changed = has_source_changed_cdc(current_cdc, previous_cdc)
+
+    if previous_cdc is not None:
+        missing_ids = previous_cdc.known_ids - current_cdc.known_ids
+        if missing_ids:
+            log_event(
+                logging.WARNING,
+                "cdc_shrink_detected",
+                missing_row_count=len(missing_ids),
+                fallback="full_run",
+            )
+            new_ids = current_cdc.known_ids
+
+    current_fingerprint: dict[str, Any] = {
+        "method": "cdc_message_id",
+        "digest": current_cdc.digest,
+        "row_count": current_cdc.row_count,
+        "new_row_count": len(new_ids),
+    }
+    source_change_evaluation: dict[str, Any] = {
+        "method": "cdc_message_id",
+        "changed": changed,
+        "new_row_count": len(new_ids),
+        "total_row_count": current_cdc.row_count,
+        "digest": current_cdc.digest,
+        "run_type": "full",
+    }
 
     cadence_triggered = (
         planner_cadence > 0 and idle_cycle_count > 0 and idle_cycle_count % planner_cadence == 0
@@ -161,7 +191,17 @@ def run_cycle(
     planner_summary = _planner_report_summary(paths, planner_report)
 
     log_event(logging.INFO, "run_started", force=force)
-    log_event(logging.INFO, "source_change_evaluated", changed=changed, force=force)
+    log_event(
+        logging.INFO,
+        "source_change_evaluated",
+        method="cdc_message_id",
+        changed=changed,
+        force=force,
+        new_row_count=len(new_ids),
+        total_row_count=current_cdc.row_count,
+        digest=current_cdc.digest,
+        run_type="full",
+    )
 
     # Decision 1: Adaptive Execution Planning
     llm_call = _get_llm_call()
@@ -221,6 +261,7 @@ def run_cycle(
             "executed_at_utc": _utc_now_iso(),
             "source_fingerprint": current_fingerprint,
             "pipeline_spec_path": str(paths.pipeline_spec),
+            "source_change_evaluation": source_change_evaluation,
         }
         alert_report = _build_alert_report(paths, run_record, agent_report, validation_summary)
         _write_reports(
@@ -243,6 +284,7 @@ def run_cycle(
         "execution_plan": execution_plan,
         "changed": changed,
         "current_fingerprint": current_fingerprint,
+        "source_change_evaluation": source_change_evaluation,
         "llm_call": llm_call,
         "stage_failure_counts": {},
         "executed_stages": set(),
@@ -305,6 +347,7 @@ def run_cycle(
         run_status = cast(str, agent_ctx["run_status"])
         agent_status = cast(str, agent_ctx["agent_status"])
         validation_summary = cast(dict[str, Any], agent_ctx["validation_summary"])
+        validation_summary["source_change_evaluation"] = source_change_evaluation
         validation_passed = cast(bool, agent_ctx["validation_passed"])
         row_counts = cast(dict[str, Any], agent_ctx["row_counts"])
         quarantine_report = cast(dict[str, Any], agent_ctx["quarantine_report"])
@@ -384,7 +427,14 @@ def run_cycle(
             incident_id=agent_report["incident_id"],
         )
         state.setdefault("runs", []).append(run_record)
-        state["last_source_fingerprint"] = current_fingerprint
+        state["last_cdc_state"] = current_cdc.as_dict()
+        state.pop("last_source_fingerprint", None)
+        log_event(
+            logging.INFO,
+            "cdc_state_persisted",
+            digest=current_cdc.digest,
+            row_count=current_cdc.row_count,
+        )
         if run_status in {"success", "success_after_auto_remediation"}:
             state["last_successful_run_at_utc"] = _utc_now_iso()
             state["last_successful_artifacts"] = {
@@ -432,6 +482,7 @@ def run_cycle(
             "executed_at_utc": _utc_now_iso(),
             "source_fingerprint": current_fingerprint,
             "pipeline_spec_path": str(paths.pipeline_spec),
+            "source_change_evaluation": source_change_evaluation,
         }
         agent_report = _build_agent_report(
             incident_id=_incident_id(),
@@ -537,7 +588,7 @@ def build_monitor_snapshot(paths: PipelinePaths) -> dict[str, Any]:
         "pipeline_spec_path": str(paths.pipeline_spec),
         "last_run": last_run,
         "run_count": len(state.get("runs", [])),
-        "last_source_fingerprint": state.get("last_source_fingerprint"),
+        "last_cdc_state": state.get("last_cdc_state"),
         "latest_validation_status": latest_report.get("status"),
         "latest_failed_checks": latest_report.get("failed_checks", []),
         "latest_agent_status": latest_agent_report.get("status"),

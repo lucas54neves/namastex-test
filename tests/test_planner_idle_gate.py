@@ -12,9 +12,13 @@ _OPERATOR_PREFIX = "pipeline.orchestration.operator"
 _DUMMY_REPORT = {"proposals": [], "applied": False}
 
 
-class _MockFingerprint:
+class _MockCDCState:
+    digest = "abc123"
+    known_ids: frozenset = frozenset()
+    row_count = 0
+
     def as_dict(self) -> dict:
-        return {"hash": "abc123"}
+        return {"digest": self.digest, "known_ids": [], "row_count": 0}
 
 
 def _mock_execution_plan(stages: list | None = None):
@@ -46,11 +50,11 @@ def _run_cycle_with_gate(
         patch(f"{_OPERATOR_PREFIX}.ensure_pipeline_spec", return_value={}),
         patch(f"{_OPERATOR_PREFIX}.compile_pipeline_spec", return_value={}),
         patch(
-            f"{_OPERATOR_PREFIX}.build_source_fingerprint",
-            return_value=_MockFingerprint(),
+            f"{_OPERATOR_PREFIX}.build_cdc_state",
+            return_value=_MockCDCState(),
         ),
         patch(f"{_OPERATOR_PREFIX}.load_pipeline_state", return_value={}),
-        patch(f"{_OPERATOR_PREFIX}.has_source_changed", return_value=changed),
+        patch(f"{_OPERATOR_PREFIX}.has_source_changed_cdc", return_value=changed),
         patch(f"{_OPERATOR_PREFIX}.plan_pipeline_spec", return_value=_DUMMY_REPORT) as mock_plan,
         patch(
             f"{_OPERATOR_PREFIX}.build_observation",

@@ -125,7 +125,8 @@ def test_run_pipeline_emits_terminal_log_for_skip(tmp_path: Path, capsys) -> Non
 
     assert first.status == "success"
     assert second.status == "skipped_no_source_change"
-    assert "INFO pipeline.runtime source_change_evaluated changed=false force=false" in captured.err
+    assert "source_change_evaluated method=cdc_message_id" in captured.err
+    assert "changed=false force=false" in captured.err
     assert (
         "WARNING pipeline.runtime run_skipped reason=source_fingerprint_unchanged" in captured.err
     )

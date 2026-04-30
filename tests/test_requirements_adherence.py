@@ -176,7 +176,11 @@ def test_adherence_pipeline_persists_operational_state(tmp_path: Path) -> None:
     state = json.loads(Path(result.state_path).read_text(encoding="utf-8"))
 
     assert result.status == "success"
-    assert state["last_source_fingerprint"]["path"].endswith("docs/conversations_bronze.parquet")
+    assert "last_cdc_state" in state
+    assert "digest" in state["last_cdc_state"]
+    assert "known_ids" in state["last_cdc_state"]
+    assert state["last_cdc_state"]["row_count"] == 2
+    assert "last_source_fingerprint" not in state
     assert state["last_successful_artifacts"]["silver_path"].endswith("silver_leads.parquet")
     assert state["last_successful_artifacts"]["silver_conversations_llm_path"].endswith(
         "silver_conversations_llm.parquet"
@@ -185,6 +189,19 @@ def test_adherence_pipeline_persists_operational_state(tmp_path: Path) -> None:
     assert state["runs"]
     assert state["runs"][-1]["status"] == "success"
     assert state["runs"][-1]["executed"] is True
+
+
+def test_adherence_cdc_state_written_fingerprint_absent(tmp_path: Path) -> None:
+    _write_bronze(tmp_path, _bronze_rows())
+
+    paths = build_paths(tmp_path)
+    result = run_pipeline(paths, force=True)
+    state = json.loads(Path(result.state_path).read_text(encoding="utf-8"))
+
+    assert result.status == "success"
+    assert "last_cdc_state" in state
+    assert sorted(state["last_cdc_state"]["known_ids"]) == ["m1", "m2"]
+    assert "last_source_fingerprint" not in state
 
 
 def test_adherence_gold_macro_artifact_exists_after_run(tmp_path: Path) -> None:

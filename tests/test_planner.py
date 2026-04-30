@@ -408,9 +408,13 @@ def test_planner_holds_high_impact_change_for_approval_with_candidate_artifacts(
 _OP = "pipeline.orchestration.operator"
 
 
-class _FingerprintStub:
+class _CDCStateStub:
+    digest = "stub"
+    known_ids: frozenset = frozenset()
+    row_count = 0
+
     def as_dict(self) -> dict:
-        return {"hash": "stub"}
+        return {"digest": self.digest, "known_ids": [], "row_count": 0}
 
 
 def test_run_cycle_preserves_quality_baseline_written_by_planner(tmp_path: Path) -> None:
@@ -433,9 +437,9 @@ def test_run_cycle_preserves_quality_baseline_written_by_planner(tmp_path: Path)
         patch(f"{_OP}.ensure_directories"),
         patch(f"{_OP}.ensure_pipeline_spec", return_value={}),
         patch(f"{_OP}.compile_pipeline_spec", return_value={}),
-        patch(f"{_OP}.build_source_fingerprint", return_value=_FingerprintStub()),
+        patch(f"{_OP}.build_cdc_state", return_value=_CDCStateStub()),
         patch(f"{_OP}.load_pipeline_state", side_effect=[stale_state, fresh_state]),
-        patch(f"{_OP}.has_source_changed", return_value=True),
+        patch(f"{_OP}.has_source_changed_cdc", return_value=True),
         patch(f"{_OP}.plan_pipeline_spec", return_value={"proposals": [], "applied": False}),
         patch(f"{_OP}.build_observation", return_value=MagicMock()),
         patch(

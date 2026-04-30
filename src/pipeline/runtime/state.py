@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +12,54 @@ import pandas as pd
 from pipeline.io.parquet_io import read_json, write_json
 
 
+@dataclass(frozen=True)
+class SourceCDCState:
+    digest: str
+    known_ids: frozenset[str]
+    row_count: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "digest": self.digest,
+            "known_ids": sorted(self.known_ids),
+            "row_count": self.row_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SourceCDCState:
+        ids = frozenset(data["known_ids"])
+        return cls(digest=data["digest"], known_ids=ids, row_count=data["row_count"])
+
+
+def _cdc_digest(ids: frozenset[str]) -> str:
+    canonical = json.dumps(sorted(ids), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def build_cdc_state(source_path: Path) -> SourceCDCState:
+    """Read only the message_id column from the source Parquet and build a SourceCDCState."""
+    df = pd.read_parquet(source_path, columns=["message_id"])
+    ids = frozenset(df["message_id"].astype(str).tolist())
+    digest = _cdc_digest(ids)
+    return SourceCDCState(digest=digest, known_ids=ids, row_count=len(ids))
+
+
+def compute_new_ids(current: SourceCDCState, previous: SourceCDCState | None) -> frozenset[str]:
+    """Return current.known_ids - previous.known_ids; returns full set if previous is None."""
+    if previous is None:
+        return current.known_ids
+    return current.known_ids - previous.known_ids
+
+
+def has_source_changed_cdc(current: SourceCDCState, previous: SourceCDCState | None) -> bool:
+    """True if previous is None or current.digest != previous.digest."""
+    if previous is None:
+        return True
+    return current.digest != previous.digest
+
+
+# DEPRECATED: SourceFingerprint, build_source_fingerprint, and has_source_changed are superseded
+# by SourceCDCState and the cdc_* functions above. Remove after incremental path is validated.
 @dataclass(frozen=True)
 class SourceFingerprint:
     path: str
