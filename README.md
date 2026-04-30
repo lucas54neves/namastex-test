@@ -171,6 +171,19 @@ Artefato emitido em cada execução: `reports/monitoring/latest_schema_drift_rep
 
 Versionamento: `schema_contract_version` é um inteiro top-level no `pipeline_spec.json` e na `DEFAULT_PIPELINE_SPEC`. Mudanças que afetem detecção ou propagação devem incrementar esse valor.
 
+### Schema promotion ladder: drift report -> governed contract promotion
+
+O agente agora usa `reports/monitoring/latest_schema_drift_report.json` como entrada primária para avaliar promoção de colunas novas observadas na Bronze. O fluxo persiste histórico em `reports/monitoring/schema_promotion_history.json`, mede estabilidade por ciclos, checa consistência de tipo, ajusta um score de confiança e passa por privacy gate antes de propor qualquer mudança contratual.
+
+A escada de promoção implementada segue impacto crescente:
+
+- `Bronze optional`: colunas estáveis, mas ainda sem justificativa para subir além da ingestão.
+- `Silver preserve`: colunas densas e de alta cardinalidade que devem ser carregadas na Silver sem chegar à Gold.
+- `Gold optional` e `Gold passthrough`: colunas estáveis e seguras para exposição analítica, com regra de agregação quando necessário.
+- `Gold Macro dimension`: sempre encadeada após `Gold optional` e sempre dependente de aprovação humana.
+
+Colunas bloqueadas pela privacy gate não geram proposal. Nesse caso o histórico registra `closed_no_action` e a métrica `privacy_block_count_total` é incrementada em `reports/monitoring/agent_autonomy_metrics.json`.
+
 ## Como rodar o projeto
 
 ### Pré-requisitos

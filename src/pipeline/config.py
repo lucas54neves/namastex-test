@@ -26,6 +26,8 @@ class PipelinePaths:
     spec_history: Path
     autonomy_policy: Path
     autonomy_metrics: Path
+    schema_drift_report: Path
+    schema_promotion_history: Path
     candidates: Path
     autonomy_decisions: Path
     autonomy_proposals: Path
@@ -78,6 +80,8 @@ def build_paths(root: Path | None = None, env: dict[str, str] | None = None) -> 
         spec_history=state / "pipeline_spec_history.json",
         autonomy_policy=config / "agent_autonomy_policy.json",
         autonomy_metrics=reports / "monitoring" / "agent_autonomy_metrics.json",
+        schema_drift_report=reports / "monitoring" / "latest_schema_drift_report.json",
+        schema_promotion_history=reports / "monitoring" / "schema_promotion_history.json",
         candidates=runtime / "candidates",
         autonomy_decisions=reports / "agent_decisions" / "autonomy",
         autonomy_proposals=reports / "agent_decisions" / "proposals",

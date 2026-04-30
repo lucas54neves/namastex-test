@@ -55,6 +55,68 @@
       "requires_backward_compatibility": false,
       "requires_privacy_scan": false,
       "agent_auto_approve_if_confidence_ge": 0.85
+    },
+    "schema_promotion_silver": {
+      "default_impact_class": "low",
+      "auto_promote": true,
+      "requires_approval": false,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": true,
+      "agent_auto_approve_if_confidence_ge": 0.85
+    },
+    "schema_promotion_silver_rule": {
+      "default_impact_class": "medium",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": false,
+      "agent_auto_approve_if_confidence_ge": 0.90
+    },
+    "schema_promotion_bronze_optional": {
+      "default_impact_class": "low",
+      "auto_promote": true,
+      "requires_approval": false,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": true,
+      "agent_auto_approve_if_confidence_ge": 0.85
+    },
+    "schema_promotion_gold_optional": {
+      "default_impact_class": "medium",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": true,
+      "agent_auto_approve_if_confidence_ge": 0.90
+    },
+    "schema_promotion_gold_passthrough": {
+      "default_impact_class": "medium",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": true,
+      "agent_auto_approve_if_confidence_ge": 0.90
+    },
+    "schema_promotion_gold_macro_dimension": {
+      "default_impact_class": "high",
+      "auto_promote": false,
+      "requires_approval": true,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": true,
+      "agent_auto_approve_if_confidence_ge": null
+    },
+    "schema_contract_version_bump": {
+      "default_impact_class": "low",
+      "auto_promote": true,
+      "requires_approval": false,
+      "requires_backward_compatibility": true,
+      "requires_privacy_scan": false,
+      "agent_auto_approve_if_confidence_ge": null
     }
+  },
+  "promotion_confidence_weights": {
+    "stability": 0.4,
+    "type_consistency": 0.2,
+    "cardinality_fit": 0.2,
+    "privacy_clean": 0.2
   }
 }

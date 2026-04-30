@@ -19,6 +19,32 @@ def _write_bronze(root: Path, rows: list[dict[str, object]]) -> None:
     pd.DataFrame(rows).to_parquet(root / "docs" / "conversations_bronze.parquet", index=False)
 
 
+def _write_drift_report(root: Path, events: list[dict[str, object]]) -> None:
+    monitoring = root / "reports" / "monitoring"
+    monitoring.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": "run-test",
+        "schema_contract_version": 2,
+        "summary": {
+            "by_class": {
+                "expected": 0,
+                "optional_known": 0,
+                "unknown": len(events),
+                "missing_required": 0,
+                "type_mismatch": 0,
+                "category_drift": 0,
+            },
+            "highest_policy_applied": "passthrough_with_alert" if events else "passthrough_silent",
+            "schema_drift_alert": bool(events),
+        },
+        "events": events,
+    }
+    (monitoring / "latest_schema_drift_report.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+
 def _base_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "message_id": "m1",
@@ -48,6 +74,28 @@ def _base_row(**overrides: object) -> dict[str, object]:
     }
     row.update(overrides)
     return row
+
+
+def _unknown_column_event(
+    column: str,
+    *,
+    sample_values_masked: list[str],
+    row_count: int,
+    non_null_count: int | None = None,
+) -> dict[str, object]:
+    return {
+        "layer": "bronze",
+        "scope": "top_level",
+        "column": column,
+        "drift_class": "unknown",
+        "applied_policy": "passthrough_with_alert",
+        "row_count": row_count,
+        "non_null_count": row_count if non_null_count is None else non_null_count,
+        "sample_values_masked": sample_values_masked,
+        "propagation": {"silver": "namespaced_passthrough"},
+        "contract_version_at_event": 2,
+        "detail": {},
+    }
 
 
 def test_planner_emits_structured_schema_update_for_new_metadata_field(tmp_path: Path) -> None:
@@ -490,3 +538,153 @@ def test_get_agent_auto_approve_threshold_data_quality_drift(tmp_path: Path) -> 
 def test_get_agent_auto_approve_threshold_validation_enhancement_is_none(tmp_path: Path) -> None:
     paths = _paths_with_real_policy(tmp_path)
     assert get_agent_auto_approve_threshold(paths, "validation_enhancement") is None
+
+
+def test_planner_auto_promotes_bronze_optional_schema_promotion_after_confidence_threshold(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    rows = [_base_row(lead_segment_hint=f"segment_{i % 40}") for i in range(120)]
+    _write_bronze(root, rows)
+    _write_drift_report(
+        root,
+        [
+            _unknown_column_event(
+                "lead_segment_hint",
+                sample_values_masked=["segment_1", "segment_2"],
+                row_count=len(rows),
+            )
+        ],
+    )
+    paths = build_paths(root)
+
+    first = plan_pipeline_spec(paths)
+    second = plan_pipeline_spec(paths)
+    third = plan_pipeline_spec(paths)
+    fourth = plan_pipeline_spec(paths)
+
+    assert not any(
+        proposal["proposal_type"] == "bronze_optional_columns_addition"
+        for proposal in first["proposals"]
+    )
+    assert not any(
+        proposal["proposal_type"] == "bronze_optional_columns_addition"
+        for proposal in second["proposals"]
+    )
+    third_proposal = next(
+        proposal
+        for proposal in third["proposals"]
+        if proposal["proposal_type"] == "bronze_optional_columns_addition"
+    )
+    fourth_proposal = next(
+        proposal
+        for proposal in fourth["proposals"]
+        if proposal["proposal_type"] == "bronze_optional_columns_addition"
+    )
+    spec_after = json.loads(paths.pipeline_spec.read_text(encoding="utf-8"))
+
+    assert third_proposal["status"] == "candidate_materialized"
+    assert third_proposal["confidence"] == 0.84
+    assert fourth_proposal["status"] == "promoted"
+    assert fourth_proposal["confidence"] == 0.92
+    assert "lead_segment_hint" in spec_after["bronze"]["optional_columns"]
+    assert spec_after["schema_contract_version"] == 3
+
+
+def test_planner_emits_chained_gold_macro_schema_promotion_proposals(tmp_path: Path) -> None:
+    root = tmp_path
+    rows = [_base_row(lead_segment_hint=["vip", "warm", "cold"][i % 3]) for i in range(90)]
+    _write_bronze(root, rows)
+    _write_drift_report(
+        root,
+        [
+            _unknown_column_event(
+                "lead_segment_hint",
+                sample_values_masked=["vip", "warm", "cold"],
+                row_count=len(rows),
+            )
+        ],
+    )
+    paths = build_paths(root)
+
+    for _ in range(5):
+        report = plan_pipeline_spec(paths)
+
+    gold_optional = next(
+        proposal
+        for proposal in report["proposals"]
+        if proposal["proposal_type"] == "gold_optional_columns_addition"
+    )
+    gold_macro = next(
+        proposal
+        for proposal in report["proposals"]
+        if proposal["proposal_type"] == "gold_macro_dimension_addition"
+    )
+
+    assert gold_optional["proposed_change"]["ladder_level"] == "level_gold_optional"
+    assert gold_optional["status"] == "awaiting_approval"
+    assert gold_macro["proposed_change"]["ladder_level"] == "level_gold_macro_dimension"
+    assert gold_macro["requires"] == [gold_optional["proposal_id"]]
+    assert gold_macro["status"] == "awaiting_approval"
+
+
+def test_planner_blocks_schema_promotion_when_privacy_gate_fails(tmp_path: Path) -> None:
+    root = tmp_path
+    rows = [_base_row(contact_email=f"lead{i}@example.com") for i in range(10)]
+    _write_bronze(root, rows)
+    _write_drift_report(
+        root,
+        [
+            _unknown_column_event(
+                "contact_email",
+                sample_values_masked=["lead1@example.com"],
+                row_count=len(rows),
+            )
+        ],
+    )
+    paths = build_paths(root)
+
+    report = plan_pipeline_spec(paths)
+    history = json.loads(paths.schema_promotion_history.read_text(encoding="utf-8"))
+    metrics = json.loads(paths.autonomy_metrics.read_text(encoding="utf-8"))
+
+    assert not any(
+        "schema_promotion" in proposal["proposal_family"] for proposal in report["proposals"]
+    )
+    assert history["columns"]["contact_email"]["last_decision"] == "closed_no_action"
+    assert metrics["privacy_block_count_total"] == 1
+
+
+def test_planner_prunes_unobserved_schema_promotion_history_after_20_cycles(tmp_path: Path) -> None:
+    root = tmp_path
+    _write_bronze(root, [_base_row()])
+    _write_drift_report(root, [])
+    paths = build_paths(root)
+    paths.schema_promotion_history.parent.mkdir(parents=True, exist_ok=True)
+    paths.schema_promotion_history.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "columns": {
+                    "old_column": {
+                        "first_seen_at_utc": "2026-01-01T00:00:00+00:00",
+                        "last_seen_at_utc": "2026-01-02T00:00:00+00:00",
+                        "observed_cycles": 4,
+                        "observed_drift_classes": ["unknown"],
+                        "observed_dtypes": ["object"],
+                        "type_mismatch_recent_cycles": 0,
+                        "last_proposal_id": None,
+                        "last_decision": None,
+                        "rejection_cooloff_until_utc": None,
+                        "consecutive_absent_cycles": 19,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan_pipeline_spec(paths)
+
+    history = json.loads(paths.schema_promotion_history.read_text(encoding="utf-8"))
+    assert history["columns"] == {}

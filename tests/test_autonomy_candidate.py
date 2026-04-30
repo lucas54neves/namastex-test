@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from pipeline.agent.autonomy import _run_targeted_tests_gate, evaluate_candidate
+from pipeline.agent.autonomy import (
+    _run_targeted_tests_gate,
+    apply_proposal_to_spec,
+    build_candidate_actions,
+    evaluate_candidate,
+)
 
 
 def _make_proposal(
@@ -292,3 +297,37 @@ def test_evaluate_candidate_config_targeted_test_paths_executes_on_schema_diff()
     assert gate_results["targeted_tests"]["executed"] is True
     assert gate_results["targeted_tests"]["passed"] is True
     assert "tests/test_jobs.py" in gate_results["targeted_tests"]["test_paths_run"]
+
+
+def test_apply_proposal_to_spec_handles_schema_promotion_with_companion_actions() -> None:
+    spec = _base_spec()
+    proposal = {
+        "proposal_type": "gold_passthrough_columns_addition",
+        "proposed_change": {
+            "target_path": "gold.passthrough_columns",
+            "operation": "add_items",
+            "items": ["response_latency_raw"],
+            "companion_actions": [
+                {
+                    "target_path": "gold.aggregation_rules",
+                    "operation": "set_keys",
+                    "keys": {"response_latency_raw": "mean"},
+                },
+                {
+                    "target_path": "schema_contract_version",
+                    "operation": "set_value",
+                    "value": 3,
+                },
+            ],
+        },
+        "items": ["response_latency_raw"],
+    }
+
+    updated, changed = apply_proposal_to_spec(spec, proposal)
+    actions = build_candidate_actions(proposal)
+
+    assert changed is True
+    assert "response_latency_raw" in updated["gold"]["passthrough_columns"]
+    assert updated["gold"]["aggregation_rules"]["response_latency_raw"] == "mean"
+    assert updated["schema_contract_version"] == 3
+    assert len(actions) == 3

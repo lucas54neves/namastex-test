@@ -61,3 +61,20 @@ def test_versioned_pipeline_spec_matches_default_required_fields() -> None:
         versioned_spec["gold"]["semantic_contracts"] == default_spec["gold"]["semantic_contracts"]
     )
     assert versioned_spec["agent"]["planner"] == default_spec["agent"]["planner"]
+
+
+def test_agent_autonomy_policy_declares_schema_promotion_families() -> None:
+    policy = json.loads(
+        (ROOT / "config" / "agent_autonomy_policy.json").read_text(encoding="utf-8")
+    )
+    families = policy["mutation_families"]
+
+    assert families["schema_promotion_silver"]["default_impact_class"] == "low"
+    assert families["schema_promotion_silver"]["agent_auto_approve_if_confidence_ge"] == 0.85
+    assert families["schema_promotion_bronze_optional"]["auto_promote"] is True
+    assert families["schema_promotion_gold_optional"]["requires_approval"] is True
+    assert families["schema_promotion_gold_passthrough"]["requires_privacy_scan"] is True
+    assert (
+        families["schema_promotion_gold_macro_dimension"]["agent_auto_approve_if_confidence_ge"]
+        is None
+    )

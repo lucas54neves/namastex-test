@@ -351,6 +351,14 @@ def test_repository_entrypoint_runs_with_versioned_spec_and_deterministic_llm_mo
         spec_history=temp_root / "state" / "pipeline_spec_history.json",
         autonomy_policy=root / "config" / "agent_autonomy_policy.json",
         autonomy_metrics=temp_root / "reports" / "monitoring" / "agent_autonomy_metrics.json",
+        schema_drift_report=temp_root
+        / "reports"
+        / "monitoring"
+        / "latest_schema_drift_report.json",
+        schema_promotion_history=temp_root
+        / "reports"
+        / "monitoring"
+        / "schema_promotion_history.json",
         candidates=temp_root / "runtime" / "candidates",
         autonomy_decisions=temp_root / "reports" / "agent_decisions" / "autonomy",
         autonomy_proposals=temp_root / "reports" / "agent_decisions" / "proposals",

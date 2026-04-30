@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,6 +44,7 @@ from pipeline.agent.autonomy import (
     get_awaiting_approval_stale_policy,
     get_quality_drift_policy,
     get_rejection_cooloff_policy,
+    load_autonomy_policy,
     load_proposal_record,
     persist_autonomy_decision,
     persist_candidate_artifacts,
@@ -52,7 +54,7 @@ from pipeline.agent.autonomy import (
 )
 from pipeline.agent.llm_advisor import agent_self_review_proposal, get_llm_advice
 from pipeline.config import PipelinePaths
-from pipeline.io.parquet_io import write_json
+from pipeline.io.parquet_io import read_json, write_json
 from pipeline.orchestration.compiler import compile_pipeline_spec
 from pipeline.runtime.spec import load_pipeline_spec
 from pipeline.runtime.state import (
@@ -61,6 +63,7 @@ from pipeline.runtime.state import (
     load_quality_baseline,
     save_pipeline_state,
 )
+from pipeline.transforms.silver_patterns import SENSITIVE_PATTERNS
 
 PROPOSAL_FAMILY_SCHEMA_UPDATE = "schema_update"
 PROPOSAL_FAMILY_VALIDATION = "validation_enhancement"
@@ -68,8 +71,16 @@ PROPOSAL_FAMILY_DERIVED = "derived_column_addition"
 PROPOSAL_FAMILY_SEGMENTATION = "segmentation_adjustment"
 PROPOSAL_FAMILY_TRANSFORMATION = "transformation_rule_change"
 PROPOSAL_FAMILY_QUALITY_DRIFT = "data_quality_drift"
+PROPOSAL_FAMILY_SCHEMA_PROMOTION_SILVER = "schema_promotion_silver"
+PROPOSAL_FAMILY_SCHEMA_PROMOTION_SILVER_RULE = "schema_promotion_silver_rule"
+PROPOSAL_FAMILY_SCHEMA_PROMOTION_BRONZE_OPTIONAL = "schema_promotion_bronze_optional"
+PROPOSAL_FAMILY_SCHEMA_PROMOTION_GOLD_OPTIONAL = "schema_promotion_gold_optional"
+PROPOSAL_FAMILY_SCHEMA_PROMOTION_GOLD_PASSTHROUGH = "schema_promotion_gold_passthrough"
+PROPOSAL_FAMILY_SCHEMA_PROMOTION_GOLD_MACRO = "schema_promotion_gold_macro_dimension"
 
 _CAMEL_CASE_PATTERN = re.compile(r"(?<!^)(?=[A-Z])")
+_PROMOTION_HISTORY_VERSION = 1
+_PROMOTION_HISTORY_PRUNE_CYCLES = 20
 
 
 def _utc_now_iso() -> str:
@@ -191,56 +202,276 @@ def _build_proposal(
     }
 
 
-def _schema_proposals(
+def _default_promotion_history() -> dict[str, Any]:
+    return {"version": _PROMOTION_HISTORY_VERSION, "columns": {}}
+
+
+def _load_promotion_history(paths: PipelinePaths) -> dict[str, Any]:
+    history = read_json(paths.schema_promotion_history, default=_default_promotion_history())
+    columns = history.get("columns")
+    if not isinstance(columns, dict):
+        history = _default_promotion_history()
+    history.setdefault("version", _PROMOTION_HISTORY_VERSION)
+    history.setdefault("columns", {})
+    return history
+
+
+def _history_entry_defaults(now_iso: str) -> dict[str, Any]:
+    return {
+        "first_seen_at_utc": now_iso,
+        "last_seen_at_utc": now_iso,
+        "observed_cycles": 0,
+        "observed_drift_classes": [],
+        "observed_dtypes": [],
+        "type_mismatch_recent_cycles": 0,
+        "last_proposal_id": None,
+        "last_decision": None,
+        "rejection_cooloff_until_utc": None,
+        "consecutive_absent_cycles": 0,
+    }
+
+
+def _append_unique_limited(values: list[str], new_value: str, limit: int = 5) -> list[str]:
+    merged = [item for item in values if item != new_value] + [new_value]
+    return merged[-limit:]
+
+
+def _infer_observed_dtype(bronze_df: pd.DataFrame, column: str) -> str:
+    if column not in bronze_df.columns:
+        return "unknown"
+    return str(bronze_df[column].dtype)
+
+
+def _load_drift_report(paths: PipelinePaths) -> dict[str, Any]:
+    return read_json(paths.schema_drift_report, default={})
+
+
+def _forbidden_raw_columns(contract: Mapping[str, Any]) -> set[str]:
+    forbidden: set[str] = set()
+    for key, value in contract.items():
+        if key == "forbidden_raw_columns" and isinstance(value, list):
+            forbidden.update(str(item) for item in value)
+        elif isinstance(value, Mapping):
+            forbidden.update(_forbidden_raw_columns(value))
+    return forbidden
+
+
+def _privacy_gate(
+    column_name: str,
+    sample_values_masked: list[str],
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    if column_name in _forbidden_raw_columns(contract):
+        return {"passed": False, "reason": "forbidden_raw_column"}
+    for sample in sample_values_masked:
+        for pattern_name, pattern in SENSITIVE_PATTERNS.items():
+            if pattern.search(str(sample)):
+                return {"passed": False, "reason": f"sensitive_pattern:{pattern_name}"}
+    return {"passed": True, "reason": None}
+
+
+def _promotion_confidence_weights(paths: PipelinePaths) -> dict[str, float]:
+    policy = load_autonomy_policy(paths)
+    weights = policy.get("promotion_confidence_weights", {})
+    defaults = {
+        "stability": 0.4,
+        "type_consistency": 0.2,
+        "cardinality_fit": 0.2,
+        "privacy_clean": 0.2,
+    }
+    resolved = {key: float(weights.get(key, default)) for key, default in defaults.items()}
+    total = sum(resolved.values())
+    if total <= 0:
+        return defaults
+    return {key: value / total for key, value in resolved.items()}
+
+
+def _promotion_stats(bronze_df: pd.DataFrame, column: str, row_count_hint: int) -> dict[str, Any]:
+    series = bronze_df[column] if column in bronze_df.columns else pd.Series(dtype="object")
+    non_null = int(series.notna().sum()) if column in bronze_df.columns else 0
+    total = int(row_count_hint or len(bronze_df) or 0)
+    density = float(non_null / total) if total else 0.0
+    non_null_series = series.dropna() if column in bronze_df.columns else pd.Series(dtype="object")
+    cardinality = int(non_null_series.astype(str).nunique()) if not non_null_series.empty else 0
+    numeric = (
+        pd.to_numeric(non_null_series, errors="coerce")
+        if not non_null_series.empty
+        else pd.Series(dtype="float64")
+    )
+    mean_defined = bool(not numeric.dropna().empty)
+    std_value = numeric.dropna().std() if not numeric.dropna().empty else None
+    std_defined = std_value is not None and not pd.isna(std_value)
+    value_class = "categorical_text"
+    if mean_defined and std_defined:
+        value_class = "numeric_continuous"
+    return {
+        "row_count": total,
+        "non_null_count": non_null,
+        "density": round(density, 6),
+        "cardinality_estimate": cardinality,
+        "value_class": value_class,
+        "mean_defined": mean_defined,
+        "std_defined": std_defined,
+    }
+
+
+def _recommended_level(
+    stats: dict[str, Any], observed_cycles: int, privacy_passed: bool
+) -> str | None:
+    density = float(stats["density"])
+    if density < 0.2 or observed_cycles < 3 or not privacy_passed:
+        return None
+    if (
+        int(stats["cardinality_estimate"]) <= 20
+        and density > 0.7
+        and stats["value_class"] == "categorical_text"
+    ):
+        return "level_gold_macro_dimension"
+    if stats["mean_defined"] and stats["std_defined"]:
+        return "level_gold_passthrough"
+    if int(stats["cardinality_estimate"]) > 100 and density > 0.5:
+        return "level_silver_preserved"
+    return "level_bronze_optional"
+
+
+def _cardinality_fit_score(stats: dict[str, Any], level: str | None) -> float:
+    if level == "level_gold_macro_dimension":
+        return 1.0 if int(stats["cardinality_estimate"]) <= 20 else 0.5
+    if level == "level_gold_passthrough":
+        return 1.0 if stats["value_class"] == "numeric_continuous" else 0.5
+    if level == "level_silver_preserved":
+        return 1.0 if int(stats["cardinality_estimate"]) > 100 else 0.5
+    if level == "level_bronze_optional":
+        return 1.0
+    return 0.5
+
+
+def _promotion_confidence(
+    paths: PipelinePaths,
+    observed_cycles: int,
+    type_mismatch_recent_cycles: int,
+    stats: dict[str, Any],
+    level: str | None,
+    privacy_passed: bool,
+) -> float:
+    weights = _promotion_confidence_weights(paths)
+    stability_score = min(1.0, observed_cycles / 5.0)
+    type_consistency_score = 1.0 if type_mismatch_recent_cycles == 0 else 0.0
+    privacy_clean_score = 1.0 if privacy_passed else 0.0
+    confidence = (
+        weights["stability"] * stability_score
+        + weights["type_consistency"] * type_consistency_score
+        + weights["cardinality_fit"] * _cardinality_fit_score(stats, level)
+        + weights["privacy_clean"] * privacy_clean_score
+    )
+    return round(max(0.0, min(1.0, confidence)), 4)
+
+
+def _promotion_change(
+    target_path: str,
+    operation: str,
+    *,
+    items: list[str] | None = None,
+    keys: dict[str, Any] | None = None,
+    value: Any = None,
+    ladder_level: str,
+    schema_contract_version: int,
+    extra_companions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    companion_actions = list(extra_companions or [])
+    companion_actions.append(
+        {
+            "target_path": "schema_contract_version",
+            "operation": "set_value",
+            "value": schema_contract_version,
+        }
+    )
+    return {
+        "target_path": target_path,
+        "operation": operation,
+        "items": list(items or []),
+        "keys": dict(keys or {}),
+        "value": value,
+        "ladder_level": ladder_level,
+        "companion_actions": companion_actions,
+    }
+
+
+def _persist_promotion_history(paths: PipelinePaths, history: dict[str, Any]) -> None:
+    write_json(history, paths.schema_promotion_history)
+
+
+def _update_promotion_history(
+    paths: PipelinePaths,
+    bronze_df: pd.DataFrame,
+    drift_report: dict[str, Any],
+) -> dict[str, Any]:
+    history = _load_promotion_history(paths)
+    now_iso = _utc_now_iso()
+    events = list(drift_report.get("events", []))
+    top_level_events = [
+        event for event in events if event.get("scope") == "top_level" and event.get("column")
+    ]
+    observed_columns = {
+        str(event["column"]): event
+        for event in top_level_events
+        if str(event.get("drift_class")) in {"unknown", "optional_known", "type_mismatch"}
+    }
+    columns = history.setdefault("columns", {})
+    for column_name, event in observed_columns.items():
+        entry = columns.setdefault(column_name, _history_entry_defaults(now_iso))
+        dtype = _infer_observed_dtype(bronze_df, column_name)
+        drift_class = str(event.get("drift_class", "unknown"))
+        previous_dtype = (
+            list(entry.get("observed_dtypes", []))[-1] if entry.get("observed_dtypes") else None
+        )
+        previous_class = (
+            list(entry.get("observed_drift_classes", []))[-1]
+            if entry.get("observed_drift_classes")
+            else None
+        )
+        if previous_dtype == dtype and previous_class == drift_class:
+            entry["observed_cycles"] = int(entry.get("observed_cycles", 0)) + 1
+        else:
+            entry["observed_cycles"] = 1
+        entry["observed_drift_classes"] = _append_unique_limited(
+            list(entry.get("observed_drift_classes", [])),
+            drift_class,
+        )
+        entry["observed_dtypes"] = _append_unique_limited(
+            list(entry.get("observed_dtypes", [])),
+            dtype,
+        )
+        entry["last_seen_at_utc"] = now_iso
+        entry["consecutive_absent_cycles"] = 0
+        if drift_class == "type_mismatch":
+            entry["type_mismatch_recent_cycles"] = min(
+                5, int(entry.get("type_mismatch_recent_cycles", 0)) + 1
+            )
+        else:
+            entry["type_mismatch_recent_cycles"] = 0
+
+    for column_name in list(columns):
+        if column_name in observed_columns:
+            continue
+        entry = columns[column_name]
+        absent_cycles = int(entry.get("consecutive_absent_cycles", 0)) + 1
+        entry["consecutive_absent_cycles"] = absent_cycles
+        if absent_cycles >= _PROMOTION_HISTORY_PRUNE_CYCLES:
+            del columns[column_name]
+
+    _persist_promotion_history(paths, history)
+    return history
+
+
+def _legacy_metadata_contract_proposals(
     paths: PipelinePaths,
     planning_run_id: str,
     spec: dict[str, Any],
-    observed_columns: list[str],
     observed_metadata_fields: list[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contexts: list[dict[str, Any]] = []
     proposals: list[dict[str, Any]] = []
-
-    missing_columns = sorted(set(observed_columns) - set(spec["bronze"]["required_columns"]))
-    if missing_columns:
-        context = _build_context(
-            "bronze_schema_drift",
-            "Novas colunas foram observadas na Bronze fora do contrato atual.",
-            {"items": missing_columns, "observed_count": len(missing_columns)},
-        )
-        contexts.append(context)
-        proposals.append(
-            _build_proposal(
-                paths=paths,
-                planning_run_id=planning_run_id,
-                proposal_type="bronze_required_columns_addition",
-                proposal_family=PROPOSAL_FAMILY_SCHEMA_UPDATE,
-                title="Declarar novas colunas obrigatorias na Bronze",
-                context_detected=context,
-                proposed_change={
-                    "target_path": "bronze.required_columns",
-                    "operation": "add_items",
-                    "items": missing_columns,
-                },
-                expected_impact=(
-                    "Alinha o contrato da Bronze ao schema observado "
-                    "e melhora a auditoria de drift."
-                ),
-                risk="medium",
-                impact_scope="bronze",
-                requires_approval=True,
-                rationale=(
-                    "Novas colunas na Bronze mudam o contrato de ingestao e exigem revisao humana."
-                ),
-                affected_layers=["bronze"],
-                affected_artifacts=[
-                    "config/pipeline_spec.json",
-                    "reports/monitoring/latest_plan_report.json",
-                ],
-                privacy_impact="sensitive_detection",
-                items=missing_columns,
-            )
-        )
 
     missing_metadata_fields = sorted(
         set(observed_metadata_fields) - set(spec["silver"].get("metadata_fields", []))
@@ -287,6 +518,257 @@ def _schema_proposals(
         )
 
     return contexts, proposals
+
+
+def _promotion_proposals_from_drift_report(
+    paths: PipelinePaths,
+    planning_run_id: str,
+    spec: dict[str, Any],
+    bronze_df: pd.DataFrame,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    drift_report = _load_drift_report(paths)
+    if not drift_report.get("events"):
+        return [], [], _update_promotion_history(paths, bronze_df, drift_report)
+
+    history = _update_promotion_history(paths, bronze_df, drift_report)
+    contexts: list[dict[str, Any]] = []
+    proposals: list[dict[str, Any]] = []
+    next_contract_version = int(spec.get("schema_contract_version", 0) or 0) + 1
+
+    for raw_event in drift_report.get("events", []):
+        if raw_event.get("scope") != "top_level":
+            continue
+        if raw_event.get("applied_policy") == "block":
+            continue
+        drift_class = str(raw_event.get("drift_class", ""))
+        if drift_class not in {"unknown", "optional_known"}:
+            continue
+        column = str(raw_event.get("column", "")).strip()
+        if not column or column not in bronze_df.columns:
+            continue
+
+        entry = history.get("columns", {}).get(column, {})
+        last_proposal_id = entry.get("last_proposal_id")
+        if (
+            isinstance(last_proposal_id, str)
+            and last_proposal_id
+            and is_in_rejection_cooloff(paths, last_proposal_id)
+        ):
+            continue
+
+        privacy_gate = _privacy_gate(
+            column,
+            list(raw_event.get("sample_values_masked", [])),
+            spec,
+        )
+        stats = _promotion_stats(bronze_df, column, int(raw_event.get("row_count", len(bronze_df))))
+        observed_cycles = int(entry.get("observed_cycles", 0))
+        recommended_level = _recommended_level(stats, observed_cycles, bool(privacy_gate["passed"]))
+
+        if not privacy_gate["passed"]:
+            entry["last_decision"] = PROPOSAL_STATUS_CLOSED_NO_ACTION
+            update_autonomy_metrics(
+                paths,
+                PROPOSAL_FAMILY_SCHEMA_PROMOTION_GOLD_OPTIONAL,
+                privacy_blocked=True,
+            )
+            continue
+        if recommended_level is None:
+            continue
+
+        confidence = _promotion_confidence(
+            paths,
+            observed_cycles,
+            int(entry.get("type_mismatch_recent_cycles", 0)),
+            stats,
+            recommended_level,
+            True,
+        )
+        evidence = {
+            "column": column,
+            "drift_class": drift_class,
+            "applied_policy": raw_event.get("applied_policy"),
+            "row_count": stats["row_count"],
+            "non_null_count": stats["non_null_count"],
+            "observed_cycles": observed_cycles,
+            "cardinality_estimate": stats["cardinality_estimate"],
+            "recommended_level": recommended_level,
+            "confidence": confidence,
+            "privacy_gate": "passed",
+        }
+        context = _build_context(
+            "schema_promotion_candidate",
+            "Column observed via drift report and recommended for promotion",
+            evidence,
+        )
+        contexts.append(context)
+
+        def _finalize(
+            proposal: dict[str, Any],
+            *,
+            proposal_confidence: float = confidence,
+            proposal_context: dict[str, Any] = context,
+            proposal_entry: dict[str, Any] = entry,
+        ) -> dict[str, Any]:
+            proposal["confidence"] = proposal_confidence
+            proposal["context_detected"] = proposal_context
+            proposal_entry["last_proposal_id"] = proposal["proposal_id"]
+            return proposal
+
+        if recommended_level == "level_silver_preserved":
+            change = _promotion_change(
+                "silver.preserve_extra_columns",
+                "add_items",
+                items=[column],
+                ladder_level=recommended_level,
+                schema_contract_version=next_contract_version,
+            )
+            proposal = _build_proposal(
+                paths,
+                planning_run_id,
+                "silver_preserve_extra_columns_addition",
+                PROPOSAL_FAMILY_SCHEMA_PROMOTION_SILVER,
+                "Preserve extra Bronze column in Silver",
+                context,
+                change,
+                (
+                    "Preserves a stable high-cardinality column in Silver "
+                    "without promoting it to Gold."
+                ),
+                "low",
+                "silver",
+                False,
+                (
+                    "Column is stable and dense enough for namespaced "
+                    "carry-through promotion in Silver."
+                ),
+                ["silver"],
+                ["config/pipeline_spec.json", str(paths.schema_promotion_history)],
+                "none",
+                [column],
+            )
+            proposals.append(_finalize(proposal))
+        elif recommended_level == "level_gold_passthrough":
+            change = _promotion_change(
+                "gold.passthrough_columns",
+                "add_items",
+                items=[column],
+                ladder_level=recommended_level,
+                schema_contract_version=next_contract_version,
+                extra_companions=[
+                    {
+                        "target_path": "gold.aggregation_rules",
+                        "operation": "set_keys",
+                        "keys": {column: "mean"},
+                    }
+                ],
+            )
+            proposal = _build_proposal(
+                paths,
+                planning_run_id,
+                "gold_passthrough_columns_addition",
+                PROPOSAL_FAMILY_SCHEMA_PROMOTION_GOLD_PASSTHROUGH,
+                "Promote stable numeric column to Gold passthrough",
+                context,
+                change,
+                "Adds a numeric runtime column to the Gold contract with a mean aggregation rule.",
+                "medium",
+                "gold",
+                True,
+                "Numeric continuous columns require explicit governance before crossing into Gold.",
+                ["silver", "gold"],
+                ["config/pipeline_spec.json", str(paths.schema_promotion_history)],
+                "none",
+                [column],
+            )
+            proposals.append(_finalize(proposal))
+        elif recommended_level == "level_gold_macro_dimension":
+            optional_change = _promotion_change(
+                "gold.optional_columns",
+                "add_items",
+                items=[column],
+                ladder_level="level_gold_optional",
+                schema_contract_version=next_contract_version,
+            )
+            optional_proposal = _build_proposal(
+                paths,
+                planning_run_id,
+                "gold_optional_columns_addition",
+                PROPOSAL_FAMILY_SCHEMA_PROMOTION_GOLD_OPTIONAL,
+                "Promote stable categorical column to Gold optional",
+                context,
+                optional_change,
+                "Adds a stable categorical runtime column to the Gold optional contract.",
+                "medium",
+                "gold",
+                True,
+                "Gold exposure requires explicit approval even for low-cardinality columns.",
+                ["silver", "gold"],
+                ["config/pipeline_spec.json", str(paths.schema_promotion_history)],
+                "none",
+                [column],
+            )
+            optional_proposal = _finalize(optional_proposal)
+            proposals.append(optional_proposal)
+
+            dimension_change = _promotion_change(
+                "gold_macro.categorical_dimensions",
+                "add_items",
+                items=[column],
+                ladder_level=recommended_level,
+                schema_contract_version=next_contract_version,
+            )
+            dimension_proposal = _build_proposal(
+                paths,
+                planning_run_id,
+                "gold_macro_dimension_addition",
+                PROPOSAL_FAMILY_SCHEMA_PROMOTION_GOLD_MACRO,
+                "Promote stable categorical column to Gold Macro dimension",
+                context,
+                dimension_change,
+                "Makes the promoted Gold column available as a Gold Macro categorical dimension.",
+                "high",
+                "gold_macro",
+                True,
+                "Gold Macro dimensions always require human approval.",
+                ["gold", "gold_macro"],
+                ["config/pipeline_spec.json", str(paths.schema_promotion_history)],
+                "none",
+                [column],
+            )
+            dimension_proposal = _finalize(dimension_proposal)
+            dimension_proposal["requires"] = [optional_proposal["proposal_id"]]
+            proposals.append(dimension_proposal)
+        else:
+            change = _promotion_change(
+                "bronze.optional_columns",
+                "add_items",
+                items=[column],
+                ladder_level=recommended_level,
+                schema_contract_version=next_contract_version,
+            )
+            proposal = _build_proposal(
+                paths,
+                planning_run_id,
+                "bronze_optional_columns_addition",
+                PROPOSAL_FAMILY_SCHEMA_PROMOTION_BRONZE_OPTIONAL,
+                "Promote stable runtime column to Bronze optional",
+                context,
+                change,
+                "Declares a stable runtime column as optional in the Bronze contract.",
+                "low",
+                "bronze",
+                False,
+                "Stable drift with moderate signal should first be adopted as Bronze optional.",
+                ["bronze"],
+                ["config/pipeline_spec.json", str(paths.schema_promotion_history)],
+                "none",
+                [column],
+            )
+            proposals.append(_finalize(proposal))
+
+    _persist_promotion_history(paths, history)
+    return contexts, proposals, history
 
 
 def _validation_proposals(
@@ -652,8 +1134,18 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         )
     ]
     proposals: list[dict[str, Any]] = []
+    promotion_contexts, promotion_proposals, promotion_history = (
+        _promotion_proposals_from_drift_report(
+            paths,
+            planning_run_id,
+            spec,
+            bronze_df,
+        )
+    )
+    detected_contexts.extend(promotion_contexts)
+    proposals.extend(promotion_proposals)
     detector_results = [
-        _schema_proposals(paths, planning_run_id, spec, observed_columns, observed_metadata_fields),
+        _legacy_metadata_contract_proposals(paths, planning_run_id, spec, observed_metadata_fields),
         _validation_proposals(paths, planning_run_id, metadata_objects),
         _derived_column_proposals(paths, planning_run_id, spec, metadata_objects),
         _segmentation_proposals(paths, planning_run_id, spec, bronze_df),
@@ -740,6 +1232,11 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
     for proposal in proposals_to_evaluate:
         proposal_id = str(proposal["proposal_id"])
         approval_status = approval_status_by_proposal[proposal_id]
+        promotion_history_columns = promotion_history.setdefault("columns", {})
+        history_entry = None
+        proposal_items = list(proposal.get("items", []))
+        if len(proposal_items) == 1:
+            history_entry = promotion_history_columns.get(str(proposal_items[0]))
 
         if is_in_rejection_cooloff(paths, proposal_id):
             if approval_status != APPROVAL_STATUS_REJECTED:
@@ -841,6 +1338,13 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         )
         decision = DECISION_REJECT
         decision_reason = "Candidate gates failed."
+        auto_promote_threshold = get_agent_auto_approve_threshold(
+            paths, str(proposal["proposal_family"])
+        )
+        auto_promote_eligible = bool(proposal["safe_auto_promote"]) and (
+            auto_promote_threshold is None
+            or float(proposal.get("confidence", 0.0)) >= auto_promote_threshold
+        )
 
         # Agent self-review: auto-approve high-confidence structural proposals
         if (
@@ -922,9 +1426,7 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             decision_reason = (
                 "Candidate materialized, but the configured pipeline spec is read-only."
             )
-        elif gate_passed and (
-            proposal["safe_auto_promote"] or approval_status == APPROVAL_STATUS_APPROVED
-        ):
+        elif gate_passed and (auto_promote_eligible or approval_status == APPROVAL_STATUS_APPROVED):
             promote_candidate_spec(
                 paths,
                 candidate_spec,
@@ -949,7 +1451,12 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
             decision_reason = "Proposal approved but not yet eligible for automatic promotion."
         elif gate_passed:
             proposal["status"] = PROPOSAL_STATUS_CANDIDATE_MATERIALIZED
-            decision_reason = "Candidate materialized but policy does not allow promotion."
+            if proposal.get("safe_auto_promote") and auto_promote_threshold is not None:
+                decision_reason = (
+                    "Candidate materialized but confidence is below the auto-promotion threshold."
+                )
+            else:
+                decision_reason = "Candidate materialized but policy does not allow promotion."
         else:
             proposal["status"] = PROPOSAL_STATUS_VALIDATION_FAILED
             update_autonomy_metrics(
@@ -957,6 +1464,15 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
                 str(proposal["proposal_family"]),
                 unresolved_failure=True,
             )
+
+        if history_entry is not None:
+            history_entry["last_proposal_id"] = proposal_id
+            history_entry["last_decision"] = decision
+            if decision == DECISION_REJECT and is_in_rejection_cooloff(paths, proposal_id):
+                cooloff_record = get_rejection_cooloff_record(paths, proposal_id)
+                history_entry["rejection_cooloff_until_utc"] = cooloff_record.get(
+                    "cooloff_started_at_utc"
+                )
 
         proposal["approval_context"] = get_proposal_approval_record(paths, proposal_id)
         persist_proposal_record(paths, proposal)
@@ -976,6 +1492,8 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
                 "post_promotion_monitoring_required": decision == DECISION_PROMOTE,
             },
         )
+
+    _persist_promotion_history(paths, promotion_history)
 
     # All proposals (evaluated + deferred) for the report
     all_proposals = proposals_to_evaluate + deferred_proposals_list
@@ -1004,7 +1522,9 @@ def plan_pipeline_spec(paths: PipelinePaths) -> dict[str, Any]:
         "applied_proposal_types": applied_proposal_types,
         "autonomy_policy_path": str(paths.autonomy_policy),
         "autonomy_metrics_path": str(paths.autonomy_metrics),
+        "schema_promotion_history_path": str(paths.schema_promotion_history),
         "llm_advice": llm_advice,
+        "promotion_history": promotion_history,
         "summary": {
             "proposal_count": len(all_proposals),
             "context_count": len(detected_contexts),

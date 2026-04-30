@@ -49,6 +49,12 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
     "quality_drift_null_rate_threshold_pp": 10.0,
     "quality_drift_record_count_drop_threshold_pct": 20.0,
     "quality_drift_distribution_shift_threshold_pp": 15.0,
+    "promotion_confidence_weights": {
+        "stability": 0.4,
+        "type_consistency": 0.2,
+        "cardinality_fit": 0.2,
+        "privacy_clean": 0.2,
+    },
     "mutation_families": {
         "schema_update": {
             "default_impact_class": IMPACT_HIGH,
@@ -95,6 +101,62 @@ DEFAULT_AUTONOMY_POLICY: dict[str, Any] = {
             "requires_backward_compatibility": False,
             "requires_privacy_scan": False,
             "agent_auto_approve_if_confidence_ge": 0.85,
+        },
+        "schema_promotion_silver": {
+            "default_impact_class": IMPACT_LOW,
+            "auto_promote": True,
+            "requires_approval": False,
+            "requires_backward_compatibility": True,
+            "requires_privacy_scan": True,
+            "agent_auto_approve_if_confidence_ge": 0.85,
+        },
+        "schema_promotion_silver_rule": {
+            "default_impact_class": IMPACT_MEDIUM,
+            "auto_promote": False,
+            "requires_approval": True,
+            "requires_backward_compatibility": True,
+            "requires_privacy_scan": False,
+            "agent_auto_approve_if_confidence_ge": 0.90,
+        },
+        "schema_promotion_bronze_optional": {
+            "default_impact_class": IMPACT_LOW,
+            "auto_promote": True,
+            "requires_approval": False,
+            "requires_backward_compatibility": True,
+            "requires_privacy_scan": True,
+            "agent_auto_approve_if_confidence_ge": 0.85,
+        },
+        "schema_promotion_gold_optional": {
+            "default_impact_class": IMPACT_MEDIUM,
+            "auto_promote": False,
+            "requires_approval": True,
+            "requires_backward_compatibility": True,
+            "requires_privacy_scan": True,
+            "agent_auto_approve_if_confidence_ge": 0.90,
+        },
+        "schema_promotion_gold_passthrough": {
+            "default_impact_class": IMPACT_MEDIUM,
+            "auto_promote": False,
+            "requires_approval": True,
+            "requires_backward_compatibility": True,
+            "requires_privacy_scan": True,
+            "agent_auto_approve_if_confidence_ge": 0.90,
+        },
+        "schema_promotion_gold_macro_dimension": {
+            "default_impact_class": IMPACT_HIGH,
+            "auto_promote": False,
+            "requires_approval": True,
+            "requires_backward_compatibility": True,
+            "requires_privacy_scan": True,
+            "agent_auto_approve_if_confidence_ge": None,
+        },
+        "schema_contract_version_bump": {
+            "default_impact_class": IMPACT_LOW,
+            "auto_promote": True,
+            "requires_approval": False,
+            "requires_backward_compatibility": True,
+            "requires_privacy_scan": False,
+            "agent_auto_approve_if_confidence_ge": None,
         },
     },
 }
@@ -330,11 +392,100 @@ def build_candidate_actions(proposal: dict[str, Any]) -> list[dict[str, Any]]:
                 "validation_scope": ["spec_validation"],
             }
         ]
+    if proposal_type in {
+        "bronze_optional_columns_addition",
+        "silver_preserve_extra_columns_addition",
+        "silver_extra_aggregation_rule_addition",
+        "gold_optional_columns_addition",
+        "gold_passthrough_columns_addition",
+        "gold_aggregation_rule_addition",
+        "gold_macro_dimension_addition",
+        "schema_contract_version_bump",
+    }:
+        actions: list[dict[str, Any]] = []
+        changes = [proposal.get("proposed_change", {})] + list(
+            proposal.get("proposed_change", {}).get("companion_actions", [])
+        )
+        for index, change in enumerate(changes, start=1):
+            if not isinstance(change, dict) or not change:
+                continue
+            actions.append(
+                {
+                    "action_id": f"action_{index:02d}",
+                    "action_kind": "spec_patch",
+                    "target_path": "config/pipeline_spec.json",
+                    "target_selector": change.get("target_path"),
+                    "operation": change.get("operation"),
+                    "payload": {
+                        "items": list(change.get("items", [])),
+                        "keys": dict(change.get("keys", {})),
+                        "value": change.get("value"),
+                    },
+                    "reversible": True,
+                    "validation_scope": ["spec_validation", "candidate_diff"],
+                }
+            )
+        return actions
     return []
 
 
 def _sorted_unique(existing: list[Any], extra: list[Any]) -> list[Any]:
     return sorted({*existing, *extra})
+
+
+def _dict_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_keys = set(before)
+    after_keys = set(after)
+    return {
+        "added_keys": sorted(after_keys - before_keys),
+        "removed_keys": sorted(before_keys - after_keys),
+        "changed_keys": {
+            key: {"before": before.get(key), "after": after.get(key)}
+            for key in sorted(before_keys & after_keys)
+            if before.get(key) != after.get(key)
+        },
+    }
+
+
+def _resolve_path_container(spec: dict[str, Any], dotted_path: str) -> tuple[dict[str, Any], str]:
+    segments = dotted_path.split(".")
+    container: dict[str, Any] = spec
+    for segment in segments[:-1]:
+        next_value = container.setdefault(segment, {})
+        if not isinstance(next_value, dict):
+            raise ValueError(f"Spec path {dotted_path} is not addressable")
+        container = next_value
+    return container, segments[-1]
+
+
+def _apply_structural_change(spec: dict[str, Any], change: dict[str, Any]) -> bool:
+    target_path = str(change.get("target_path", "")).strip()
+    operation = str(change.get("operation", "")).strip()
+    if not target_path or not operation:
+        return False
+    container, key = _resolve_path_container(spec, target_path)
+    if operation == "add_items":
+        current = list(container.get(key, []))
+        updated = _sorted_unique(current, list(change.get("items", [])))
+        if updated == current:
+            return False
+        container[key] = updated
+        return True
+    if operation == "set_keys":
+        current_map = dict(container.get(key, {}))
+        updated_map = dict(current_map)
+        updated_map.update(dict(change.get("keys", {})))
+        if updated_map == current_map:
+            return False
+        container[key] = updated_map
+        return True
+    if operation == "set_value":
+        value = change.get("value")
+        if container.get(key) == value:
+            return False
+        container[key] = value
+        return True
+    return False
 
 
 def apply_proposal_to_spec(
@@ -393,6 +544,21 @@ def apply_proposal_to_spec(
             }
         )
         changed = True
+    elif proposal_type in {
+        "bronze_optional_columns_addition",
+        "silver_preserve_extra_columns_addition",
+        "silver_extra_aggregation_rule_addition",
+        "gold_optional_columns_addition",
+        "gold_passthrough_columns_addition",
+        "gold_aggregation_rule_addition",
+        "gold_macro_dimension_addition",
+        "schema_contract_version_bump",
+    }:
+        main_change = proposal.get("proposed_change", {})
+        if isinstance(main_change, dict):
+            changed = _apply_structural_change(updated, main_change) or changed
+            for companion in list(main_change.get("companion_actions", [])):
+                changed = _apply_structural_change(updated, companion) or changed
 
     return updated, changed
 
@@ -414,18 +580,50 @@ def build_spec_diff(
             list(baseline_spec["bronze"]["required_columns"]),
             list(candidate_spec["bronze"]["required_columns"]),
         ),
+        "bronze.optional_columns": _list_diff(
+            list(baseline_spec["bronze"].get("optional_columns", [])),
+            list(candidate_spec["bronze"].get("optional_columns", [])),
+        ),
         "silver.metadata_fields": _list_diff(
             list(baseline_spec["silver"].get("metadata_fields", [])),
             list(candidate_spec["silver"].get("metadata_fields", [])),
+        ),
+        "silver.preserve_extra_columns": _list_diff(
+            list(baseline_spec["silver"].get("preserve_extra_columns", [])),
+            list(candidate_spec["silver"].get("preserve_extra_columns", [])),
+        ),
+        "silver.extra_aggregation_rules": _dict_diff(
+            dict(baseline_spec["silver"].get("extra_aggregation_rules", {})),
+            dict(candidate_spec["silver"].get("extra_aggregation_rules", {})),
         ),
         "gold.required_columns": _list_diff(
             list(baseline_spec["gold"]["required_columns"]),
             list(candidate_spec["gold"]["required_columns"]),
         ),
+        "gold.optional_columns": _list_diff(
+            list(baseline_spec["gold"].get("optional_columns", [])),
+            list(candidate_spec["gold"].get("optional_columns", [])),
+        ),
+        "gold.passthrough_columns": _list_diff(
+            list(baseline_spec["gold"].get("passthrough_columns", [])),
+            list(candidate_spec["gold"].get("passthrough_columns", [])),
+        ),
+        "gold.aggregation_rules": _dict_diff(
+            dict(baseline_spec["gold"].get("aggregation_rules", {})),
+            dict(candidate_spec["gold"].get("aggregation_rules", {})),
+        ),
         "gold.valid_intent_stages": _list_diff(
             list(baseline_spec["gold"]["valid_intent_stages"]),
             list(candidate_spec["gold"]["valid_intent_stages"]),
         ),
+        "gold_macro.categorical_dimensions": _list_diff(
+            list(baseline_spec.get("gold_macro", {}).get("categorical_dimensions", [])),
+            list(candidate_spec.get("gold_macro", {}).get("categorical_dimensions", [])),
+        ),
+        "schema_contract_version": {
+            "before": baseline_spec.get("schema_contract_version"),
+            "after": candidate_spec.get("schema_contract_version"),
+        },
     }
     return {
         "schema_diff": schema_diff,
@@ -482,12 +680,23 @@ def _run_targeted_tests_gate(
     # REQ-101: only run when candidate touches required_columns or validation_rules
     schema_diff = diff.get("schema_diff", {})
     required_col_changed = any(
-        schema_diff.get(k, {}).get("added") or schema_diff.get(k, {}).get("removed")
+        schema_diff.get(k, {}).get("added")
+        or schema_diff.get(k, {}).get("removed")
+        or schema_diff.get(k, {}).get("added_keys")
+        or schema_diff.get(k, {}).get("removed_keys")
+        or schema_diff.get(k, {}).get("changed_keys")
         for k in (
             "bronze.required_columns",
+            "bronze.optional_columns",
             "silver.metadata_fields",
+            "silver.preserve_extra_columns",
+            "silver.extra_aggregation_rules",
             "gold.required_columns",
+            "gold.optional_columns",
+            "gold.passthrough_columns",
+            "gold.aggregation_rules",
             "gold.valid_intent_stages",
+            "gold_macro.categorical_dimensions",
         )
     )
     validation_rules_changed = baseline_spec.get("quality", {}).get(
