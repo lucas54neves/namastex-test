@@ -1,276 +1,190 @@
-# Pipeline Medalhão com Agente Autônomo Governado por Impacto
+# Entrega Final: Pipeline Medalhao com Camada Agentica
 
-Entrega final do teste técnico de Data & AI Engineering descrito em [docs/technical-test-data-ai-engineering.md](/home/lucas/projects/lucas54neves/namastex-test/docs/technical-test-data-ai-engineering.md). O projeto implementa um pipeline em Python para transformar conversas transacionais de WhatsApp em uma arquitetura Bronze -> Silver -> Gold, com atualização automática da camada analítica quando a fonte cresce e um agente governado por impacto para diagnóstico, proposta estruturada, candidate materialization, promoção segura, aprovação explícita e fallback.
+Este repositorio implementa a entrega final do teste descrito em [docs/technical-test-data-ai-engineering.md](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/docs/technical-test-data-ai-engineering.md). A solucao foi desenhada para atender o ponto central do enunciado: nao apenas gerar analises sobre conversas de WhatsApp, mas construir uma infraestrutura persistente em Python que ingere dados transacionais, publica camadas Bronze -> Silver -> Gold e opera com uma camada agentica responsavel por monitorar, planejar remediacoes, propor evolucoes e manter a Gold atualizada conforme a fonte cresce.
 
-## Objetivo da entrega
+O projeto separa claramente a transformacao de dados da governanca operacional. O pipeline produz artefatos analiticos reprocessaveis e a camada agentica observa o ciclo, registra diagnosticos, materializa candidatos de mudanca, respeita politicas de impacto e preserva o ultimo estado valido quando uma promocao nao e segura.
 
-O enunciado pede mais do que uma análise pontual: pede uma infraestrutura persistente que permaneça "viva", gerencie o pipeline, monitore falhas e mantenha a camada Gold atualizada. A solução entregue atende esse objetivo com os seguintes blocos:
+## O que esta sendo entregue
 
-- Pipeline em Python puro, organizado em camadas claras.
-- Bronze como réplica controlada da fonte original.
-- Silver como camada de limpeza, normalização, deduplicação, mascaramento e organização por lead.
-- Gold como camada analítica para segmentação, personas, audiência, sinais comerciais e sentimento.
-- Agente governado por impacto para classificar propostas em `low`/`medium`/`high`, materializar candidatos isolados, promover mudanças seguras, solicitar aprovação para mutações estruturais e preservar o último estado íntegro.
-- Execução pontual e execução contínua com polling para reprocessar automaticamente quando a Bronze muda.
+O enunciado pede quatro capacidades principais:
 
-## Como a solução responde ao enunciado
+1. pipeline em Python puro
+2. arquitetura em 3 camadas
+3. pipeline vivo, com atualizacao automatica quando a fonte muda
+4. agente que cria e gerencia a operacao, incluindo deteccao de falhas e acoes corretivas ou propostas governadas
 
-| Requisito do teste | Como foi atendido |
+Esta entrega responde a isso com os seguintes blocos:
+
+- `Bronze`: replica controlada da fonte original `docs/conversations_bronze.parquet`
+- `Silver`: limpeza, normalizacao, deduplicacao, mascaramento e organizacao por lead
+- `Gold`: visao analitica por lead e visao macro agregada
+- `Camada agentica`: monitoramento, planejamento, propostas, isolamento de candidatos, promocao segura, alertas e fallback
+- `Execucao continua`: daemon com polling e CDC por `message_id` para decidir quando reprocessar
+
+## Como a arquitetura funciona
+
+### Camadas de dados
+
+- `Bronze` preserva a estrutura da origem em `data/bronze/conversations.parquet`
+- `Silver` publica:
+  - `data/silver/silver_messages.parquet`
+  - `data/silver/silver_leads.parquet`
+  - `data/silver/silver_conversations_llm.parquet`
+- `Gold` publica:
+  - `data/gold/conversations_gold.parquet`
+  - `data/gold/conversations_gold_macro.parquet`
+
+### Camada agentica
+
+A camada agentica nao substitui o pipeline; ela governa o pipeline. Na pratica, ela observa os artefatos e os contratos de execucao, detecta desvios e decide qual acao e segura dentro da politica configurada em `config/agent_autonomy_policy.json`.
+
+Os principais componentes ficam em `src/pipeline/agent/`:
+
+- `planner.py`: detecta gaps, drift e oportunidades de evolucao
+- `autonomy.py`: aplica a politica de impacto e decide se algo pode ser promovido automaticamente
+- `approval.py`: controla o caminho de aprovacao humana para mudancas de alto impacto
+- `alerts.py` e `alert_channels.py`: registram e entregam alertas
+- `playbooks.py`: organiza respostas operacionais padrao
+- `gold_designer.py` e `llm_advisor.py`: apoiam propostas estruturadas de melhoria analitica
+
+## Ciclo operacional da camada agentica
+
+O funcionamento esperado pelo teste pode ser resumido neste fluxo:
+
+1. o runtime le a fonte Bronze e calcula o estado atual do dataset
+2. o operador decide se houve mudanca real usando CDC por `message_id`
+3. se houve mudanca, Bronze -> Silver -> Gold sao reprocessadas
+4. validacoes de qualidade, schema e publicacao segura sao executadas
+5. a camada agentica consolida diagnosticos, drift e sinais operacionais
+6. se houver oportunidade de remediacao ou evolucao, o agente gera uma proposal
+7. a proposal e materializada isoladamente em `runtime/candidates/<proposal_id>/`
+8. a politica classifica o impacto como `low`, `medium` ou `high`
+9. somente mudancas dentro do envelope seguro podem ser promovidas automaticamente
+10. mudancas estruturais ou de alto impacto ficam em espera para aprovacao explicita
+11. se a promocao falhar ou violar o contrato, o pipeline preserva o ultimo estado valido e registra fallback
+
+Esse desenho separa autonomia de permissao. O agente pode diagnosticar e preparar a mudanca sozinho, mas a promocao depende do nivel de risco. Isso e o ponto central da governanca desta entrega.
+
+## O que o agente faz de forma autonoma
+
+- detecta mudancas na fonte e evita reprocessamento inutil em ciclos ociosos
+- executa monitoramento e gera snapshots operacionais
+- identifica schema drift e classifica o tipo de desvio
+- gera proposals estruturadas para evolucao de contrato e camada analitica
+- materializa candidatos isolados para validacao segura
+- promove apenas mudancas permitidas pela politica de impacto
+- dispara alertas locais ou por webhook quando encontra estados criticos
+
+## O que continua governado
+
+- promocao de mudancas `high impact`
+- alteracoes estruturais de contrato que exigem aprovacao humana
+- exposicao de novas colunas quando a privacy gate bloquear promocao
+- qualquer situacao em que o candidato nao comprove seguranca suficiente para substituir o estado atual
+
+## Artefatos que demonstram a operacao agentica
+
+Os artefatos abaixo mostram o comportamento da camada agentica durante a execucao:
+
+- `reports/monitoring/latest_run_report.json`: resumo do ultimo ciclo
+- `reports/monitoring/latest_plan_report.json`: plano gerado pelo planner
+- `reports/monitoring/latest_schema_drift_report.json`: drift detectado e politica aplicada
+- `reports/monitoring/agent_autonomy_metrics.json`: metricas de autonomia e bloqueios
+- `reports/monitoring/latest_agent_report.json`: consolidado do agente
+- `reports/monitoring/latest_alert_report.json`: resultado da emissao de alertas
+- `reports/agent_decisions/proposals/`: historico de propostas geradas
+- `reports/agent_decisions/autonomy/latest_autonomy_decision.json`: ultima decisao de promocao ou retencao
+- `runtime/candidates/`: materializacao isolada de candidatos
+- `state/pipeline_state.json`: estado persistido do operador e CDC
+- `state/approval_state.json`: estado de aprovacoes humanas quando aplicavel
+
+## Como o projeto atende o enunciado
+
+| Requisito do teste | Resposta da entrega |
 | --- | --- |
-| Python puro | Implementação em `src/pipeline/` e `scripts/` |
-| Pipeline em 3 camadas | Publicação em `data/bronze/`, `data/silver/` e `data/gold/` |
-| Pipeline vivo | CDC linha a linha por `message_id` em `state/pipeline_state.json` e daemon em `scripts/run_pipeline_daemon.py` |
-| Agente que gerencia o pipeline | Diagnóstico, planejamento, alerta, fallback e playbooks em `src/pipeline/agent/` |
-| Limpeza, transformação e análise | Regras em `src/pipeline/transforms/` e validações em `src/pipeline/quality/` |
-| Mascaramento de dados sensíveis | Política de publicação segura e validações anti-vazamento em Silver e Gold |
+| Python puro | Implementacao em `src/pipeline/` e `scripts/` |
+| Pipeline em 3 camadas | Publicacao em `data/bronze/`, `data/silver/` e `data/gold/` |
+| Pipeline vivo | Daemon com polling e CDC linha a linha por `message_id` |
+| Agente autonomo | Planejamento, diagnostico, proposals, alertas e fallback |
+| Atualizacao automatica da Gold | Reprocessamento quando a Bronze muda |
+| Dados sensiveis mascarados | Regras de masking e publication policy nas camadas publicadas |
 
-## Arquitetura do projeto
-
-### Visão em camadas
-
-- `docs/conversations_bronze.parquet` é a fonte transacional de entrada usada como Bronze raw source.
-- `Bronze` replica a fonte para uma área controlada de processamento.
-- `Silver` gera três artefatos: uma visão principal por lead, uma visão auxiliar por mensagem e uma visão intermediária por conversa para enriquecimento semântico.
-- `Gold` consolida métricas e classificações analíticas por lead.
-- O agente observa o ciclo, valida contratos, registra relatórios, materializa candidatos em `runtime/candidates/`, aciona alertas e executa fallback quando necessário.
-
-### Diagrama mermaid
-
-```mermaid
-flowchart TD
-    A[docs/conversations_bronze.parquet] --> B[Bronze Ingestion]
-    B --> C[data/bronze/conversations.parquet]
-    C --> D[Silver Transform]
-    D --> E[data/silver/silver_messages.parquet]
-    D --> F[data/silver/silver_leads.parquet]
-    E --> G[Conversation Enrichment]
-    G --> H[data/silver/silver_conversations_llm.parquet]
-    F --> I[Gold Aggregation]
-    E --> I
-    H --> I
-    I --> J[data/gold/conversations_gold.parquet]
-    J --> J2[data/gold/conversations_gold_macro.parquet]
-
-    K[config/pipeline_spec.json] --> D
-    K --> G
-    K --> I
-
-    L[Agent Planner + Diagnostics] --> K
-    L --> M[reports/monitoring]
-    L --> N[reports/alerts]
-    L --> O[reports/agent_decisions]
-    L --> Q[runtime/candidates]
-    L --> P[state/pipeline_state.json]
-    I --> L
-    D --> L
-    G --> L
-```
-
-### Organização do código
+## Estrutura principal do repositorio
 
 ```text
 src/pipeline/
-  agent/          diagnostico, aprovacao, alertas, playbooks e planejamento
-  io/             leitura/escrita parquet e json
-  orchestration/  ciclo de execucao, jobs publicos e compilacao da spec
-  quality/        validacoes, politica de publicacao e quarentena
-  runtime/        ambiente, estado, spec, Langfuse e runtime opcional de LLM
-  transforms/     transformacoes Bronze, Silver, Gold e enrichment por conversa
+  agent/          autonomia, aprovacao, alertas, playbooks e planejamento
+  orchestration/  operador, jobs publicos, reports e compilacao de spec
+  transforms/     bronze, silver, enrichment, gold e gold macro
+  quality/        validacoes, publication policy, quarantine e schema drift
+  runtime/        ambiente, estado, runtime opcional de LLM e observabilidade
+  io/             leitura e escrita de parquet/json
+  infrastructure/ integracao opcional com Databricks
 
 scripts/
   run_pipeline.py
   run_pipeline_daemon.py
   monitor_pipeline.py
   plan_pipeline.py
-  bootstrap_langfuse_prompt.py
+  databricks_deploy_run.py
 ```
 
-## Fluxo de dados
+## Execucao local
 
-### Bronze
-
-- Lê `docs/conversations_bronze.parquet`.
-- Replica a fonte para `data/bronze/conversations.parquet`.
-- Valida colunas obrigatórias, canal suportado e consistência básica.
-- Trata `first_message_outbound` como sinal diagnóstico, não como bloqueio hard, para preservar fidelidade da fonte real.
-
-### Silver
-
-Publica três artefatos:
-
-- `data/silver/silver_leads.parquet`: visão principal por `lead_key`.
-- `data/silver/silver_messages.parquet`: rastreabilidade por mensagem com deduplicação e campos mascarados.
-- `data/silver/silver_conversations_llm.parquet`: enriquecimento semântico por `conversation_id`.
-
-Principais responsabilidades:
-
-- organização por lead
-- parsing de `metadata`
-- deduplicação por chave semântica estável
-- extração de sinais de contato, veículo, concorrente e sinistro
-- mascaramento de PII mantendo dimensão do valor original
-- publicação apenas de colunas seguras
-
-### Gold
-
-Publica dois artefatos:
-
-- `data/gold/conversations_gold.parquet`: visão analítica por `lead_key`.
-- `data/gold/conversations_gold_macro.parquet`: visão agregada de toda a base em distribuições e rankings por dimensão categórica.
-
-Entre os atributos calculados em `conversations_gold.parquet` estão:
-
-- volume e distribuição de mensagens
-- bucket de engajamento
-- persona e audiência
-- lead temperature
-- intent stage
-- price sensitivity
-- contact readiness
-- competitor pressure
-- commercial urgency
-- dominant email provider
-- closure outcome group
-- conversation sentiment
-
-O artefato `conversations_gold_macro.parquet` agrega toda a base pelas 11 dimensões categóricas (persona, audiência, temperatura, bucket, sentimento, closure, competitor pressure, price objection, urgência, intent stage e email provider) mais um bloco de métricas numéricas (`numeric_snapshot`). Cada linha representa um par `(dimension, dimension_value)` com contagens, proporções e ranking dentro da dimensão.
-
-### Schema evolution: detecção de drift e propagação controlada
-
-Quando a fonte de dados ganha colunas novas, o pipeline **não as descarta em silêncio**. A spec `spec/spec-architecture-schema-evolution-detection-and-propagation.md` define o contrato; a implementação está em `src/pipeline/quality/schema_drift.py`.
-
-Em cada execução o Bronze classifica toda coluna observada (e toda chave do JSON `metadata`) em uma de seis classes de drift:
-
-| Classe | Significado |
-| --- | --- |
-| `expected` | Coluna prevista no contrato e presente |
-| `optional_known` | Coluna opcional declarada e presente |
-| `unknown` | Coluna observada sem declaração no contrato |
-| `missing_required` | Coluna obrigatória ausente |
-| `type_mismatch` | Dtype declarado difere do observado |
-| `category_drift` | Valor fora do domínio declarado em `bronze.category_domains` |
-
-A política aplicada vem do contrato em `config/pipeline_spec.json`:
-
-| Política | Comportamento |
-| --- | --- |
-| `passthrough_silent` | Coluna é propagada sem alarme |
-| `passthrough_with_alert` | Coluna é propagada e o run levanta `schema_drift_alert` |
-| `quarantine` | Linhas afetadas são desviadas para `data/quarantine/` |
-| `block` | Run falha com saída não-zero |
-
-Defaults: `unknown` resolve para `passthrough_with_alert`, `missing_required` para `block`, `type_mismatch` e `category_drift` para `quarantine`. Overrides por coluna ficam em `bronze.column_policies`.
-
-Propagação por camada:
-
-- **Silver**: colunas listadas em `silver.preserve_extra_columns` mantêm o mesmo nome. As demais com política `passthrough_*` recebem prefixo `bronze_passthrough__` e são agregadas no nível de lead segundo `silver.extra_aggregation_rules` (default `first_non_null`).
-- **Gold**: só chegam colunas declaradas em `gold.required_columns`, `gold.optional_columns` ou `gold.passthrough_columns`. Qualquer coluna `bronze_passthrough__*` não promovida ao contrato Gold é descartada com motivo `not_in_gold_contract` registrado no drift report.
-- **Gold Macro**: dimensões e métricas vêm de `gold_macro.categorical_dimensions` e `gold_macro.numeric_metrics`. Dimensão referenciando coluna ausente em Gold gera placeholder `dimension_value = "sem_contrato"` em vez de quebrar. Toda linha do Gold Macro carrega a coluna `schema_contract_version`.
-
-Artefato emitido em cada execução: `reports/monitoring/latest_schema_drift_report.json`. O JSON traz o `schema_contract_version` ativo, sumário por classe, política mais alta aplicada, flag `schema_drift_alert` e a lista de eventos com sample mascarado, contagem de linhas e estado de propagação por camada. Esse relatório é insumo para a camada agêntica propor promoção de colunas novas ao contrato.
-
-Versionamento: `schema_contract_version` é um inteiro top-level no `pipeline_spec.json` e na `DEFAULT_PIPELINE_SPEC`. Mudanças que afetem detecção ou propagação devem incrementar esse valor.
-
-### Schema promotion ladder: drift report -> governed contract promotion
-
-O agente agora usa `reports/monitoring/latest_schema_drift_report.json` como entrada primária para avaliar promoção de colunas novas observadas na Bronze. O fluxo persiste histórico em `reports/monitoring/schema_promotion_history.json`, mede estabilidade por ciclos, checa consistência de tipo, ajusta um score de confiança e passa por privacy gate antes de propor qualquer mudança contratual.
-
-A escada de promoção implementada segue impacto crescente:
-
-- `Bronze optional`: colunas estáveis, mas ainda sem justificativa para subir além da ingestão.
-- `Silver preserve`: colunas densas e de alta cardinalidade que devem ser carregadas na Silver sem chegar à Gold.
-- `Gold optional` e `Gold passthrough`: colunas estáveis e seguras para exposição analítica, com regra de agregação quando necessário.
-- `Gold Macro dimension`: sempre encadeada após `Gold optional` e sempre dependente de aprovação humana.
-
-Colunas bloqueadas pela privacy gate não geram proposal. Nesse caso o histórico registra `closed_no_action` e a métrica `privacy_block_count_total` é incrementada em `reports/monitoring/agent_autonomy_metrics.json`.
-
-## Como rodar o projeto
-
-### Pré-requisitos
+### Pre-requisitos
 
 - Python 3.11
 - ambiente virtual local em `venv/`
-- dependências instaladas a partir de `requirements.txt`
+- dependencias instaladas a partir de `requirements.txt`
 
-### Setup local
-
-Crie o ambiente virtual local do repositório e instale todas as dependências Python a partir de `requirements.txt`:
+### Setup
 
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-venv/bin/python -m pre_commit install
-venv/bin/python -m pre_commit install --hook-type pre-push
 cp .env.example .env
 ```
 
-Os hooks de `git` deste repositório dependem do ambiente virtual local em `venv/`. Se esse diretório não existir, crie o ambiente e reinstale os hooks com os comandos acima antes de tentar `commit` ou `push`.
-
-Se quiser validar a instalação antes de executar o pipeline, rode os testes com o ambiente virtual local:
+Se quiser instalar os hooks locais:
 
 ```bash
-venv/bin/python -m pytest -q
+venv/bin/python -m pre_commit install
+venv/bin/python -m pre_commit install --hook-type pre-push
 ```
 
-O arquivo `.env.example` ja vem alinhado ao baseline de validacao local: sem provider externo e com `Langfuse` desabilitado por padrao.
+### Execucao baseline
 
-### Execução local baseline
-
-O caminho baseline do repositório não depende de rede nem de credenciais externas. Ele usa fallback determinístico para o enrichment semântico e mantém `Langfuse` desligado.
+O baseline da entrega nao depende de credenciais externas. O enrichment semantico pode operar em fallback deterministico.
 
 ```bash
 PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline.py --force
 ```
 
-Saídas principais após a execução:
+Principais saidas esperadas:
 
 - `data/bronze/conversations.parquet`
-- `data/silver/silver_leads.parquet`
 - `data/silver/silver_messages.parquet`
+- `data/silver/silver_leads.parquet`
 - `data/silver/silver_conversations_llm.parquet`
 - `data/gold/conversations_gold.parquet`
 - `data/gold/conversations_gold_macro.parquet`
-- `reports/monitoring/latest_run_report.json`
-- `reports/monitoring/latest_plan_report.json`
-- `reports/monitoring/agent_autonomy_metrics.json`
-- `reports/monitoring/latest_agent_report.json`
-- `reports/monitoring/latest_alert_report.json`
-- `reports/agent_decisions/proposals/`
-- `reports/agent_decisions/autonomy/latest_autonomy_decision.json`
-- `runtime/candidates/<proposal_id>/`
-- `state/pipeline_state.json`
+- artefatos de monitoramento em `reports/monitoring/`
 
-### Runtime com paths configuráveis
+### Execucao continua
 
-O pipeline continua assumindo o layout local do repositório por padrão, mas agora também aceita overrides por ambiente para separar código de storage persistente. Isso permite executar o mesmo `scripts/run_pipeline.py` em Databricks usando Workspace Files para código e Unity Catalog Volumes para entrada e saídas.
-
-Variáveis de path suportadas:
-
-- `PIPELINE_INPUT_FILE`: arquivo parquet bruto de entrada
-- `PIPELINE_DATA_DIR`: raiz persistente de `bronze/`, `silver/`, `gold/` e `quarantine/`
-- `PIPELINE_REPORTS_DIR`: raiz persistente de relatórios operacionais
-- `PIPELINE_STATE_DIR`: raiz persistente de estado do pipeline
-- `PIPELINE_RUNTIME_DIR`: raiz persistente de `runtime/candidates/`
-- `PIPELINE_CONFIG_DIR`: diretório opcional para `pipeline_spec.json` e `agent_autonomy_policy.json`
-
-Sem essas variáveis, o comportamento local atual permanece o mesmo.
-
-### Execução contínua
-
-Para manter o pipeline vivo com polling periódico:
+Para manter o pipeline vivo:
 
 ```bash
 PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline_daemon.py --force-first-run --poll-interval-seconds 300
 ```
 
-Comportamento:
+Nesse modo, o daemon:
 
-- o runtime detecta mudança da fonte por CDC linha a linha (`cdc_message_id`), comparando o conjunto de `message_id` com o último estado em `state/pipeline_state.json`
-- se nenhum `message_id` novo entrar e nenhum sumir, a execução é pulada e o ciclo conta como `idle_cycle`
-- se houver IDs novos, sumiço de IDs (encolhimento) ou `--force-first-run`, Bronze → Silver → Gold são reprocessadas
-- a cada ciclo o agente consolida o snapshot operacional em `state/pipeline_state.json` (digest CDC, novos IDs, total de linhas, último status, timestamps)
-- falhas no ciclo entram em watchdog com backoff exponencial limitado por `--max-backoff-seconds` (default `300s`); o ciclo seguinte só inicia depois de dormir o backoff
-- o gate de cadência do planner (`--planner-cadence-cycles`) força o planner a rodar a cada N ciclos ociosos consecutivos, mesmo sem mudança da fonte, garantindo detecção proativa de drift em fontes estáveis
+- compara o estado atual da Bronze com o ultimo snapshot persistido
+- pula ciclos ociosos quando nao houve mudanca real
+- reprocessa as camadas quando entram novos `message_id` ou quando ha encolhimento da fonte
+- aplica watchdog com backoff exponencial em caso de falha
+- executa o planner em cadencia controlada para detectar drift mesmo em janelas estaveis
 
 ### Monitoramento e planejamento
 
@@ -279,636 +193,82 @@ venv/bin/python scripts/monitor_pipeline.py
 venv/bin/python scripts/plan_pipeline.py
 ```
 
-- `monitor_pipeline.py` consolida snapshot operacional do pipeline.
-- `plan_pipeline.py` roda o planner de autonomia que detecta drift, classifica impacto, materializa candidatos e promove apenas mudanças permitidas por política.
+## Schema evolution e governanca
 
-### Autonomia governada por impacto
+Um dos papeis mais importantes da camada agentica e evitar que colunas novas aparecam e sumam sem controle. O pipeline registra schema drift em `reports/monitoring/latest_schema_drift_report.json` e classifica eventos como:
 
-- A política canônica fica em `config/agent_autonomy_policy.json`.
-- Propostas estruturadas são persistidas em `reports/agent_decisions/proposals/`.
-- Cada candidato é materializado de forma isolada em `runtime/candidates/<proposal_id>/`.
-- A última decisão de promoção ou retenção fica em `reports/agent_decisions/autonomy/latest_autonomy_decision.json`.
-- Métricas do ciclo autônomo ficam em `reports/monitoring/agent_autonomy_metrics.json`.
-- Mudanças `high impact` nunca são auto-promovidas; ficam em `awaiting_approval` até registro em `state/approval_state.json`.
+- `expected`
+- `optional_known`
+- `unknown`
+- `missing_required`
+- `type_mismatch`
+- `category_drift`
 
-### Canal de webhook para alertas
+Com base nisso, a politica pode:
 
-O agente opera de forma autônoma: detecta drift, classifica impacto, materializa candidatos, executa remediações e promove mudanças sem intervenção humana constante. Esse nível de autonomia exige um mecanismo de governança que garanta visibilidade ao responsável pelo projeto quando o agente encontra situações que estão fora do seu envelope seguro de atuação — falhas não remediáveis, validações críticas que não puderam ser resolvidas automaticamente ou estados que exigem decisão humana explícita. O canal de webhook cobre exatamente esse papel: transformar o pipeline em um sistema observável externamente, garantindo que nenhuma falha crítica passe despercebida mesmo quando ninguém está acompanhando os logs ou os relatórios locais.
+- propagar silenciosamente
+- propagar com alerta
+- colocar linhas em quarantine
+- bloquear a execucao
 
-O agente emite alertas quando detecta falhas de validação, status não remediáveis ou intervenção manual necessária. Por padrão esses alertas são persistidos localmente em `reports/alerts/`. Quando `PIPELINE_ALERT_WEBHOOK_URL` está configurado, o agente entrega o alerta via HTTP POST para qualquer endpoint que aceite JSON — Slack, Discord, Microsoft Teams, PagerDuty, n8n ou endpoint próprio.
+Quando a coluna nova se mostra estavel, o agente pode propor promocao de contrato em uma escada governada:
 
-**Ativação:** basta definir `PIPELINE_ALERT_WEBHOOK_URL`. Sem a variável, o comportamento local é preservado sem nenhuma alteração.
+1. `Bronze optional`
+2. `Silver preserve`
+3. `Gold optional` ou `Gold passthrough`
+4. `Gold Macro dimension`
+
+Promocoes barradas por risco ou privacidade nao entram automaticamente em producao; ficam registradas para decisao humana.
+
+## Enrichment com LLM
+
+O projeto suporta dois modos:
+
+- `baseline deterministico`: recomendado para validacao local e entrega sem dependencias externas
+- `llm-enriched`: usa provider externo para classificacoes semanticas adicionais
+
+Mesmo com `PIPELINE_ENABLE_LLM_ENRICHMENT=1`, o contrato preve fallback automatico para regras deterministicas quando o provider falha ou retorna payload invalido. Isso impede que a Gold fique indisponivel por dependencia externa.
+
+Variaveis mais relevantes:
+
+- `PIPELINE_ENABLE_LLM_ENRICHMENT`
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `PIPELINE_ENABLE_LANGFUSE`
+- `PIPELINE_LLM_OPENAI_MODEL`
+- `PIPELINE_LLM_ANTHROPIC_MODEL`
+
+## Alertas
+
+Por padrao, os alertas sao persistidos localmente em `reports/alerts/`. Opcionalmente, o agente pode entregar eventos por webhook definindo `PIPELINE_ALERT_WEBHOOK_URL`.
+
+Exemplo:
 
 ```bash
 PIPELINE_ALERT_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/xxx \
-PIPELINE_ALERT_WEBHOOK_TOKEN=meu-token \
+PIPELINE_ALERT_WEBHOOK_TOKEN=token \
 venv/bin/python scripts/run_pipeline.py --force
 ```
 
-**Payload entregue:**
+A entrega do webhook e non-blocking: falha no canal de alerta nao interrompe o pipeline.
 
-```json
-{
-  "source": "namastex-pipeline-agent",
-  "incident_id": "incident_20260428T143022_manual_intervention_required",
-  "severity": "critical",
-  "status": "manual_intervention_required",
-  "summary": "Run validation_failed with agent status manual_intervention_required.",
-  "pipeline_status": "failed",
-  "failed_checks": ["silver.masked_text_fields_not_leaking"],
-  "auto_remediation_applied": false,
-  "timestamp_utc": "2026-04-28T14:30:22+00:00",
-  "details_url": null
-}
-```
+## Databricks
 
-**Variáveis de configuração:**
-
-| Variável | Default | Descrição |
-| --- | --- | --- |
-| `PIPELINE_ALERT_WEBHOOK_URL` | vazio | URL HTTPS do endpoint receptor. Vazio = desabilitado |
-| `PIPELINE_ALERT_WEBHOOK_TOKEN` | vazio | Bearer token — enviado no header `Authorization`, nunca logado |
-| `PIPELINE_ALERT_WEBHOOK_TIMEOUT_SECONDS` | `5` | Timeout por tentativa em segundos (1–30) |
-| `PIPELINE_ALERT_WEBHOOK_MAX_RETRIES` | `2` | Máximo de tentativas antes de desistir (1–5) |
-| `PIPELINE_ALERT_MIN_SEVERITY` | `medium` | Severidade mínima para entrega: `low`, `medium`, `high`, `critical` |
-| `PIPELINE_ALERT_DETAILS_URL` | vazio | URL de detalhes incluída no payload como `details_url` |
-
-**Comportamento:**
-
-- A entrega é **non-blocking**: falha no webhook nunca interrompe o ciclo do pipeline.
-- Respostas `2xx` são consideradas entrega bem-sucedida; outros códigos disparam retry com intervalo fixo de 1s.
-- URLs `http://` são rejeitadas em produção; `http://localhost` é permitido em testes.
-- O resultado de cada entrega (`delivered` / `failed` / `skipped`) fica registrado no campo `delivery` de `reports/monitoring/latest_alert_report.json`.
-
-**Exemplos de integração:**
-
-- **Slack**: configure um Incoming Webhook no workspace e use a URL gerada diretamente em `PIPELINE_ALERT_WEBHOOK_URL`.
-- **PagerDuty**: configure um adaptador externo (n8n, Zapier ou função serverless) que receba o payload e chame a PagerDuty Events API v2.
-- **Microsoft Teams**: configure um Incoming Webhook no canal desejado e use a URL diretamente.
-
-### Execução com Docker Compose
-
-Há suporte opcional a `docker-compose.yml` para subir o pipeline em modo contínuo junto com uma stack local de Langfuse.
-
-```bash
-docker compose up --build
-```
-
-Esse modo é útil para observabilidade e integração com providers, mas não é necessário para o baseline de validação local.
-
-## LLM Enrichment — Baseline vs. Enriched Output
-
-O pipeline suporta dois modos de execução: baseline determinístico e modo enriquecido com LLM. No modo baseline (padrão recomendado para validação local), todos os campos interpretativos da Gold são calculados por regras determinísticas — sem chamadas externas e sem dependência de credenciais. No modo enriquecido, a camada Silver recebe anotações semânticas de um provider externo (OpenAI ou Anthropic), que se propagam para dimensões adicionais da Gold com maior precisão semântica.
-
-### Campos afetados pelo enrichment
-
-| Campo | Baseline | LLM-enriched |
-|---|---|---|
-| `conversation_sentiment_label` | Contagem de padrões de tom (`positive_tone_hits`, `negative_tone_hits`) | Classificação semântica pelo LLM |
-| `conversation_sentiment_support` | Threshold sobre hits positivos/negativos | Nível de confiança do LLM |
-| `intent_stage` | Match de palavras-chave sinalizadoras | Classificação de intenção pelo LLM |
-| `lead_temperature` | Derivado de contagem de mensagens e engagement | Influenciado via persona e segmento atribuídos pelo LLM |
-| `persona_profile` | Regras derivadas de sinais comportamentais | Perfil semântico atribuído pelo LLM |
-| `audience_segment` | Derivado de persona determinística | Segmento semântico atribuído pelo LLM |
-
-As colunas de proveniência `conversation_sentiment_source_family`, `intent_stage_source_family`, `persona_profile_source_family` e `audience_segment_source_family` registram a origem de cada valor: `"deterministic"` no baseline e `"llm_provider"` no modo enriquecido. No baseline, todos os campos acima possuem valor válido — nenhum campo fica ausente ou vazio.
-
-### Exemplo de registro Gold
-
-**Modo baseline (sem LLM):**
-
-```json
-{
-  "lead_key": "XXXXX9XXXXXXXXXXX",
-  "total_messages": 4,
-  "inbound_messages": 3,
-  "outbound_messages": 1,
-  "engagement_bucket": "curta",
-  "dominant_email_provider": "gmail",
-  "conversation_sentiment_label": "neutro",
-  "conversation_sentiment_support": "fraco",
-  "conversation_sentiment_source_family": "deterministic",
-  "intent_stage": "descoberta_inicial",
-  "intent_stage_source_family": "deterministic",
-  "lead_temperature": "frio",
-  "persona_profile": "lead_frio",
-  "persona_profile_source_family": "deterministic",
-  "audience_segment": "nutricao_basica",
-  "audience_segment_source_family": "deterministic"
-}
-```
-
-**Modo enriquecido (com LLM):**
-
-```json
-{
-  "lead_key": "XXXXX9XXXXXXXXXXX",
-  "total_messages": 4,
-  "inbound_messages": 3,
-  "outbound_messages": 1,
-  "engagement_bucket": "curta",
-  "dominant_email_provider": "gmail",
-  "conversation_sentiment_label": "negativo",               // enriched
-  "conversation_sentiment_support": "forte",                // enriched
-  "conversation_sentiment_source_family": "llm_provider",   // enriched
-  "intent_stage": "cotacao_ativa",                          // enriched
-  "intent_stage_source_family": "llm_provider",             // enriched
-  "lead_temperature": "morno",                              // enriched
-  "persona_profile": "cotador_comparador",                  // enriched
-  "persona_profile_source_family": "llm_provider",          // enriched
-  "audience_segment": "oferta_competitiva",                 // enriched
-  "audience_segment_source_family": "llm_provider"          // enriched
-}
-```
-
-### Contrato de fallback
-
-Quando `PIPELINE_ENABLE_LLM_ENRICHMENT=1` mas o provider (configurado via `OPENAI_API_KEY` ou `ANTHROPIC_API_KEY`) estiver indisponível ou retornar uma resposta inválida, o pipeline faz fallback automático para as regras determinísticas e a execução é concluída com sucesso. O output nesse caso é idêntico ao modo baseline — as colunas `*_source_family` ficam com o valor `"deterministic_fallback"` em vez de `"deterministic"`.
-
-Para habilitar o enrichment localmente, copie [`.env.example`](.env.example), defina `PIPELINE_ENABLE_LLM_ENRICHMENT=1` e configure `OPENAI_API_KEY` ou `ANTHROPIC_API_KEY` com uma credencial válida.
-
-## Variáveis de ambiente relevantes
-
-As variáveis estão exemplificadas em [`.env.example`](/home/lucas/projects/lucas54neves/namastex-test/.env.example). As mais importantes para a entrega são:
-
-- `PIPELINE_ENABLE_LLM_ENRICHMENT`: habilita ou desabilita enrichment por provider externo.
-- `PIPELINE_POLL_INTERVAL_SECONDS`: intervalo do daemon.
-- `PIPELINE_ENABLE_LANGFUSE`: habilita observabilidade do enrichment.
-- `PIPELINE_LLM_OPENAI_MODEL`: override opcional do modelo OpenAI.
-- `PIPELINE_LLM_ANTHROPIC_MODEL`: override opcional do modelo Anthropic.
-- `OPENAI_API_KEY`: credencial opcional para provider OpenAI.
-- `ANTHROPIC_API_KEY`: credencial opcional para provider Anthropic.
-
-### Variáveis para execução em Databricks
-
-O deploy automatizado via GitHub Actions usa duas classes de configuração.
-
-GitHub Secrets:
-
-| Nome | Obrigatória | Uso |
-| --- | --- | --- |
-| `DATABRICKS_HOST` | Sim | Host HTTPS do workspace Databricks |
-| `DATABRICKS_TOKEN` | Sim | Token usado pelo CLI/API do Databricks |
-| `OPENAI_API_KEY` | Não | Credencial para habilitar enrichment com OpenAI |
-| `ANTHROPIC_API_KEY` | Não | Credencial para habilitar enrichment com Anthropic |
-| `LANGFUSE_PUBLIC_KEY` | Não | Credencial de observabilidade Langfuse |
-| `LANGFUSE_SECRET_KEY` | Não | Credencial de observabilidade Langfuse |
-
-GitHub Variables:
-
-| Nome | Obrigatória | Uso | Default interno |
-| --- | --- | --- | --- |
-| `DATABRICKS_WORKSPACE_ROOT` | Não | Raiz de deploy em Workspace Files | `/Workspace/Shared/namastex-test` |
-| `DATABRICKS_JOB_NAME` | Não | Nome do job gerenciado | `namastex-test-pipeline` |
-| `DATABRICKS_JOB_COMPUTE_MODE` | Não | Modo de compute do job Databricks | `serverless` |
-| `DATABRICKS_CATALOG` | Não | Catalog Unity Catalog | `main` |
-| `DATABRICKS_SCHEMA` | Não | Schema Unity Catalog | `ops` |
-| `DATABRICKS_INPUT_VOLUME` | Não | Volume UC para input Bronze | `bronze_input` |
-| `DATABRICKS_OUTPUT_VOLUME` | Não | Volume UC para outputs persistidos | `pipeline_output` |
-| `DATABRICKS_INPUT_FILENAME` | Não | Nome do arquivo Bronze enviado ao volume | `conversations_bronze.parquet` |
-| `DATABRICKS_SERVERLESS_ENVIRONMENT_VERSION` | Não | Environment version usada em compute serverless | `2` |
-| `DATABRICKS_SPARK_VERSION` | Não | Runtime Spark do job | `15.4.x-scala2.12` |
-| `DATABRICKS_NODE_TYPE_ID` | Não | Tipo de nó do cluster do job | `Standard_DS3_v2` |
-| `DATABRICKS_NUM_WORKERS` | Não | Quantidade de workers do job | `1` |
-| `DATABRICKS_RUN_POLL_SECONDS` | Não | Intervalo de polling até o término da run | `10` |
-| `PIPELINE_ENABLE_LLM_ENRICHMENT` | Não | Liga enrichment com provider externo | nenhum |
-| `PIPELINE_LLM_OPENAI_MODEL` | Não | Modelo OpenAI usado no enrichment | nenhum |
-| `PIPELINE_LLM_ANTHROPIC_MODEL` | Não | Modelo Anthropic usado no enrichment | nenhum |
-| `PIPELINE_LLM_TIMEOUT_SECONDS` | Não | Timeout por chamada do runtime LLM | nenhum |
-| `PIPELINE_LLM_MAX_RETRIES` | Não | Máximo de tentativas do runtime LLM | nenhum |
-| `PIPELINE_ENABLE_LANGFUSE` | Não | Liga observabilidade Langfuse | nenhum |
-| `PIPELINE_LANGFUSE_ALLOW_LOCAL_PROMPT_FALLBACK` | Não | Permite fallback local do prompt | nenhum |
-| `PIPELINE_LANGFUSE_PROMPT_NAME` | Não | Nome do prompt no Langfuse | nenhum |
-| `PIPELINE_LANGFUSE_PROMPT_LABEL` | Não | Label do prompt no Langfuse | nenhum |
-| `PIPELINE_LANGFUSE_TRACE_NAME` | Não | Nome base dos traces | nenhum |
-| `LANGFUSE_BASE_URL` | Não | Base URL da instância Langfuse | nenhum |
-| `PIPELINE_ALERT_WEBHOOK_URL` | Não | URL HTTPS do endpoint receptor de alertas. Vazio = desabilitado | nenhum |
-| `PIPELINE_ALERT_WEBHOOK_TOKEN` | Não | Bearer token para autenticação no webhook | nenhum |
-| `PIPELINE_ALERT_WEBHOOK_TIMEOUT_SECONDS` | Não | Timeout por tentativa HTTP em segundos (clampado em 1–30) | `5` |
-| `PIPELINE_ALERT_WEBHOOK_MAX_RETRIES` | Não | Máximo de tentativas de entrega (clampado em 1–5) | `2` |
-| `PIPELINE_ALERT_MIN_SEVERITY` | Não | Severidade mínima para entrega (`low`, `medium`, `high`, `critical`) | `medium` |
-| `PIPELINE_ALERT_DETAILS_URL` | Não | URL de detalhes incluída no payload do webhook | nenhum |
-
-Defaults internos:
-
-- workspace root: `/Workspace/Shared/namastex-test`
-- job compute mode: `serverless`
-- catalog/schema: `main.ops`
-- input volume: `bronze_input`
-- output volume: `pipeline_output`
-- job name: `namastex-test-pipeline`
-
-## Deploy e execução no Databricks
-
-O repositório agora inclui o workflow [databricks-deploy-run.yml](/home/lucas/projects/lucas54neves/namastex-test/.github/workflows/databricks-deploy-run.yml), acionado em `push` para `main` e por `workflow_dispatch`.
-
-Para a entrega final, o caminho recomendado é o baseline sem provider externo e sem Langfuse. Nesse modo, basta configurar no GitHub `DATABRICKS_HOST` e `DATABRICKS_TOKEN`; as demais variáveis podem ficar nos defaults internos documentados acima.
-
-### Passo a passo mínimo
-
-1. Configure no repositório GitHub os secrets obrigatórios `DATABRICKS_HOST` e `DATABRICKS_TOKEN`.
-2. Se necessário, ajuste GitHub Variables como `DATABRICKS_WORKSPACE_ROOT`, `DATABRICKS_CATALOG`, `DATABRICKS_SCHEMA`, `DATABRICKS_INPUT_VOLUME` e `DATABRICKS_OUTPUT_VOLUME`. Se nada for definido, o workflow usa os defaults internos.
-3. Garanta que o principal associado ao token tenha permissão para criar ou atualizar schema, volumes e job no workspace alvo, além de escrever no volume de input.
-4. Dispare o workflow `Databricks Deploy And Run` por `workflow_dispatch` ou faça `push` para `main`.
-5. Acompanhe a execução no GitHub Actions. O workflow instala dependências, roda os testes `tests/test_jobs.py` e `tests/test_databricks.py`, executa análise de qualidade com SonarQube (quality gate bloqueia o deploy se não passar), sincroniza o repositório para `Workspace Files`, reconcilia recursos no Databricks, faz upload do Bronze e executa o job.
-6. Considere a entrega validada quando a run do GitHub Actions terminar com sucesso e os artefatos esperados estiverem presentes no volume de output do Databricks.
-
-### Validação de qualidade com SonarQube
-
-O workflow inclui uma etapa de análise estática com SonarQube para aumentar a confiança no código antes de qualquer deploy. O SonarQube é iniciado como um container Docker efêmero diretamente no runner do GitHub Actions — sem infraestrutura externa e sem secrets adicionais.
-
-**Como funciona:**
-
-1. O GitHub Actions sobe `sonarqube:community` como serviço na porta `9000` com health check automático.
-2. Os testes são executados com `pytest-cov` para gerar `coverage.xml`.
-3. O projeto e um token de análise são criados via API do SonarQube local.
-4. O scanner oficial `SonarSource/sonarqube-scan-action` realiza a análise usando `sonar-project.properties` como configuração.
-5. O quality gate é consultado via API: se o status não for `OK`, o workflow falha e o deploy é bloqueado.
-
-**Configuração do projeto (`sonar-project.properties`):**
-
-- fontes analisadas: `src/`
-- testes referenciados: `tests/`
-- cobertura importada de: `coverage.xml`
-- Python: `3.11`
-- exclusões: `venv/`, `__pycache__/`, `*.pyc`
-
-**Características da execução efêmera:**
-
-- Não exige servidor SonarQube externo nem secrets no repositório.
-- Cada execução parte do zero — sem histórico acumulado entre runs.
-- A instância é destruída ao fim do job; nenhum dado persiste além do artefato `coverage.xml` local.
-- O principal valor entregue é o **quality gate por run**: bloqueia o deploy se o código não passar nos critérios de qualidade definidos pelo perfil padrão do SonarQube.
-
-O deploy no Databricks só ocorre se o quality gate retornar `OK`.
-
-### O que o workflow faz
-
-- sincroniza o repositório para `Workspace Files`
-- reconcilia catalog, schema, input volume, output volume e job
-- envia `docs/conversations_bronze.parquet` para o volume de input via Databricks CLI usando `dbfs:/Volumes/...`
-- cria o job em `serverless` por padrão e referencia `requirements.txt` do workspace como dependência do ambiente do job
-- passa os paths críticos do pipeline por argumentos explícitos (`--input-file`, `--data-dir`, `--reports-dir`, `--state-dir`, `--runtime-dir`, `--config-dir`)
-- propaga para o job apenas variáveis explícitas de runtime de LLM e Langfuse quando estiverem definidas
-- dispara o job Databricks e falha o workflow se a run falhar
-
-O script operacional chamado pelo workflow é [scripts/databricks_deploy_run.py](/home/lucas/projects/lucas54neves/namastex-test/scripts/databricks_deploy_run.py), com a lógica de provisionamento e payload do job em [src/pipeline/infrastructure/databricks.py](/home/lucas/projects/lucas54neves/namastex-test/src/pipeline/infrastructure/databricks.py).
-
-### Como validar a execução
-
-Mapeamento de runtime no Databricks:
-
-- código: `/Workspace/Shared/namastex-test/...`
-- input bruto: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
-- outputs persistidos: `/Volumes/<catalog>/<schema>/<output_volume>/{data,reports,state,runtime}`
-
-Ao final da run, os seguintes artefatos devem existir no volume de output:
-
-- `data/bronze/conversations.parquet`
-- `data/silver/silver_leads.parquet`
-- `data/silver/silver_messages.parquet`
-- `data/silver/silver_conversations_llm.parquet`
-- `data/gold/conversations_gold.parquet`
-- `data/gold/conversations_gold_macro.parquet`
-- `reports/monitoring/latest_run_report.json`
-- `reports/monitoring/latest_plan_report.json`
-- `reports/monitoring/agent_autonomy_metrics.json`
-- `reports/monitoring/latest_agent_report.json`
-- `reports/monitoring/latest_alert_report.json`
-- `reports/agent_decisions/proposals/`
-- `reports/agent_decisions/autonomy/latest_autonomy_decision.json`
-- `state/pipeline_state.json`
-
-Mapeamento de upload no workflow:
-
-- upload do arquivo Bronze via CLI: `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
-- path consumido pelo job em runtime: `/Volumes/<catalog>/<schema>/<input_volume>/conversations_bronze.parquet`
-- dependencies do job serverless: instala o projeto a partir de `/Workspace/Shared/namastex-test` e depois aplica `-r /Workspace/Shared/namastex-test/requirements.txt`
-- bootstrap do script principal no Databricks: usa `PIPELINE_CONFIG_DIR` para resolver a raiz do projeto quando `__file__` não estiver disponível no runtime
-
-### Configurações opcionais
-
-Para um cenário com OpenAI habilitada no Databricks, configure no GitHub:
-
-- Secret: `OPENAI_API_KEY`
-- Variable: `PIPELINE_ENABLE_LLM_ENRICHMENT=1`
-- Variable: `PIPELINE_LLM_OPENAI_MODEL=gpt-5-mini`
-
-Para um cenário com Anthropic habilitada no Databricks, configure no GitHub:
-
-- Secret: `ANTHROPIC_API_KEY`
-- Variable: `PIPELINE_ENABLE_LLM_ENRICHMENT=1`
-- Variable: `PIPELINE_LLM_ANTHROPIC_MODEL=claude-sonnet`
-
-Se também quiser Langfuse:
-
-- Secrets: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`
-- Variables: `PIPELINE_ENABLE_LANGFUSE=1`, `LANGFUSE_BASE_URL`, `PIPELINE_LANGFUSE_PROMPT_NAME`, `PIPELINE_LANGFUSE_PROMPT_LABEL`
-
-### Pré-requisitos e diagnóstico
-
-Pré-requisitos operacionais no workspace:
-
-- Unity Catalog habilitado
-- permissão efetiva do principal usado no GitHub para criar ou atualizar o schema configurado, criar ou atualizar os volumes configurados e criar ou atualizar o job
-- permissão efetiva de escrita no volume de input configurado, porque o workflow faz upload via `dbfs:/Volumes/<catalog>/<schema>/<input_volume>/...`
-- se o catálogo não puder ser criado pelo principal, ele deve existir previamente e o valor de `DATABRICKS_CATALOG` deve apontar para esse catálogo
-- compatibilidade do workspace com o modo de compute configurado; em workspaces `serverless-only`, mantenha `DATABRICKS_JOB_COMPUTE_MODE=serverless`
-- compute compatível com os parâmetros do job quando o modo for `classic`
-
-Diagnóstico operacional:
-
-- falhas no upload para o volume preservam `stderr` e `stdout` do Databricks CLI no erro do workflow
-- o upload tenta novamente por um curto intervalo antes de falhar definitivamente, reduzindo erro transitório logo após a reconciliação do volume
-- falhas da run do job preservam `life_cycle_state`, `result_state`, `state_message` e, quando disponível, a saída de `jobs/runs/get-output` da task para acelerar a análise no GitHub Actions
-
-### Configuração do Langfuse
-
-O projeto continua com suporte a Langfuse self-hosted para prompt management e tracing do enrichment semântico, mas isso depende de uma instância realmente disponível e de credenciais válidas.
-
-Para usar Langfuse de verdade, o ambiente precisa ter:
-
-- `PIPELINE_ENABLE_LANGFUSE=1`
-- `LANGFUSE_BASE_URL` apontando para a instância ativa
-- `LANGFUSE_PUBLIC_KEY` válida
-- `LANGFUSE_SECRET_KEY` válida
-- `PIPELINE_LANGFUSE_PROMPT_NAME` e `PIPELINE_LANGFUSE_PROMPT_LABEL` compatíveis com o prompt bootstrapado
-
-No `docker-compose.yml`, a stack local inclui:
-
-- `langfuse-web`
-- `langfuse-worker`
-- `langfuse-bootstrap`
-
-O bootstrap do prompt é feito por `scripts/bootstrap_langfuse_prompt.py`.
-
-Importante:
-
-- Se `PIPELINE_ENABLE_LANGFUSE=1` estiver ativo com credenciais placeholder como `lf_pk_change_me` e `lf_sk_change_me`, o runtime não usa Langfuse de forma real.
-- Nesse caso, o pipeline faz fallback para prompt local e segue executando quando o modo fallback está permitido.
-- Para validação local baseline, o caminho mais previsível continua sendo `PIPELINE_ENABLE_LLM_ENRICHMENT=0` com `PIPELINE_ENABLE_LANGFUSE=0`, que ja é o default do `.env.example`.
-- Para validar Langfuse end-to-end localmente, suba primeiro a stack com `docker compose up --build` antes de rodar o pipeline com enrichment habilitado.
+O repositorio inclui suporte opcional para deploy e execucao no Databricks, incluindo automacao por `scripts/databricks_deploy_run.py` e testes dedicados. Isso atende ao diferencial sugerido no enunciado, mas nao e obrigatorio para validar o baseline local.
 
 ## Testes
 
-Conforme a regra do repositório, os testes devem ser executados com o ambiente virtual local:
+Use sempre o ambiente virtual local do repositorio:
 
 ```bash
 venv/bin/python -m pytest -q
 venv/bin/python -m pytest tests/test_jobs.py -q
-venv/bin/python -m pytest tests/test_requirements_adherence.py -q
 ```
 
-A suíte de aderência cobre explicitamente:
-
-- Silver principal com granularidade por lead
-- ausência de PII crua nos artefatos publicados
-- persistência do enrichment por conversa
-- atualização automática da Gold após crescimento da Bronze
-- persistência de estado operacional
-- geração de diagnóstico e alerta em falha simulada
-
-## Agente operacional
-
-O agente executa um ciclo explícito de autonomia governada por impacto. O uso de LLM é opcional e nunca substitui os gates determinísticos. Suas responsabilidades incluem compilar e aplicar a `pipeline_spec.json`, detectar drift, gerar e materializar propostas estruturadas, promover apenas mudanças autorizadas por política, reter mudanças `high impact` em aprovação, diagnosticar falhas, executar playbooks seguros, emitir relatórios e alertas, e restaurar o último estado íntegro em falhas inesperadas.
-
-A camada agêntica está fisicamente concentrada em dois pacotes: `src/pipeline/agent/` para as decisões (diagnóstico, planejamento, classificação de impacto, advisors LLM, alertas) e `src/pipeline/orchestration/` para o loop ReAct que orquestra essas decisões em torno dos estágios do pipeline. Toda observação do agente em produção é externalizada como artefato versionável em `reports/`, `runtime/candidates/` e `state/`.
-
-### Módulos da camada agêntica
-
-| Módulo | Caminho | Responsabilidade |
-| --- | --- | --- |
-| `agent.py` | `src/pipeline/agent/` | Diagnóstico de falhas de validação e remediação reativa |
-| `autonomy.py` | `src/pipeline/agent/` | Classificação de impacto, materialização de candidatos e promoção de spec |
-| `approval.py` | `src/pipeline/agent/` | Rastreamento do estado de aprovação humana ou de agente e cooloff de rejeição |
-| `planner.py` | `src/pipeline/agent/` | Detecção proativa de drift e orquestração do ciclo de propostas |
-| `execution_planner.py` | `src/pipeline/agent/` | Planejamento adaptativo de ordem de execução dos estágios |
-| `llm_advisor.py` | `src/pipeline/agent/` | Auto-revisão por LLM e priorização de propostas |
-| `gold_designer.py` | `src/pipeline/agent/` | Design de colunas analíticas da Gold via LLM |
-| `playbooks.py` | `src/pipeline/agent/` | Definição das ações de remediação disponíveis |
-| `alerts.py` | `src/pipeline/agent/` | Emissão, deduplicação e supressão de alertas de incidente |
-| `alert_channels.py` | `src/pipeline/agent/` | Entrega de alertas para canal externo via HTTP webhook |
-| `operator.py` | `src/pipeline/orchestration/` | Loop ReAct principal — orquestra todos os ciclos |
-| `operator_stages.py` | `src/pipeline/orchestration/` | Despacho de estágios Bronze/Silver/Gold/validação dentro de uma iteração ReAct |
-| `operator_reports.py` | `src/pipeline/orchestration/` | Construção dos relatórios `agent`/`alert`/`run` persistidos a cada ciclo |
-| `operator_artifacts.py` | `src/pipeline/orchestration/` | Resolução de paths e contratos dos artefatos publicados pelo operador |
-| `compiler.py` | `src/pipeline/orchestration/` | Compilação da `pipeline_spec.json` em plano executável consumido por todos os estágios |
-
-### Ciclos de execução
-
-O agente opera em dois ciclos distintos por execução, ambos disparados a partir de `run_cycle` em `src/pipeline/orchestration/operator.py`.
-
-**Ciclo proativo** (`plan_pipeline_spec` em `src/pipeline/agent/planner.py`): detecta drift antes da execução principal. Seis detectores varrem observações do runtime para gerar propostas: `schema_update`, `validation_enhancement`, `derived_column_addition`, `segmentation_adjustment`, `transformation_rule_change` e `data_quality_drift`. Antes da avaliação, o LLM Advisor reordena as propostas por prioridade e marca como diferidas as que devem ser ignoradas no ciclo atual. Para cada proposta não diferida, a spec candidata é materializada de forma isolada, submetida a gates e, se aprovada, promovida automaticamente ou retida para aprovação. O output é persistido em `reports/monitoring/latest_plan_report.json`.
-
-O ciclo proativo é gated: por padrão, só roda quando a Bronze muda (CDC `message_id` detecta IDs novos) ou quando o usuário força execução (`--force`). Para fontes estáveis, o daemon expõe `--planner-cadence-cycles N`: depois de N ciclos ociosos consecutivos, o planner é disparado mesmo sem mudança da fonte. O motivo do disparo (mudança, força ou cadência) fica registrado no log do operador (`planner_triggered_by_cadence` ou `planner_skipped`).
-
-**Ciclo reativo** (`run_cycle` / loop ReAct em `src/pipeline/orchestration/operator.py`): executa até 15 iterações (`_MAX_REACT_ITERATIONS`) para processar os estágios Bronze → Silver → Gold → validação. Em cada iteração, `_run_react_iteration` em `operator_stages.py` valida o estágio atual e, em caso de falha, chama `diagnose_validation_failures` seguido de `attempt_auto_remediation` (ambos em `agent.py`). Se a remediação resolve o problema, o loop continua; caso contrário, o estágio é reexecutado ou o loop é interrompido. Exceptions não tratadas acionam fallback para o último estado íntegro restaurado a partir de `state.last_successful_artifacts`.
-
-Antes de qualquer estágio rodar, `build_execution_plan` em `execution_planner.py` decide quais estágios executar com base na presença de artefatos, no resultado da última validação e na mudança da fonte. Esse plano fica em `reports/monitoring/latest_execution_plan.json` e é usado para evitar reprocessar camadas íntegras.
-
-### Classificação de impacto
-
-A política canônica fica em `config/agent_autonomy_policy.json` e define o comportamento por família de mutação.
-
-| Família | Impacto padrão | Auto-promovível | Exige aprovação |
-| --- | --- | --- | --- |
-| `schema_update` | `high` | não | sim |
-| `segmentation_adjustment` | `high` | não | sim |
-| `data_quality_drift` | `high` | não | sim |
-| `transformation_rule_change` | `medium` | não | sim |
-| `derived_column_addition` | `medium` | sim | não |
-| `validation_enhancement` | `low` | sim | não |
-
-### Ciclo de vida das propostas
-
-```
-Detecção (planner.py) → 6 detectores
-  └─> LLM Advisor (llm_advisor.py) → reordena por prioridade / marca diferidas
-      ├─ propostas diferidas → CLOSED_NO_ACTION
-      └─> Para cada proposta não diferida:
-          ├─> Cooloff check: se rejected_cooloff_active → CLOSED_NO_ACTION
-          └─> Fingerprint SHA-1 da proposta → proposal_id único
-              └─> apply_proposal_to_spec()
-                  └─> evaluate_candidate() → gate_results + diff
-                      ├─ gate: contract_validation
-                      ├─ gate: backward_compatibility
-                      ├─ gate: privacy_scan
-                      └─ gate: targeted_tests
-                  └─> persist_candidate_artifacts() → runtime/candidates/{proposal_id}/
-                      ├─> Se requires_approval:
-                      │     └─> agent_self_review_proposal() (LLM)
-                      │           ├─ confidence >= threshold → approve_proposal("agent") → PROMOVIDA
-                      │           └─ confidence < threshold  → AWAITING_APPROVAL (aguarda humano)
-                      │                 └─> Após N ciclos (stale_threshold):
-                      │                       ├─ threshold reduzido → nova auto-revisão (LLM)
-                      │                       │     ├─ confiança >= threshold reduzido → PROMOVIDA
-                      │                       │     └─ threshold no confidence_floor → STALE
-                      │                       └─ sem threshold configurado → STALE
-                      ├─> Se safe_auto_promote:
-                      │     └─> promote_candidate_spec() → pipeline_spec.json + spec_history.json → PROMOVIDA
-                      └─> Demais casos → CANDIDATE_MATERIALIZED (retida para revisão)
-```
-
-Propostas rejeitadas por gate ou por baixa confiança de LLM ficam com status `validation_failed` ou `awaiting_approval` e nunca alteram a spec de produção.
-
-### Artefatos de um candidato materializado
-
-Cada proposta que passa pelos gates produz um diretório isolado:
-
-```
-runtime/candidates/{proposal_id}/
-├── candidate_spec.json           # spec após a mutação proposta
-├── candidate_run_report.json     # status de validação e resultados dos gates
-├── candidate_agent_report.json   # impact_class e necessidade de aprovação
-├── candidate_diff.json           # diff de schema, privacidade e qualidade
-├── candidate_metrics.json        # contadores de pass/fail de validação
-└── candidate_test_report.json    # resultado dos testes direcionados
-```
-
-Remediações reativas geram um diretório análogo em `runtime/candidates/reactive_{incident_id}/`.
-
-### Pontos de decisão com LLM
-
-Todos os pontos de LLM têm fallback determinístico e nunca bloqueiam a execução.
-
-| Decisão | Módulo | LLM opcional? | Fallback |
-| --- | --- | --- | --- |
-| Ordenação de estágios | `execution_planner.py` | sim | ordem baseada em presença de artefatos |
-| Design de colunas Gold | `gold_designer.py` | sim | 6 colunas analíticas fixas |
-| Priorização de propostas | `planner.py` + `llm_advisor.py` | sim | ordem determinística dos detectores |
-| Auto-aprovação de proposta | `llm_advisor.py` | sim | retém proposta em `awaiting_approval` |
-| Diagnóstico de falha desconhecida | `agent.py` | sim | mapa estático `VALIDATION_CHECK_MAP` |
-
-### Circuit breakers e limites de segurança
-
-- **Loop ReAct**: máximo de 15 iterações (`_MAX_REACT_ITERATIONS`).
-- **Reexecução de estágio**: interrompida após 2 falhas consecutivas do mesmo estágio.
-- **Circuit breaker de LLM**: após 3 falhas consecutivas de chamada de LLM para diagnóstico, as chamadas são suspensas e o fallback determinístico é usado para os checks restantes.
-- **Gates de promoção**: todas as quatro validações (contrato, compatibilidade retroativa, privacidade, testes) precisam passar para qualquer promoção.
-- **Auto-aprovação por LLM**: requer `confidence >= threshold` configurado por família (padrão: 0.90 para `schema_update` e `segmentation_adjustment`; 0.85 para `transformation_rule_change` e `data_quality_drift`) e `severity != critical`.
-
-### Playbooks de remediação reativa
-
-| Playbook | Auto-aplicável | Risco |
-| --- | --- | --- |
-| `rebuild_silver_from_bronze` | sim | médio |
-| `rebuild_gold_from_silver` | sim | baixo |
-| `quarantine_invalid_records` | sim | baixo |
-| `fallback_to_last_successful_artifacts` | sim | médio |
-| `update_pipeline_spec` | não | alto |
-
-### Onde observar a camada agêntica em execução
-
-Cada decisão do agente é externalizada como artefato JSON inspecionável. A tabela abaixo mapeia cada comportamento ao módulo responsável e ao artefato onde ele pode ser auditado após uma execução do pipeline.
-
-| Comportamento do agente | Módulo responsável | Onde observar |
-| --- | --- | --- |
-| Avaliação de mudança da fonte (CDC `message_id`) | `runtime/state.py` | `state/pipeline_state.json` (`last_cdc_state`, `last_seen_at_utc`) e log `source_change_evaluated` |
-| Plano adaptativo de estágios | `agent/execution_planner.py` | `reports/monitoring/latest_execution_plan.json` (campo `stages`, `source`, `confidence`) |
-| Ciclo proativo / detecção de drift | `agent/planner.py` | `reports/monitoring/latest_plan_report.json` e propostas em `reports/agent_decisions/proposals/` |
-| Classificação de impacto e gate de promoção | `agent/autonomy.py` | `reports/agent_decisions/autonomy/latest_autonomy_decision.json` e `reports/monitoring/agent_autonomy_metrics.json` |
-| Materialização isolada de candidatos | `agent/autonomy.py` | `runtime/candidates/<proposal_id>/` (spec, diff, gates, métricas) |
-| Auto-revisão LLM de propostas | `agent/llm_advisor.py` | Campo `agent_self_review` dentro do registro da proposta em `reports/agent_decisions/proposals/<proposal_id>.json` |
-| Aprovação humana ou de agente / cooloff de rejeição | `agent/approval.py` | `state/approval_state.json` (chaves `approved_proposals`, `proposal_decisions`, `rejection_cooloff`) |
-| Histórico de promoções de spec | `agent/autonomy.py` + `runtime/spec.py` | `state/pipeline_spec_history.json` |
-| Diagnóstico reativo de falha de validação | `agent/agent.py` | Campo `diagnoses` em `reports/monitoring/latest_agent_report.json` e decisão de playbook em `reports/agent_decisions/latest_agent_decision.json` |
-| Execução de playbook de remediação | `agent/playbooks.py` + `agent/agent.py` | Campo `auto_remediation` em `reports/monitoring/latest_agent_report.json` e candidato reativo em `runtime/candidates/reactive_<incident_id>/` |
-| Fallback para último estado íntegro | `orchestration/operator.py` | Campo `fallback` em `reports/monitoring/latest_agent_report.json` e log `fallback_applied` |
-| Loop ReAct (iteração estágio-a-estágio) | `orchestration/operator_stages.py` | Logs `react_loop_action` em `state/pipeline_state.json` (`runs[*].agent_summary.react_loop_action`) |
-| Emissão / supressão / deduplicação de alertas | `agent/alerts.py` | `reports/monitoring/latest_alert_report.json` e arquivos persistidos em `reports/alerts/` |
-| Entrega externa de alerta | `agent/alert_channels.py` | Campo `delivery` em `reports/monitoring/latest_alert_report.json` |
-| Design dinâmico de colunas analíticas Gold | `agent/gold_designer.py` | `reports/monitoring/latest_gold_column_plan.json` |
-
-A consolidação de tudo isso em um único snapshot operacional pode ser obtida com:
-
-```bash
-venv/bin/python scripts/monitor_pipeline.py
-```
-
-O script lê os artefatos acima em `state/`, `reports/monitoring/` e `reports/agent_decisions/` e devolve um JSON com o estado consolidado do agente.
-
-### Principais artefatos operacionais
-
-- `reports/monitoring/latest_run_report.json`
-- `reports/monitoring/latest_agent_report.json`
-- `reports/monitoring/latest_plan_report.json`
-- `reports/monitoring/agent_autonomy_metrics.json`
-- `reports/monitoring/latest_execution_plan.json`
-- `reports/monitoring/latest_gold_column_plan.json`
-- `reports/monitoring/latest_alert_report.json`
-- `reports/alerts/`
-- `reports/agent_decisions/latest_agent_decision.json`
-- `reports/agent_decisions/proposals/`
-- `reports/agent_decisions/autonomy/latest_autonomy_decision.json`
-- `runtime/candidates/`
-- `state/pipeline_state.json`
-- `state/approval_state.json`
-- `state/pipeline_spec_history.json`
-
-## Decisões técnicas do projeto
-
-### 1. Agente governado por impacto em vez de autonomia irrestrita
-
-O enunciado exige um agente que crie e mantenha o pipeline. A escolha foi evoluir para autonomia governada por impacto: mudanças aditivas e reversíveis podem ser promovidas automaticamente; mudanças estruturais e semânticas ficam bloqueadas por política e aprovação humana. Isso eleva autonomia sem perder auditabilidade.
-
-### 2. Bronze como réplica fiel e não como camada de correção
-
-A Bronze foi tratada como réplica controlada da fonte original. Isso preserva reprodutibilidade, permite auditoria da entrada e evita esconder problemas reais logo na ingestão.
-
-### 3. Silver principal por lead e Silver auxiliar por mensagem
-
-O enunciado pede Silver organizada por usuário/lead, mas a rastreabilidade por mensagem continua importante para auditoria e agregações. Por isso a solução separa:
-
-- um artefato principal por `lead_key`
-- um artefato auxiliar por mensagem
-- um artefato intermediário por conversa para semântica
-
-Essa escolha equilibra requisito de negócio, rastreabilidade e clareza do contrato.
-
-### 4. Mascaramento com preservação de dimensão
-
-Dados sensíveis são mascarados mantendo a forma geral do valor, atendendo ao enunciado e preservando utilidade operacional. Além do mascaramento, a publicação remove colunas proibidas e as validações procuram vazamento real em campos textuais.
-
-### 5. Gold atualizada por CDC linha a linha (`message_id`)
-
-Para manter o pipeline "vivo" sem reprocessar inutilmente, o runtime aplica CDC por `message_id`: o estado guarda o conjunto de IDs já vistos e o digest deterministico desse conjunto, e o ciclo dispara apenas quando aparecem IDs novos ou quando há encolhimento (sumiço de IDs). A estratégia é mais precisa que o fingerprint por `mtime`/`size`, é estável a re-escritas idempotentes da fonte, distingue novidade real de simples toque no arquivo e suporta auditoria de quais linhas foram absorvidas em cada execução.
-
-### 6. Enrichment semântico opcional com fallback determinístico
-
-O enrichment por conversa suporta providers externos e observabilidade com Langfuse, mas o baseline do projeto não depende disso. Quando o provider está desabilitado, indisponível ou retorna saída inválida, o sistema faz fallback determinístico e mantém o contrato publicado.
-
-### 7. Contrato declarativo central em `config/pipeline_spec.json`
-
-A spec centraliza colunas obrigatórias, buckets válidos, domínios semânticos e regras estruturais do pipeline. Isso facilita validação, planejamento de drift e evolução controlada. O contrato carrega `schema_contract_version`, listas de colunas opcionais e passthrough por camada (`bronze`, `silver`, `gold`, `gold_macro`) e políticas por coluna, alimentando a detecção de drift descrita em [Schema evolution](#schema-evolution-detecção-de-drift-e-propagação-controlada).
-
-### 8. Fallback para último estado íntegro
-
-Em falhas inesperadas, o operador preserva o último conjunto válido de artefatos. Isso foi escolhido para privilegiar continuidade operacional e evitar publicar saídas parcialmente corrompidas.
-
-### 9. Separação entre qualidade, transformação e orquestração
-
-O código foi organizado para deixar explícita a diferença entre:
-
-- regras de transformação
-- política de publicação
-- validação de contrato
-- orquestração do ciclo
-- comportamento do agente
-
-Essa divisão melhora manutenção, testes e legibilidade da entrega.
-
-## Limitações conhecidas
-
-- A detecção de mudança por CDC `message_id` assume que `message_id` é estável e único na Bronze; encolhimento do conjunto força full run e é registrado em log como `cdc_shrink_detected`.
-- O modo com provider externo depende de credenciais, rede e disponibilidade do serviço.
-- O planner autônomo ainda restringe a promoção ao conjunto inicial de famílias suportadas e validadas deterministicamente.
-- O projeto foi otimizado para o dataset e o escopo do teste, não como plataforma multi-tenant completa.
-- A camada Gold produz visão por lead (`conversations_gold.parquet`) e visão macro agregada (`conversations_gold_macro.parquet`).
-- Alertas do agente são persistidos localmente e entregues via HTTP webhook quando `PIPELINE_ALERT_WEBHOOK_URL` está configurado (Slack, Discord, Teams, PagerDuty ou qualquer endpoint que aceite POST JSON).
-- O módulo `operator.py` foi parcialmente decomposto em `operator_stages.py`, `operator_reports.py` e `operator_artifacts.py`, mas `run_cycle` ainda excede o limite de tamanho (GUD-001) e exige uma decomposição adicional para o estágio de setup, conforme `spec-architecture-module-cyclomatic-decomposition.md`. O módulo `silver.py` segue na mesma situação.
-
-
-## Referências
-
-- [Enunciado técnico](/home/lucas/projects/lucas54neves/namastex-test/docs/technical-test-data-ai-engineering.md)
-- [Data dictionary](/home/lucas/projects/lucas54neves/namastex-test/docs/data-dictionary-data-ai-engineering.md)
+## Referencias
+
+- [Enunciado do teste](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/docs/technical-test-data-ai-engineering.md)
+- [Dicionario de dados](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/docs/data-dictionary-data-ai-engineering.md)
+- [Spec da autonomia governada por impacto](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/spec/spec-architecture-agent-autonomy-governed-by-impact.md)
+- [Spec de schema evolution](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/spec/spec-architecture-schema-evolution-detection-and-propagation.md)
+- [Spec da escada de promocao agentica](/home/lucas/projects/lucas54neves/namastex-test/namastex-test-1/spec/spec-architecture-agentic-schema-promotion-ladder.md)
