@@ -19,7 +19,7 @@ O enunciado pede mais do que uma análise pontual: pede uma infraestrutura persi
 | --- | --- |
 | Python puro | Implementação em `src/pipeline/` e `scripts/` |
 | Pipeline em 3 camadas | Publicação em `data/bronze/`, `data/silver/` e `data/gold/` |
-| Pipeline vivo | Fingerprint da fonte em `state/pipeline_state.json` e daemon em `scripts/run_pipeline_daemon.py` |
+| Pipeline vivo | CDC linha a linha por `message_id` em `state/pipeline_state.json` e daemon em `scripts/run_pipeline_daemon.py` |
 | Agente que gerencia o pipeline | Diagnóstico, planejamento, alerta, fallback e playbooks em `src/pipeline/agent/` |
 | Limpeza, transformação e análise | Regras em `src/pipeline/transforms/` e validações em `src/pipeline/quality/` |
 | Mascaramento de dados sensíveis | Política de publicação segura e validações anti-vazamento em Silver e Gold |
@@ -216,10 +216,12 @@ PIPELINE_ENABLE_LLM_ENRICHMENT=0 venv/bin/python scripts/run_pipeline_daemon.py 
 
 Comportamento:
 
-- o runtime calcula fingerprint da fonte a partir de path, tamanho e `mtime`
-- se nada mudou, a execução é pulada
-- se a fonte cresceu ou mudou, Bronze, Silver e Gold são reprocessadas
-- o estado operacional é persistido em `state/pipeline_state.json`
+- o runtime detecta mudança da fonte por CDC linha a linha (`cdc_message_id`), comparando o conjunto de `message_id` com o último estado em `state/pipeline_state.json`
+- se nenhum `message_id` novo entrar e nenhum sumir, a execução é pulada e o ciclo conta como `idle_cycle`
+- se houver IDs novos, sumiço de IDs (encolhimento) ou `--force-first-run`, Bronze → Silver → Gold são reprocessadas
+- a cada ciclo o agente consolida o snapshot operacional em `state/pipeline_state.json` (digest CDC, novos IDs, total de linhas, último status, timestamps)
+- falhas no ciclo entram em watchdog com backoff exponencial limitado por `--max-backoff-seconds` (default `300s`); o ciclo seguinte só inicia depois de dormir o backoff
+- o gate de cadência do planner (`--planner-cadence-cycles`) força o planner a rodar a cada N ciclos ociosos consecutivos, mesmo sem mudança da fonte, garantindo detecção proativa de drift em fontes estáveis
 
 ### Monitoramento e planejamento
 
@@ -621,13 +623,15 @@ A suíte de aderência cobre explicitamente:
 
 O agente executa um ciclo explícito de autonomia governada por impacto. O uso de LLM é opcional e nunca substitui os gates determinísticos. Suas responsabilidades incluem compilar e aplicar a `pipeline_spec.json`, detectar drift, gerar e materializar propostas estruturadas, promover apenas mudanças autorizadas por política, reter mudanças `high impact` em aprovação, diagnosticar falhas, executar playbooks seguros, emitir relatórios e alertas, e restaurar o último estado íntegro em falhas inesperadas.
 
+A camada agêntica está fisicamente concentrada em dois pacotes: `src/pipeline/agent/` para as decisões (diagnóstico, planejamento, classificação de impacto, advisors LLM, alertas) e `src/pipeline/orchestration/` para o loop ReAct que orquestra essas decisões em torno dos estágios do pipeline. Toda observação do agente em produção é externalizada como artefato versionável em `reports/`, `runtime/candidates/` e `state/`.
+
 ### Módulos da camada agêntica
 
 | Módulo | Caminho | Responsabilidade |
 | --- | --- | --- |
 | `agent.py` | `src/pipeline/agent/` | Diagnóstico de falhas de validação e remediação reativa |
 | `autonomy.py` | `src/pipeline/agent/` | Classificação de impacto, materialização de candidatos e promoção de spec |
-| `approval.py` | `src/pipeline/agent/` | Rastreamento do estado de aprovação humana ou de agente |
+| `approval.py` | `src/pipeline/agent/` | Rastreamento do estado de aprovação humana ou de agente e cooloff de rejeição |
 | `planner.py` | `src/pipeline/agent/` | Detecção proativa de drift e orquestração do ciclo de propostas |
 | `execution_planner.py` | `src/pipeline/agent/` | Planejamento adaptativo de ordem de execução dos estágios |
 | `llm_advisor.py` | `src/pipeline/agent/` | Auto-revisão por LLM e priorização de propostas |
@@ -636,14 +640,22 @@ O agente executa um ciclo explícito de autonomia governada por impacto. O uso d
 | `alerts.py` | `src/pipeline/agent/` | Emissão, deduplicação e supressão de alertas de incidente |
 | `alert_channels.py` | `src/pipeline/agent/` | Entrega de alertas para canal externo via HTTP webhook |
 | `operator.py` | `src/pipeline/orchestration/` | Loop ReAct principal — orquestra todos os ciclos |
+| `operator_stages.py` | `src/pipeline/orchestration/` | Despacho de estágios Bronze/Silver/Gold/validação dentro de uma iteração ReAct |
+| `operator_reports.py` | `src/pipeline/orchestration/` | Construção dos relatórios `agent`/`alert`/`run` persistidos a cada ciclo |
+| `operator_artifacts.py` | `src/pipeline/orchestration/` | Resolução de paths e contratos dos artefatos publicados pelo operador |
+| `compiler.py` | `src/pipeline/orchestration/` | Compilação da `pipeline_spec.json` em plano executável consumido por todos os estágios |
 
 ### Ciclos de execução
 
-O agente opera em dois ciclos distintos por execução.
+O agente opera em dois ciclos distintos por execução, ambos disparados a partir de `run_cycle` em `src/pipeline/orchestration/operator.py`.
 
-**Ciclo proativo** (`plan_pipeline_spec`): detecta drift antes da execução principal. Seis detectores varrem observações do runtime para gerar propostas: schema drift, validation enhancement, derived column addition, segmentation adjustment, transformation rule change e quality drift. Antes da avaliação, o LLM Advisor reordena as propostas por prioridade e marca como diferidas as que devem ser ignoradas no ciclo atual. Para cada proposta não diferida, a spec candidata é materializada de forma isolada, submetida a gates e, se aprovada, promovida automaticamente ou retida para aprovação. O output é `reports/monitoring/latest_plan_report.json`.
+**Ciclo proativo** (`plan_pipeline_spec` em `src/pipeline/agent/planner.py`): detecta drift antes da execução principal. Seis detectores varrem observações do runtime para gerar propostas: `schema_update`, `validation_enhancement`, `derived_column_addition`, `segmentation_adjustment`, `transformation_rule_change` e `data_quality_drift`. Antes da avaliação, o LLM Advisor reordena as propostas por prioridade e marca como diferidas as que devem ser ignoradas no ciclo atual. Para cada proposta não diferida, a spec candidata é materializada de forma isolada, submetida a gates e, se aprovada, promovida automaticamente ou retida para aprovação. O output é persistido em `reports/monitoring/latest_plan_report.json`.
 
-**Ciclo reativo** (`run_cycle` / loop ReAct): executa até 15 iterações para processar os estágios Bronze → Silver → Gold. Em cada iteração, valida o estágio atual e, em caso de falha, chama `diagnose_validation_failures` seguido de `attempt_auto_remediation`. Se a remediação resolve o problema, o loop continua; caso contrário, o estágio é reexecutado ou o loop é interrompido. Exceptions não tratadas acionam fallback para o último estado íntegro.
+O ciclo proativo é gated: por padrão, só roda quando a Bronze muda (CDC `message_id` detecta IDs novos) ou quando o usuário força execução (`--force`). Para fontes estáveis, o daemon expõe `--planner-cadence-cycles N`: depois de N ciclos ociosos consecutivos, o planner é disparado mesmo sem mudança da fonte. O motivo do disparo (mudança, força ou cadência) fica registrado no log do operador (`planner_triggered_by_cadence` ou `planner_skipped`).
+
+**Ciclo reativo** (`run_cycle` / loop ReAct em `src/pipeline/orchestration/operator.py`): executa até 15 iterações (`_MAX_REACT_ITERATIONS`) para processar os estágios Bronze → Silver → Gold → validação. Em cada iteração, `_run_react_iteration` em `operator_stages.py` valida o estágio atual e, em caso de falha, chama `diagnose_validation_failures` seguido de `attempt_auto_remediation` (ambos em `agent.py`). Se a remediação resolve o problema, o loop continua; caso contrário, o estágio é reexecutado ou o loop é interrompido. Exceptions não tratadas acionam fallback para o último estado íntegro restaurado a partir de `state.last_successful_artifacts`.
+
+Antes de qualquer estágio rodar, `build_execution_plan` em `execution_planner.py` decide quais estágios executar com base na presença de artefatos, no resultado da última validação e na mudança da fonte. Esse plano fica em `reports/monitoring/latest_execution_plan.json` e é usado para evitar reprocessar camadas íntegras.
 
 ### Classificação de impacto
 
@@ -736,6 +748,36 @@ Todos os pontos de LLM têm fallback determinístico e nunca bloqueiam a execuç
 | `fallback_to_last_successful_artifacts` | sim | médio |
 | `update_pipeline_spec` | não | alto |
 
+### Onde observar a camada agêntica em execução
+
+Cada decisão do agente é externalizada como artefato JSON inspecionável. A tabela abaixo mapeia cada comportamento ao módulo responsável e ao artefato onde ele pode ser auditado após uma execução do pipeline.
+
+| Comportamento do agente | Módulo responsável | Onde observar |
+| --- | --- | --- |
+| Avaliação de mudança da fonte (CDC `message_id`) | `runtime/state.py` | `state/pipeline_state.json` (`last_cdc_state`, `last_seen_at_utc`) e log `source_change_evaluated` |
+| Plano adaptativo de estágios | `agent/execution_planner.py` | `reports/monitoring/latest_execution_plan.json` (campo `stages`, `source`, `confidence`) |
+| Ciclo proativo / detecção de drift | `agent/planner.py` | `reports/monitoring/latest_plan_report.json` e propostas em `reports/agent_decisions/proposals/` |
+| Classificação de impacto e gate de promoção | `agent/autonomy.py` | `reports/agent_decisions/autonomy/latest_autonomy_decision.json` e `reports/monitoring/agent_autonomy_metrics.json` |
+| Materialização isolada de candidatos | `agent/autonomy.py` | `runtime/candidates/<proposal_id>/` (spec, diff, gates, métricas) |
+| Auto-revisão LLM de propostas | `agent/llm_advisor.py` | Campo `agent_self_review` dentro do registro da proposta em `reports/agent_decisions/proposals/<proposal_id>.json` |
+| Aprovação humana ou de agente / cooloff de rejeição | `agent/approval.py` | `state/approval_state.json` (chaves `approved_proposals`, `proposal_decisions`, `rejection_cooloff`) |
+| Histórico de promoções de spec | `agent/autonomy.py` + `runtime/spec.py` | `state/pipeline_spec_history.json` |
+| Diagnóstico reativo de falha de validação | `agent/agent.py` | Campo `diagnoses` em `reports/monitoring/latest_agent_report.json` e decisão de playbook em `reports/agent_decisions/latest_agent_decision.json` |
+| Execução de playbook de remediação | `agent/playbooks.py` + `agent/agent.py` | Campo `auto_remediation` em `reports/monitoring/latest_agent_report.json` e candidato reativo em `runtime/candidates/reactive_<incident_id>/` |
+| Fallback para último estado íntegro | `orchestration/operator.py` | Campo `fallback` em `reports/monitoring/latest_agent_report.json` e log `fallback_applied` |
+| Loop ReAct (iteração estágio-a-estágio) | `orchestration/operator_stages.py` | Logs `react_loop_action` em `state/pipeline_state.json` (`runs[*].agent_summary.react_loop_action`) |
+| Emissão / supressão / deduplicação de alertas | `agent/alerts.py` | `reports/monitoring/latest_alert_report.json` e arquivos persistidos em `reports/alerts/` |
+| Entrega externa de alerta | `agent/alert_channels.py` | Campo `delivery` em `reports/monitoring/latest_alert_report.json` |
+| Design dinâmico de colunas analíticas Gold | `agent/gold_designer.py` | `reports/monitoring/latest_gold_column_plan.json` |
+
+A consolidação de tudo isso em um único snapshot operacional pode ser obtida com:
+
+```bash
+venv/bin/python scripts/monitor_pipeline.py
+```
+
+O script lê os artefatos acima em `state/`, `reports/monitoring/` e `reports/agent_decisions/` e devolve um JSON com o estado consolidado do agente.
+
 ### Principais artefatos operacionais
 
 - `reports/monitoring/latest_run_report.json`
@@ -744,6 +786,7 @@ Todos os pontos de LLM têm fallback determinístico e nunca bloqueiam a execuç
 - `reports/monitoring/agent_autonomy_metrics.json`
 - `reports/monitoring/latest_execution_plan.json`
 - `reports/monitoring/latest_gold_column_plan.json`
+- `reports/monitoring/latest_alert_report.json`
 - `reports/alerts/`
 - `reports/agent_decisions/latest_agent_decision.json`
 - `reports/agent_decisions/proposals/`
@@ -777,9 +820,9 @@ Essa escolha equilibra requisito de negócio, rastreabilidade e clareza do contr
 
 Dados sensíveis são mascarados mantendo a forma geral do valor, atendendo ao enunciado e preservando utilidade operacional. Além do mascaramento, a publicação remove colunas proibidas e as validações procuram vazamento real em campos textuais.
 
-### 5. Gold atualizada por fingerprint da fonte
+### 5. Gold atualizada por CDC linha a linha (`message_id`)
 
-Para manter o pipeline "vivo" sem reprocessar inutilmente, o runtime compara fingerprint da Bronze raw source usando caminho, tamanho e tempo de modificação. Essa estratégia é simples, reprodutível e suficiente para o escopo do teste.
+Para manter o pipeline "vivo" sem reprocessar inutilmente, o runtime aplica CDC por `message_id`: o estado guarda o conjunto de IDs já vistos e o digest deterministico desse conjunto, e o ciclo dispara apenas quando aparecem IDs novos ou quando há encolhimento (sumiço de IDs). A estratégia é mais precisa que o fingerprint por `mtime`/`size`, é estável a re-escritas idempotentes da fonte, distingue novidade real de simples toque no arquivo e suporta auditoria de quais linhas foram absorvidas em cada execução.
 
 ### 6. Enrichment semântico opcional com fallback determinístico
 
@@ -807,13 +850,13 @@ Essa divisão melhora manutenção, testes e legibilidade da entrega.
 
 ## Limitações conhecidas
 
-- O fingerprint observa mudança do arquivo de entrada, não CDC linha a linha.
+- A detecção de mudança por CDC `message_id` assume que `message_id` é estável e único na Bronze; encolhimento do conjunto força full run e é registrado em log como `cdc_shrink_detected`.
 - O modo com provider externo depende de credenciais, rede e disponibilidade do serviço.
 - O planner autônomo ainda restringe a promoção ao conjunto inicial de famílias suportadas e validadas deterministicamente.
 - O projeto foi otimizado para o dataset e o escopo do teste, não como plataforma multi-tenant completa.
 - A camada Gold produz visão por lead (`conversations_gold.parquet`) e visão macro agregada (`conversations_gold_macro.parquet`).
 - Alertas do agente são persistidos localmente e entregues via HTTP webhook quando `PIPELINE_ALERT_WEBHOOK_URL` está configurado (Slack, Discord, Teams, PagerDuty ou qualquer endpoint que aceite POST JSON).
-- Módulos `silver.py` e `operator.py` possuem alta complexidade ciclomática; decomposição está especificada mas não implementada (`spec-architecture-module-cyclomatic-decomposition.md`).
+- O módulo `operator.py` foi parcialmente decomposto em `operator_stages.py`, `operator_reports.py` e `operator_artifacts.py`, mas `run_cycle` ainda excede o limite de tamanho (GUD-001) e exige uma decomposição adicional para o estágio de setup, conforme `spec-architecture-module-cyclomatic-decomposition.md`. O módulo `silver.py` segue na mesma situação.
 
 
 ## Referências
